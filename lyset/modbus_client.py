@@ -1,18 +1,17 @@
 """
 Modbus TCP client for the Huawei SUN2000 inverter.
 
-Runs in a background QThread and emits a snapshot dict on each successful poll.
-The inverter's built-in Modbus server typically listens on port 6607, slave ID 1
-(older firmware) or slave ID 0 (some newer units).  Port 502 is also common when
-accessed through an SDongle/SdongleA.
+Runs as a background daemon thread and calls registered callbacks on each
+successful poll.  All public write methods are thread-safe and enqueue their
+request for execution on the next poll gap.
 """
 
-import struct
+import queue
 import time
 import logging
-from typing import Optional
-
-from PySide6.QtCore import QThread, Signal
+import threading
+from dataclasses import dataclass
+from typing import Optional, Callable
 
 from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -22,8 +21,14 @@ from .register_map import REGISTERS, Register, INVERTER_STATES, BATTERY_STATUSES
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class _WriteRequest:
+    address: int
+    values: list
+    description: str = ''
+
+
 def _decode_register(raw_regs: list[int], reg: Register) -> Optional[float | str]:
-    """Convert a list of raw 16-bit register values into an engineering value."""
     dt = reg.data_type
     try:
         if dt == 'STR':
@@ -49,101 +54,134 @@ def _decode_register(raw_regs: list[int], reg: Register) -> Optional[float | str
     return None
 
 
-class ModbusWorker(QThread):
+class ModbusWorker(threading.Thread):
     """
-    Background thread that polls the inverter and emits fresh data.
+    Background daemon thread that polls the SUN2000 and fires callbacks.
 
-    Signals
-    -------
-    data_ready(dict)        – emitted after every successful poll
-    connection_changed(bool, str) – True/False + status message
-    error(str)              – non-fatal read error
+    Callbacks (all optional, called from the worker thread):
+        on_data(dict)               – fresh snapshot after every successful poll
+        on_connection(bool, str)    – True/False + status message
+        on_write_result(bool, str)  – write success/failure
+        on_error(str)               – non-fatal poll error
     """
-
-    data_ready = Signal(dict)
-    connection_changed = Signal(bool, str)
-    error = Signal(str)
 
     def __init__(
         self,
-        host: str = '192.168.1.100',
-        port: int = 6607,
+        host: str = '192.168.1.185',
+        port: int = 502,
         slave_id: int = 1,
         poll_interval: float = 5.0,
-        parent=None,
+        on_data: Optional[Callable] = None,
+        on_connection: Optional[Callable] = None,
+        on_write_result: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
     ):
-        super().__init__(parent)
+        super().__init__(daemon=True)
         self.host = host
         self.port = port
         self.slave_id = slave_id
         self.poll_interval = poll_interval
+        self._on_data = on_data or (lambda d: None)
+        self._on_connection = on_connection or (lambda ok, msg: None)
+        self._on_write_result = on_write_result or (lambda ok, msg: None)
+        self._on_error = on_error or (lambda msg: None)
         self._running = False
         self._client: Optional[ModbusTcpClient] = None
+        self._write_queue: queue.Queue = queue.Queue()
 
-    # ── public control ────────────────────────────────────────────────────────
+    # ── Public control ────────────────────────────────────────────────────────
 
     def stop(self):
         self._running = False
 
-    def update_settings(self, host: str, port: int, slave_id: int, poll_interval: float):
-        self.host = host
-        self.port = port
-        self.slave_id = slave_id
-        self.poll_interval = poll_interval
+    # ── Public write API (thread-safe) ────────────────────────────────────────
 
-    # ── internal helpers ──────────────────────────────────────────────────────
+    def write_u16(self, address: int, value: int, description: str = ''):
+        self._write_queue.put(_WriteRequest(address, [int(value)], description))
 
-    def _connect(self) -> bool:
+    def write_u32(self, address: int, value: int, description: str = ''):
+        v = int(value) & 0xFFFFFFFF
+        self._write_queue.put(_WriteRequest(address, [v >> 16, v & 0xFFFF], description))
+
+    def write_i32(self, address: int, value: int, description: str = ''):
+        if value < 0:
+            value += 0x100000000
+        self.write_u32(address, value, description)
+
+    def read_u16_now(self, address: int) -> Optional[int]:
+        """Synchronous single-register read — only call when connected."""
+        if not self._client:
+            return None
+        try:
+            r = self._client.read_holding_registers(address, count=1, device_id=self.slave_id)
+            return r.registers[0] if not r.isError() else None
+        except Exception:
+            return None
+
+    def read_u32_now(self, address: int) -> Optional[int]:
+        if not self._client:
+            return None
+        try:
+            r = self._client.read_holding_registers(address, count=2, device_id=self.slave_id)
+            if r.isError():
+                return None
+            return (r.registers[0] << 16) | r.registers[1]
+        except Exception:
+            return None
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _process_writes(self):
+        while not self._write_queue.empty():
+            req: _WriteRequest = self._write_queue.get_nowait()
+            try:
+                result = self._client.write_registers(
+                    req.address, req.values, device_id=self.slave_id
+                )
+                if result.isError():
+                    msg = f'{req.description}: Modbus error {result}'
+                    log.warning(msg)
+                    self._on_write_result(False, msg)
+                else:
+                    msg = f'{req.description}: OK'
+                    log.info(msg)
+                    self._on_write_result(True, msg)
+            except Exception as exc:
+                msg = f'{req.description}: {exc}'
+                log.error(msg)
+                self._on_write_result(False, msg)
+
+    def _open_tcp(self) -> bool:
+        """Open a fresh TCP connection. No callbacks — state management is in _run_loop."""
         if self._client:
             try:
                 self._client.close()
             except Exception:
                 pass
+            self._client = None
         try:
-            self._client = ModbusTcpClient(
-                host=self.host,
-                port=self.port,
-                timeout=5,
-                retries=1,
-            )
-            ok = self._client.connect()
-            if ok:
-                log.info('Connected to %s:%s slave=%s', self.host, self.port, self.slave_id)
-                self.connection_changed.emit(True, f'Connected to {self.host}:{self.port}')
-            else:
-                msg = (f'TCP connect failed — {self.host}:{self.port}. '
-                       f'Most likely Home Assistant has the only Modbus slot. '
-                       f'Disable the huawei_solar/Modbus integration in HA and retry.')
-                log.warning(msg)
-                self.connection_changed.emit(False, msg)
-            return ok
+            self._client = ModbusTcpClient(host=self.host, port=self.port, timeout=5, retries=0)
+            return self._client.connect()
         except Exception as exc:
-            msg = f'Connection error: {exc}'
-            log.error(msg)
-            self.connection_changed.emit(False, msg)
+            log.debug('TCP connect error: %s', exc)
             return False
 
     def _read_registers_batch(self, regs: list[Register]) -> dict:
-        """
-        Read a list of registers, batching contiguous blocks into single requests
-        to reduce round-trips (Modbus max read is 125 registers per request).
-        """
         if not regs:
             return {}
 
-        # Sort by address so we can batch contiguous ranges
         sorted_regs = sorted(regs, key=lambda r: r.address)
 
-        # Build batches: merge registers within a 10-register gap to reduce requests
         MAX_GAP = 10
-        MAX_BATCH = 100  # stay well under the 125-register limit
+        MAX_BATCH = 100
 
-        batches: list[tuple[int, int]] = []  # (start_addr, length)
+        batches: list[tuple[int, int]] = []
         batch_start = sorted_regs[0].address
         batch_end = batch_start + sorted_regs[0].count
 
         for reg in sorted_regs[1:]:
-            if reg.address - batch_end <= MAX_GAP and (reg.address + reg.count - batch_start) <= MAX_BATCH:
+            if (reg.address - batch_end <= MAX_GAP
+                    and (reg.address + reg.count - batch_start) <= MAX_BATCH):
                 batch_end = max(batch_end, reg.address + reg.count)
             else:
                 batches.append((batch_start, batch_end - batch_start))
@@ -151,31 +189,31 @@ class ModbusWorker(QThread):
                 batch_end = batch_start + reg.count
         batches.append((batch_start, batch_end - batch_start))
 
-        # Read each batch and collect raw register values
         raw: dict[int, int] = {}
         for start, length in batches:
             try:
                 result = self._client.read_holding_registers(
-                    address=start,
-                    count=length,
-                    device_id=self.slave_id,
+                    address=start, count=length, device_id=self.slave_id,
                 )
                 if result.isError():
                     log.warning('Modbus error reading %d+%d: %s', start, length, result)
                     continue
                 for i, val in enumerate(result.registers):
                     raw[start + i] = val
-            except (ModbusException, ConnectionError, OSError) as exc:
-                log.warning('Read error at %d+%d: %s', start, length, exc)
-                # Re-raise so _poll() can mark the connection as lost
+            except ModbusException as exc:
+                # This batch is unresponsive (register not supported on this firmware/slave).
+                # Skip it and continue reading the remaining batches.
+                log.warning('Modbus error at %d+%d: %s', start, length, exc)
+            except (ConnectionError, OSError) as exc:
+                # TCP-level failure — abort the poll so _run_loop can reconnect.
+                log.warning('TCP error at %d+%d: %s', start, length, exc)
                 raise
 
-        # Decode each register
         data: dict = {}
         for reg in regs:
             reg_raw = [raw.get(reg.address + i, 0) for i in range(reg.count)]
             if all(v == 0 for v in reg_raw) and reg.address not in raw:
-                continue  # register wasn't returned at all
+                continue
             val = _decode_register(reg_raw, reg)
             if val is not None:
                 data[reg.key] = val
@@ -184,31 +222,27 @@ class ModbusWorker(QThread):
 
     def _poll(self) -> Optional[dict]:
         try:
-            # Split registers into two groups: inverter (3xxxx) and battery/meter (37xxx)
-            inv_regs = [r for r in REGISTERS if r.address < 37000]
+            # Device-info registers (model, serial, rated power) are static —
+            # skip them in the regular poll to avoid the 5-second timeout on
+            # inverters that don't expose them via the SDongle proxy.
+            inv_regs = [r for r in REGISTERS if r.address < 37000 and r.group != 'Device']
             ext_regs = [r for r in REGISTERS if r.address >= 37000]
 
             data: dict = {}
             data.update(self._read_registers_batch(inv_regs))
             data.update(self._read_registers_batch(ext_regs))
 
-            # Derive computed values
             if 'pv1_voltage' in data and 'pv1_current' in data:
                 data['pv1_power'] = round(data['pv1_voltage'] * data['pv1_current'], 1)
             if 'pv2_voltage' in data and 'pv2_current' in data:
                 data['pv2_power'] = round(data['pv2_voltage'] * data['pv2_current'], 1)
 
-            # House load = PV production - grid export + grid import + battery discharge
-            # meter_active_power: positive = export, negative = import
-            # house = PV − exported_to_grid − charged_to_battery
-            # (batt_power > 0 = charging, meter_active_power > 0 = export)
             if 'active_power' in data and 'meter_active_power' in data:
                 batt = data.get('batt_power', 0.0)
                 data['house_load'] = round(
                     data['active_power'] - data['meter_active_power'] - batt, 1
                 )
 
-            # Human-readable state labels
             if 'inverter_state' in data:
                 code = int(data['inverter_state'])
                 data['inverter_state_label'] = INVERTER_STATES.get(code, f'Unknown (0x{code:04X})')
@@ -221,48 +255,62 @@ class ModbusWorker(QThread):
 
         except Exception as exc:
             log.error('Poll error: %s', exc)
-            self.error.emit(str(exc))
+            self._on_error(str(exc))
             return None
 
-    # ── thread main ───────────────────────────────────────────────────────────
+    # ── Thread main ───────────────────────────────────────────────────────────
 
     def run(self):
         try:
             self._run_loop()
         except Exception as exc:
             log.critical('Worker crashed: %s', exc, exc_info=True)
-            self.connection_changed.emit(False, f'Worker crashed: {exc}')
+            self._on_connection(False, f'Worker crashed: {exc}')
 
     def _run_loop(self):
         self._running = True
-        connected = False
+        reported_ok = False  # tracks last UI state so we only emit on changes
 
         while self._running:
-            if not connected:
-                connected = self._connect()
-                if not connected:
-                    # Back off 10 s before retrying
-                    for _ in range(100):
-                        if not self._running:
-                            break
-                        time.sleep(0.1)
-                    continue
+            # Open a fresh TCP connection every cycle. The SUN2000 drops idle
+            # connections after ~30 s, causing silent hangs on a half-open socket.
+            # Reconnecting each poll is the only reliable pattern for this inverter.
+            if not self._open_tcp():
+                if reported_ok:
+                    msg = (f'TCP connect failed — {self.host}:{self.port}. '
+                           f'Check that no other Modbus client (e.g. HA huawei_solar) '
+                           f'holds the connection.')
+                    log.warning(msg)
+                    self._on_connection(False, msg)
+                    reported_ok = False
+                for _ in range(100):
+                    if not self._running:
+                        break
+                    time.sleep(0.1)
+                continue
 
+            if not reported_ok:
+                log.info('Connected to %s:%s slave=%s', self.host, self.port, self.slave_id)
+                self._on_connection(True, f'Connected to {self.host}:{self.port}')
+                reported_ok = True
+
+            self._process_writes()
             data = self._poll()
-            if data:
-                self.data_ready.emit(data)
-            else:
-                connected = False
-                self.connection_changed.emit(False, 'Connection lost — retrying…')
 
-            # Sleep in small increments so stop() is responsive
+            # Close immediately after each poll — releases the inverter's single
+            # Modbus slot and prevents stale half-open sockets next cycle.
+            if self._client:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+
+            if data:
+                self._on_data(data)
+
             deadline = time.time() + self.poll_interval
             while self._running and time.time() < deadline:
                 time.sleep(0.1)
 
-        if self._client:
-            try:
-                self._client.close()
-            except Exception:
-                pass
-        self.connection_changed.emit(False, 'Disconnected')
+        self._on_connection(False, 'Disconnected')

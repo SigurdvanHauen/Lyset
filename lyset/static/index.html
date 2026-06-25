@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lyset — SUN2000 Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:      #0F1117;
+  --surface: #1C2032;
+  --surf2:   #252A3D;
+  --border:  #2D3555;
+  --text:    #E2E8F4;
+  --muted:   #8892AA;
+  --accent:  #4F8EF7;
+  --success: #34D399;
+  --warning: #F59E0B;
+  --danger:  #F87171;
+  --pv:      #F59E0B;
+  --gridc:   #4F8EF7;
+  --batt:    #34D399;
+  --load:    #F87171;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Top bar ── */
+#topbar {
+  background: #161924;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+#topbar h1 { font-size: 17px; font-weight: 800; color: var(--accent); margin-right: 4px; }
+#topbar label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+input[type=text], input[type=number] {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+input:focus { outline: none; border-color: var(--accent); }
+
+select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+select:focus { outline: none; border-color: var(--accent); }
+
+button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+button:hover        { background: var(--surf2); border-color: var(--accent); color: var(--accent); }
+button.primary      { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.primary:hover{ background: #3d71c8; border-color: #3d71c8; color: #fff; }
+button.success      { border-color: var(--success); color: var(--success); }
+button.success:hover{ background: #34d39918; }
+button.warning      { border-color: var(--warning); color: var(--warning); }
+button.warning:hover{ background: #f59e0b18; }
+button.danger       { border-color: var(--danger);  color: var(--danger);  }
+button.danger:hover { background: #f8717118; }
+button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+
+#status-badge {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+#status-badge.connected { color: var(--success); border-color: var(--success); }
+#status-badge.err       { color: var(--danger);  border-color: var(--danger);  }
+
+#last-update { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; }
+
+/* ── Tab bar ── */
+#tabbar {
+  background: #161924;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-shrink: 0;
+}
+.tab-btn {
+  padding: 10px 24px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+}
+.tab-btn:hover  { color: var(--text); background: var(--surface); border-color: transparent; }
+.tab-btn.active { color: var(--text); border-bottom-color: var(--accent); background: transparent; }
+
+/* ── Panels ── */
+#panels { flex: 1; overflow: hidden; position: relative; }
+.panel  { position: absolute; inset: 0; overflow-y: auto; padding: 16px; display: none; }
+.panel.active { display: block; }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── Section titles ── */
+.sec {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin: 18px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.sec:first-child { margin-top: 0; }
+
+/* ── Cards ── */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.card.pv   { border-top-color: var(--pv);    }
+.card.grid { border-top-color: var(--gridc); }
+.card.batt { border-top-color: var(--batt);  }
+.card.load { border-top-color: var(--load);  }
+.card.acc  { border-top-color: var(--accent);}
+.card-top  { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.card-lbl  { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+.card-times{ font-size: 9px; color: var(--muted); text-align: right; line-height: 1.55; opacity: 0.6; flex-shrink: 0; margin-left: 6px; }
+.card-val  { font-size: 22px; font-weight: 700; line-height: 1; }
+.unit      { font-size: 12px; color: var(--muted); margin-left: 2px; }
+
+/* ── Charts ── */
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 760px) { .chart-grid { grid-template-columns: 1fr; } }
+.chart-box  {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  height: 260px;
+  position: relative;
+}
+
+/* ── Control ── */
+.ctrl-status {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  color: var(--warning);
+}
+.ctrl-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.ctrl-box h3 {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+.ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.ctrl-row label { min-width: 240px; color: var(--text); }
+.ctrl-row input[type=number] { width: 110px; }
+.note { font-size: 11px; color: var(--warning); margin: 6px 0; }
+.hint { font-size: 11px; color: var(--muted);   margin: 4px 0; }
+
+input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+
+/* ── Log ── */
+#log-out {
+  background: #0A0D14;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 11.5px;
+  line-height: 1.65;
+  height: calc(100dvh - 190px);
+  overflow-y: auto;
+}
+.ld { color: #6B7280; }
+.li { color: #E2E8F4; }
+.lw { color: #F59E0B; }
+.le { color: #F87171; }
+
+/* ── Toast ── */
+#toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 11px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+  z-index: 999;
+  max-width: 420px;
+}
+#toast.show     { opacity: 1; }
+#toast.tok  { background: var(--success); color: #0a1a10; }
+#toast.terr { background: var(--danger);  color: #fff; }
+#toast.twarn{ background: var(--warning); color: #1a0f00; }
+</style>
+</head>
+<body>
+
+<!-- ── Top bar ── -->
+<div id="topbar">
+  <h1>⚡ Lyset</h1>
+  <label>Host</label>
+  <input type="text"   id="c-host"  value="192.168.1.185" style="width:140px">
+  <label>Port</label>
+  <input type="number" id="c-port"  value="502"  min="1" max="65535" style="width:66px">
+  <label>Slave ID</label>
+  <input type="number" id="c-slave" value="1"    min="0" max="255"   style="width:52px">
+  <label>Poll (s)</label>
+  <input type="number" id="c-poll"  value="10"   min="1" max="60"    style="width:54px">
+  <button id="conn-btn" class="primary" onclick="toggleConnect()">Connect</button>
+  <span id="status-badge">Disconnected</span>
+  <span id="last-update"></span>
+</div>
+
+<!-- ── Tab bar ── -->
+<div id="tabbar">
+  <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
+  <button class="tab-btn"        onclick="showTab('charts',this)">Charts</button>
+  <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
+  <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
+</div>
+
+<!-- ── Panels ── -->
+<div id="panels">
+
+  <!-- Dashboard -->
+  <div id="panel-dashboard" class="panel active">
+    <div class="sec">Power Flow</div>
+    <div class="cards">
+      <div class="card pv">  <div class="card-top"><div class="card-lbl">PV Power</div>     <div class="card-times" id="t-d-pv"></div></div>  <div class="card-val" id="d-pv">—<span class="unit">W</span></div></div>
+      <div class="card grid"><div class="card-top"><div class="card-lbl">Grid Power</div>    <div class="card-times" id="t-d-grid"></div></div> <div class="card-val" id="d-grid">—<span class="unit">W</span></div></div>
+      <div class="card batt"><div class="card-top"><div class="card-lbl">Battery Power</div> <div class="card-times" id="t-d-batt"></div></div> <div class="card-val" id="d-batt">—<span class="unit">W</span></div></div>
+      <div class="card load"><div class="card-top"><div class="card-lbl">House Load</div>    <div class="card-times" id="t-d-load"></div></div> <div class="card-val" id="d-load">—<span class="unit">W</span></div></div>
+    </div>
+
+    <div class="sec">Battery</div>
+    <div class="cards">
+      <div class="card batt"><div class="card-top"><div class="card-lbl">SOC</div>         <div class="card-times" id="t-d-soc"></div></div>   <div class="card-val" id="d-soc">—<span class="unit">%</span></div></div>
+      <div class="card batt"><div class="card-top"><div class="card-lbl">SOH</div>         <div class="card-times" id="t-d-soh"></div></div>   <div class="card-val" id="d-soh">—<span class="unit">%</span></div></div>
+      <div class="card acc"> <div class="card-top"><div class="card-lbl">Temperature</div> <div class="card-times" id="t-d-btemp"></div></div> <div class="card-val" id="d-btemp">—<span class="unit">°C</span></div></div>
+      <div class="card acc"> <div class="card-top"><div class="card-lbl">Bus Voltage</div> <div class="card-times" id="t-d-bvolt"></div></div> <div class="card-val" id="d-bvolt">—<span class="unit">V</span></div></div>
+      <div class="card acc"> <div class="card-top"><div class="card-lbl">Status</div>      <div class="card-times" id="t-d-bstat"></div></div> <div class="card-val" style="font-size:14px" id="d-bstat">—</div></div>
+    </div>
+
+    <div class="sec">PV Strings</div>
+    <div class="cards">
+      <div class="card pv"><div class="card-top"><div class="card-lbl">PV1 Voltage</div> <div class="card-times" id="t-d-pv1v"></div></div> <div class="card-val" id="d-pv1v">—<span class="unit">V</span></div></div>
+      <div class="card pv"><div class="card-top"><div class="card-lbl">PV1 Current</div> <div class="card-times" id="t-d-pv1a"></div></div> <div class="card-val" id="d-pv1a">—<span class="unit">A</span></div></div>
+      <div class="card pv"><div class="card-top"><div class="card-lbl">PV1 Power</div>   <div class="card-times" id="t-d-pv1w"></div></div> <div class="card-val" id="d-pv1w">—<span class="unit">W</span></div></div>
+      <div class="card pv"><div class="card-top"><div class="card-lbl">PV2 Voltage</div> <div class="card-times" id="t-d-pv2v"></div></div> <div class="card-val" id="d-pv2v">—<span class="unit">V</span></div></div>
+      <div class="card pv"><div class="card-top"><div class="card-lbl">PV2 Current</div> <div class="card-times" id="t-d-pv2a"></div></div> <div class="card-val" id="d-pv2a">—<span class="unit">A</span></div></div>
+      <div class="card pv"><div class="card-top"><div class="card-lbl">PV2 Power</div>   <div class="card-times" id="t-d-pv2w"></div></div> <div class="card-val" id="d-pv2w">—<span class="unit">W</span></div></div>
+    </div>
+
+    <div class="sec">Grid</div>
+    <div class="cards">
+      <div class="card grid"><div class="card-top"><div class="card-lbl">Frequency</div>     <div class="card-times" id="t-d-freq"></div></div>  <div class="card-val" id="d-freq">—<span class="unit">Hz</span></div></div>
+      <div class="card grid"><div class="card-top"><div class="card-lbl">Voltage L1</div>    <div class="card-times" id="t-d-va"></div></div>    <div class="card-val" id="d-va">—<span class="unit">V</span></div></div>
+      <div class="card grid"><div class="card-top"><div class="card-lbl">Power Factor</div>  <div class="card-times" id="t-d-pf"></div></div>    <div class="card-val" id="d-pf">—</div></div>
+      <div class="card acc"> <div class="card-top"><div class="card-lbl">Internal Temp</div> <div class="card-times" id="t-d-itemp"></div></div> <div class="card-val" id="d-itemp">—<span class="unit">°C</span></div></div>
+      <div class="card acc"> <div class="card-top"><div class="card-lbl">Inverter State</div><div class="card-times" id="t-d-istate"></div></div><div class="card-val" style="font-size:12px" id="d-istate">—</div></div>
+    </div>
+
+    <div class="sec">Energy Totals</div>
+    <div class="cards">
+      <div class="card pv">  <div class="card-top"><div class="card-lbl">Today's Yield</div>    <div class="card-times" id="t-d-daily"></div></div> <div class="card-val" id="d-daily">—<span class="unit">kWh</span></div></div>
+      <div class="card pv">  <div class="card-top"><div class="card-lbl">Total Yield</div>      <div class="card-times" id="t-d-total"></div></div> <div class="card-val" id="d-total">—<span class="unit">kWh</span></div></div>
+      <div class="card grid"><div class="card-top"><div class="card-lbl">Grid Export</div>       <div class="card-times" id="t-d-exp"></div></div>   <div class="card-val" id="d-exp">—<span class="unit">kWh</span></div></div>
+      <div class="card load"><div class="card-top"><div class="card-lbl">Grid Import</div>       <div class="card-times" id="t-d-imp"></div></div>   <div class="card-val" id="d-imp">—<span class="unit">kWh</span></div></div>
+      <div class="card batt"><div class="card-top"><div class="card-lbl">Batt Charged</div>      <div class="card-times" id="t-d-bchg"></div></div>  <div class="card-val" id="d-bchg">—<span class="unit">kWh</span></div></div>
+      <div class="card batt"><div class="card-top"><div class="card-lbl">Batt Discharged</div>   <div class="card-times" id="t-d-bdchg"></div></div> <div class="card-val" id="d-bdchg">—<span class="unit">kWh</span></div></div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div id="panel-charts" class="panel">
+    <div class="chart-grid">
+      <div class="chart-box"><canvas id="chart-pv"></canvas></div>
+      <div class="chart-box"><canvas id="chart-grid"></canvas></div>
+      <div class="chart-box"><canvas id="chart-batt"></canvas></div>
+      <div class="chart-box"><canvas id="chart-house"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Control -->
+  <div id="panel-control" class="panel">
+    <div class="ctrl-status" id="ctrl-status">Not connected — connect to the inverter first.</div>
+
+    <div class="ctrl-box">
+      <h3>Storage Working Mode</h3>
+      <div class="ctrl-row">
+        <label>Mode</label>
+        <select id="ctrl-mode" style="min-width:260px">
+          <option value="0">Maximise self-consumption</option>
+          <option value="1">Fully fed to grid</option>
+          <option value="2">Time-of-use (TOU)</option>
+          <option value="3">Time-of-use (TOU) Pro</option>
+          <option value="4">Fixed charge/discharge</option>
+          <option value="5">Forced charge/discharge</option>
+        </select>
+        <button class="ctrl-write" onclick="applyMode()">Apply</button>
+      </div>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>Battery Power Limits</h3>
+      <div class="ctrl-row">
+        <label>Max charge power</label>
+        <input type="number" id="ctrl-max-chg"  value="2500" min="0" max="5000" step="100">
+        <span class="unit">W</span>
+      </div>
+      <div class="ctrl-row">
+        <label>Max discharge power</label>
+        <input type="number" id="ctrl-max-dchg" value="2500" min="0" max="5000" step="100">
+        <span class="unit">W</span>
+      </div>
+      <button class="ctrl-write" onclick="applyPowerLimits()">Apply</button>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>SOC Targets</h3>
+      <div class="ctrl-row">
+        <label>Charge cut-off (stop charging at)</label>
+        <input type="number" id="ctrl-chg-soc"  value="100" min="0" max="100">
+        <span class="unit">%</span>
+      </div>
+      <div class="ctrl-row">
+        <label>Discharge cut-off (stop discharging at)</label>
+        <input type="number" id="ctrl-dchg-soc" value="10"  min="0" max="100">
+        <span class="unit">%</span>
+      </div>
+      <button class="ctrl-write" onclick="applySOC()">Apply</button>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>Forced Charge / Discharge</h3>
+      <div class="ctrl-row">
+        <label>Power</label>
+        <input type="number" id="ctrl-force-pwr" value="2500" min="0" max="5000" step="100">
+        <span class="unit">W</span>
+      </div>
+      <div class="ctrl-row" style="gap:8px">
+        <button class="ctrl-write success" onclick="forceCmd(1)">⚡ Force Charge</button>
+        <button class="ctrl-write warning" onclick="forceCmd(2)">⬇ Force Discharge</button>
+        <button class="ctrl-write danger"  onclick="forceCmd(0)">■ Stop</button>
+      </div>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>Grid Charge (charge battery from grid)</h3>
+      <div class="ctrl-row">
+        <label>Enable grid charge</label>
+        <input type="checkbox" id="ctrl-grid-en">
+      </div>
+      <div class="ctrl-row">
+        <label>Power limit</label>
+        <input type="number" id="ctrl-grid-pwr" value="1000" min="0" max="5000" step="100">
+        <span class="unit">W</span>
+      </div>
+      <button class="ctrl-write" onclick="applyGridCharge()">Apply</button>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>Active Power Curtailment (limit PV output)</h3>
+      <div class="ctrl-row">
+        <label>Mode</label>
+        <select id="ctrl-pwr-mode" style="min-width:220px" onchange="updatePwrRows()">
+          <option value="0">No limit</option>
+          <option value="1">Limit by percentage</option>
+          <option value="2">Limit by fixed watt value</option>
+        </select>
+      </div>
+      <div class="ctrl-row" id="row-pct" style="display:none">
+        <label>Percentage</label>
+        <input type="number" id="ctrl-pwr-pct" value="100" min="0" max="100">
+        <span class="unit">%</span>
+      </div>
+      <div class="ctrl-row" id="row-w" style="display:none">
+        <label>Fixed value</label>
+        <input type="number" id="ctrl-pwr-w" value="6000" min="0" max="6000" step="100">
+        <span class="unit">W</span>
+      </div>
+      <p class="note">⚠ Register 40525 — may return "illegal address" on some firmware versions.</p>
+      <br>
+      <button class="ctrl-write" onclick="applyActivePower()">Apply</button>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>Power Factor</h3>
+      <div class="ctrl-row">
+        <label>Target power factor</label>
+        <input type="number" id="ctrl-pf" value="1.000" min="-1" max="1" step="0.001" style="width:110px">
+      </div>
+      <p class="hint">Writes to register 40122 (×1000). Check your grid code before changing.</p>
+      <br>
+      <button class="ctrl-write" onclick="applyPF()">Apply</button>
+    </div>
+
+    <div class="ctrl-box">
+      <h3>Device</h3>
+      <div class="ctrl-row">
+        <button class="ctrl-write danger" onclick="doShutdown()">⏻ Shutdown Inverter</button>
+        <span class="hint">Sends 1 to register 40200. Use the physical DC switch to restart.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div id="panel-log" class="panel">
+    <div id="log-out"></div>
+  </div>
+
+</div><!-- #panels -->
+
+<div id="toast"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let ws = null;
+let isConnected = false;
+const charts = {};
+const MAX_PTS = 120;
+const bufs = {
+  pv:   { labels: [], data: [] },
+  grid: { labels: [], data: [] },
+  batt: { labels: [], data: [] },
+  house:{ labels: [], data: [] },
+};
+// card suffix → data key (used for meta timers)
+const KEY_MAP = {
+  pv:    'active_power',      grid:   'meter_active_power',
+  batt:  'batt_power',        load:   'house_load',
+  soc:   'batt_soc',          soh:    'batt_soh',
+  btemp: 'batt_temperature',  bvolt:  'batt_bus_voltage',
+  bstat: 'batt_status_label', pv1v:   'pv1_voltage',
+  pv1a:  'pv1_current',       pv1w:   'pv1_power',
+  pv2v:  'pv2_voltage',       pv2a:   'pv2_current',
+  pv2w:  'pv2_power',         freq:   'grid_frequency',
+  va:    'grid_voltage_a',    pf:     'power_factor',
+  itemp: 'internal_temp',     istate: 'inverter_state_label',
+  daily: 'daily_yield',       total:  'total_yield',
+  exp:   'meter_export_energy', imp:  'meter_import_energy',
+  bchg:  'batt_charge_total', bdchg:  'batt_discharge_total',
+};
+let lastRead = null;
+const lastChanged = {}; // key → { val, ts }
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'charts' && Object.keys(charts).length === 0) initCharts();
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen  = () => addLog('info', '[ws] WebSocket connected');
+  ws.onclose = () => {
+    addLog('warn', '[ws] WebSocket closed — reconnecting in 3 s…');
+    ws = null;
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => addLog('error', '[ws] WebSocket error');
+  ws.onmessage = e => dispatch(JSON.parse(e.data));
+}
+
+function dispatch(msg) {
+  switch (msg.type) {
+    case 'data':         onData(msg.payload);           break;
+    case 'connection':   onConn(msg.ok, msg.msg);        break;
+    case 'write_result': onWriteResult(msg.ok, msg.msg); break;
+    case 'log':          onLogEntry(msg.entry);          break;
+    case 'error':        addLog('error', msg.msg);       break;
+  }
+}
+
+// ── Connection ────────────────────────────────────────────────────────────────
+async function toggleConnect() {
+  if (isConnected) {
+    await fetch('/api/disconnect', { method: 'POST' });
+  } else {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host:          document.getElementById('c-host').value.trim(),
+        port:          parseInt(document.getElementById('c-port').value),
+        slave_id:      parseInt(document.getElementById('c-slave').value),
+        poll_interval: parseFloat(document.getElementById('c-poll').value),
+      }),
+    });
+    if (!r.ok) toast('Connect request failed', 'terr');
+  }
+}
+
+function onConn(ok, msg) {
+  isConnected = ok;
+  const badge = document.getElementById('status-badge');
+  const btn   = document.getElementById('conn-btn');
+  badge.textContent = ok ? 'Connected' : (msg.length < 50 ? msg : 'Disconnected');
+  badge.className   = ok ? 'connected' : (msg.toLowerCase().includes('fail') ? 'err' : '');
+  btn.textContent   = ok ? 'Disconnect' : 'Connect';
+
+  const cs = document.getElementById('ctrl-status');
+  cs.style.color = ok ? 'var(--success)' : 'var(--warning)';
+  cs.textContent  = ok ? 'Connected — values loaded from inverter.' : msg;
+  setCtrlEnabled(ok);
+  if (ok) refreshCtrl();
+  addLog(ok ? 'info' : 'warn', '[connection] ' + msg);
+}
+
+function setCtrlEnabled(en) {
+  document.querySelectorAll('.ctrl-write').forEach(b => b.disabled = !en);
+}
+
+// ── Data display ──────────────────────────────────────────────────────────────
+function v(val, dec = 0) {
+  if (val == null) return '—';
+  return typeof val === 'number' ? val.toFixed(dec) : String(val);
+}
+
+function setCard(id, val, dec = 0) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const unit = el.querySelector('.unit');
+  el.innerHTML = v(val, dec) + (unit ? unit.outerHTML : '');
+}
+
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val != null ? String(val) : '—';
+}
+
+function onData(d) {
+  // Track read time and per-key change time
+  lastRead = Date.now();
+  for (const [sfx, key] of Object.entries(KEY_MAP)) {
+    const val = d[key];
+    if (val !== undefined) {
+      const prev = lastChanged[key];
+      if (!prev || prev.val !== val) lastChanged[key] = { val, ts: Date.now() };
+    }
+  }
+
+  setCard('d-pv',   d.active_power,       0);
+  setCard('d-grid', d.meter_active_power, 0);
+  setCard('d-batt', d.batt_power,         0);
+  setCard('d-load', d.house_load,         0);
+
+  setCard('d-soc',   d.batt_soc,         1);
+  setCard('d-soh',   d.batt_soh,         1);
+  setCard('d-btemp', d.batt_temperature, 1);
+  setCard('d-bvolt', d.batt_bus_voltage, 1);
+  setText('d-bstat', d.batt_status_label);
+
+  setCard('d-pv1v', d.pv1_voltage, 1);
+  setCard('d-pv1a', d.pv1_current, 2);
+  setCard('d-pv1w', d.pv1_power,   0);
+  setCard('d-pv2v', d.pv2_voltage, 1);
+  setCard('d-pv2a', d.pv2_current, 2);
+  setCard('d-pv2w', d.pv2_power,   0);
+
+  setCard('d-freq',  d.grid_frequency, 2);
+  setCard('d-va',    d.grid_voltage_a, 1);
+  setCard('d-pf',    d.power_factor,   3);
+  setCard('d-itemp', d.internal_temp,  1);
+  setText('d-istate', d.inverter_state_label);
+
+  setCard('d-daily', d.daily_yield,          2);
+  setCard('d-total', d.total_yield,          1);
+  setCard('d-exp',   d.meter_export_energy,  1);
+  setCard('d-imp',   d.meter_import_energy,  1);
+  setCard('d-bchg',  d.batt_charge_total,    1);
+  setCard('d-bdchg', d.batt_discharge_total, 1);
+
+  document.getElementById('last-update').textContent =
+    'Last update: ' + new Date().toLocaleTimeString();
+
+  if (Object.keys(charts).length > 0) {
+    const ts = new Date().toLocaleTimeString();
+    pushPt('pv',   d.active_power       ?? 0, ts);
+    pushPt('grid', d.meter_active_power ?? 0, ts);
+    pushPt('batt', d.batt_power         ?? 0, ts);
+    pushPt('house',d.house_load         ?? 0, ts);
+    Object.values(charts).forEach(c => c.update('none'));
+  }
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+function initCharts() {
+  Chart.defaults.color       = '#8892AA';
+  Chart.defaults.borderColor = '#2D3555';
+  charts.pv   = mkChart('chart-pv',   'PV Power (W)',     '#F59E0B', bufs.pv);
+  charts.grid = mkChart('chart-grid', 'Grid Power (W)',   '#4F8EF7', bufs.grid);
+  charts.batt = mkChart('chart-batt', 'Battery Power (W)','#34D399', bufs.batt);
+  charts.house= mkChart('chart-house','House Load (W)',   '#F87171', bufs.house);
+}
+
+function mkChart(id, label, color, buf) {
+  return new Chart(document.getElementById(id), {
+    type: 'line',
+    data: {
+      labels: buf.labels,
+      datasets: [{
+        label,
+        data: buf.data,
+        borderColor: color,
+        backgroundColor: color + '1A',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: { ticks: { color: '#8892AA', maxTicksLimit: 6, font: { size: 10 } }, grid: { color: '#2D3555' } },
+        y: { ticks: { color: '#8892AA', font: { size: 10 } },                   grid: { color: '#2D3555' } },
+      },
+      plugins: { legend: { labels: { color: '#E2E8F4', font: { size: 11 } } } },
+    }
+  });
+}
+
+function pushPt(key, val, ts) {
+  const b = bufs[key];
+  b.labels.push(ts); b.data.push(val);
+  if (b.labels.length > MAX_PTS) { b.labels.shift(); b.data.shift(); }
+}
+
+// ── Control ───────────────────────────────────────────────────────────────────
+function writeReg(type, address, value, description) {
+  return fetch('/api/write', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, address, value, description }),
+  }).then(r => { if (!r.ok) r.json().then(j => toast('Write error: ' + (j.detail || r.status), 'terr')); });
+}
+
+function applyMode() {
+  writeReg('u16', 47086, parseInt(document.getElementById('ctrl-mode').value), 'Working mode');
+}
+function applyPowerLimits() {
+  writeReg('u32', 47075, parseInt(document.getElementById('ctrl-max-chg').value),  'Max charge power');
+  writeReg('u32', 47077, parseInt(document.getElementById('ctrl-max-dchg').value), 'Max discharge power');
+}
+function applySOC() {
+  writeReg('u16', 47088, parseInt(document.getElementById('ctrl-chg-soc').value)  * 10, 'Charge cut-off SOC');
+  writeReg('u16', 47089, parseInt(document.getElementById('ctrl-dchg-soc').value) * 10, 'Discharge cut-off SOC');
+}
+function forceCmd(cmd) {
+  const names = { 0:'Stop forced mode', 1:'Force CHARGE', 2:'Force DISCHARGE' };
+  if (cmd && !confirm(`${names[cmd]} at ${document.getElementById('ctrl-force-pwr').value} W?`)) return;
+  if (cmd) writeReg('u32', 47098, parseInt(document.getElementById('ctrl-force-pwr').value), 'Forced power');
+  writeReg('u16', 47100, cmd, names[cmd]);
+}
+function applyGridCharge() {
+  writeReg('u16', 47087, document.getElementById('ctrl-grid-en').checked ? 1 : 0, 'Grid charge enable');
+  writeReg('u32', 47079, parseInt(document.getElementById('ctrl-grid-pwr').value), 'Grid charge power');
+}
+function updatePwrRows() {
+  const m = parseInt(document.getElementById('ctrl-pwr-mode').value);
+  document.getElementById('row-pct').style.display = m === 1 ? '' : 'none';
+  document.getElementById('row-w').style.display   = m === 2 ? '' : 'none';
+}
+function applyActivePower() {
+  const m = parseInt(document.getElementById('ctrl-pwr-mode').value);
+  writeReg('u16', 40525, m, 'Active power mode');
+  if (m === 1) writeReg('u16', 40526, parseInt(document.getElementById('ctrl-pwr-pct').value) * 10, 'Active power %');
+  if (m === 2) writeReg('i32', 40527, parseInt(document.getElementById('ctrl-pwr-w').value), 'Active power W');
+}
+function applyPF() {
+  const pf = parseFloat(document.getElementById('ctrl-pf').value);
+  writeReg('u16', 40122, Math.round(pf * 1000) & 0xFFFF, `Power factor → ${pf.toFixed(3)}`);
+}
+function doShutdown() {
+  if (confirm('This will send a remote shutdown command to the inverter.\n\nUse the physical DC switch or wait for sunrise to restart.\n\nContinue?')) {
+    writeReg('u16', 40200, 1, 'Device shutdown');
+  }
+}
+
+function onWriteResult(ok, msg) {
+  toast(msg, ok ? 'tok' : 'terr');
+  const cs = document.getElementById('ctrl-status');
+  cs.style.color = ok ? 'var(--success)' : 'var(--danger)';
+  cs.textContent  = msg;
+}
+
+async function refreshCtrl() {
+  const reads = [
+    { id: 'ctrl-mode',     addr: 47086, type: 'u16', gain: 1,  sel: true },
+    { id: 'ctrl-max-chg',  addr: 47075, type: 'u32', gain: 1  },
+    { id: 'ctrl-max-dchg', addr: 47077, type: 'u32', gain: 1  },
+    { id: 'ctrl-chg-soc',  addr: 47088, type: 'u16', gain: 10 },
+    { id: 'ctrl-dchg-soc', addr: 47089, type: 'u16', gain: 10 },
+    { id: 'ctrl-grid-en',  addr: 47087, type: 'u16', gain: 1,  chk: true },
+    { id: 'ctrl-grid-pwr', addr: 47079, type: 'u32', gain: 1  },
+  ];
+  await Promise.all(reads.map(async r => {
+    try {
+      const resp = await fetch(`/api/read?address=${r.addr}&type=${r.type}`);
+      if (!resp.ok) return;
+      const { value } = await resp.json();
+      const el = document.getElementById(r.id);
+      if (!el) return;
+      if (r.chk)      el.checked  = !!value;
+      else if (r.sel) el.value    = String(value);
+      else            el.value    = r.gain > 1 ? Math.round(value / r.gain) : value;
+    } catch(_) {}
+  }));
+}
+
+// ── Meta timers ───────────────────────────────────────────────────────────────
+function fmtAgo(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60)   return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+function updateMeta() {
+  if (!lastRead) return;
+  const now = Date.now();
+  const readStr = fmtAgo(now - lastRead);
+  for (const [sfx, key] of Object.entries(KEY_MAP)) {
+    const el = document.getElementById('t-d-' + sfx);
+    if (!el) continue;
+    const chg = lastChanged[key];
+    el.innerHTML = 'read ' + readStr + '<br>chg ' + (chg ? fmtAgo(now - chg.ts) : '—');
+  }
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function addLog(level, msg) {
+  onLogEntry({ t: new Date().toLocaleTimeString(), level, msg });
+}
+function onLogEntry(e) {
+  const out = document.getElementById('log-out');
+  const cls = { debug:'ld', info:'li', warn:'lw', warning:'lw', error:'le' }[e.level] || 'li';
+  const div = document.createElement('div');
+  div.className   = cls;
+  div.textContent = `${e.t}  ${e.msg}`;
+  out.appendChild(div);
+  while (out.children.length > 500) out.removeChild(out.firstChild);
+  out.scrollTop = out.scrollHeight;
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let _toastTimer;
+function toast(msg, cls = 'tok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className   = `show ${cls}`;
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+setCtrlEnabled(false);
+connectWS();
+setInterval(updateMeta, 1000);
+
+fetch('/api/state').then(r => r.json()).then(s => {
+  if (s.connected) onConn(true, s.msg);
+  if (s.data && Object.keys(s.data).length) onData(s.data);
+  (s.log || []).forEach(onLogEntry);
+}).catch(() => {});
+</script>
+</body>
+</html>

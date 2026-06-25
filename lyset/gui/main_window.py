@@ -32,6 +32,7 @@ from PySide6.QtGui import QIcon, QColor, QPalette, QTextCursor, QFont
 from ..modbus_client import ModbusWorker
 from .dashboard import DashboardPanel
 from .plots import PlotPanel
+from .control import ControlPanel
 
 
 # ── Qt logging handler that writes to a QTextEdit ────────────────────────────
@@ -179,10 +180,12 @@ class MainWindow(QMainWindow):
 
         self._dashboard = DashboardPanel()
         self._plots = PlotPanel()
+        self._control = ControlPanel()
         self._log_view = self._build_log_tab()
 
         self._tabs.addTab(self._dashboard, 'Dashboard')
         self._tabs.addTab(self._plots, 'Plots')
+        self._tabs.addTab(self._control, 'Control')
         self._tabs.addTab(self._log_view, 'Log')
 
         # Route all lyset + pymodbus log output into the Log tab
@@ -336,6 +339,7 @@ class MainWindow(QMainWindow):
         self._worker.data_ready.connect(self._on_data)
         self._worker.connection_changed.connect(self._on_connection_changed)
         self._worker.error.connect(self._on_error)
+        self._control.set_worker(self._worker)
         self._worker.start()
         self._status_bar.showMessage('Connecting…')
 
@@ -344,6 +348,7 @@ class MainWindow(QMainWindow):
             self._worker.stop()
             self._worker.wait(3000)
             self._worker = None
+        self._control.set_worker(None)
         self._conn_bar.set_connected(False, 'Disconnected')
         self._status_bar.showMessage('Disconnected')
 
