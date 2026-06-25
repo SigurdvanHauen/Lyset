@@ -60,8 +60,10 @@ REGISTERS: list[Register] = [
     Register(32087,  1, 'I16',  10,   '°C',  'Internal temperature',     'Output',  'internal_temp'),
 
     # ── Daily / total energy ─────────────────────────────────────────────────
-    Register(32106,  2, 'U32',  100,  'kWh', 'Daily energy yield',       'Energy',  'daily_yield'),
-    Register(32108,  2, 'U32',  1000, 'kWh', 'Total energy yield',       'Energy',  'total_yield'),
+    # 32114: daily yield (SUN2000-M1 firmware); 32106 mirrors a cumulative counter, not today
+    # 32108: accumulated lifetime yield; gain=100 (not 1000) confirmed by live scan
+    Register(32114,  2, 'U32',  100,  'kWh', 'Daily energy yield',       'Energy',  'daily_yield'),
+    Register(32108,  2, 'U32',  100,  'kWh', 'Total energy yield',       'Energy',  'total_yield'),
 
     # ── Battery (LUNA2000) — addresses verified by live register scan ────────────
     Register(37000,  1, 'U16',  1,    '',    'Battery running status',    'Battery', 'batt_status'),
