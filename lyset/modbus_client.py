@@ -108,26 +108,34 @@ class ModbusWorker(threading.Thread):
             value += 0x100000000
         self.write_u32(address, value, description)
 
-    def read_u16_now(self, address: int) -> Optional[int]:
-        """Synchronous single-register read — only call when connected."""
-        if not self._client:
-            return None
+    def _temp_read(self, address: int, count: int) -> Optional[list[int]]:
+        """Open a short-lived connection for an on-demand register read."""
+        client = self._client
+        own = False
+        if client is None:
+            client = ModbusTcpClient(host=self.host, port=self.port, timeout=5, retries=0)
+            if not client.connect():
+                return None
+            own = True
         try:
-            r = self._client.read_holding_registers(address, count=1, device_id=self.slave_id)
-            return r.registers[0] if not r.isError() else None
+            r = client.read_holding_registers(address, count=count, device_id=self.slave_id)
+            return r.registers if not r.isError() else None
         except Exception:
             return None
+        finally:
+            if own:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    def read_u16_now(self, address: int) -> Optional[int]:
+        regs = self._temp_read(address, 1)
+        return regs[0] if regs else None
 
     def read_u32_now(self, address: int) -> Optional[int]:
-        if not self._client:
-            return None
-        try:
-            r = self._client.read_holding_registers(address, count=2, device_id=self.slave_id)
-            if r.isError():
-                return None
-            return (r.registers[0] << 16) | r.registers[1]
-        except Exception:
-            return None
+        regs = self._temp_read(address, 2)
+        return ((regs[0] << 16) | regs[1]) if regs else None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

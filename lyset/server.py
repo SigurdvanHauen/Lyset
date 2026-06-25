@@ -39,25 +39,29 @@ _last_data: dict = {}
 _log_buffer: list[dict] = []
 _ws_clients: set[WebSocket] = set()
 _loop: Optional[asyncio.AbstractEventLoop] = None
+_msg_queue: Optional[asyncio.Queue] = None
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
 
-async def _broadcast(msg: dict):
-    dead: set[WebSocket] = set()
-    text = json.dumps(msg, default=str)
-    for ws in list(_ws_clients):
-        try:
-            await ws.send_text(text)
-        except Exception:
-            dead.add(ws)
-    _ws_clients -= dead
+async def _broadcaster():
+    """Asyncio task: drain _msg_queue and fan out to all WebSocket clients."""
+    while True:
+        text: str = await _msg_queue.get()
+        dead: set[WebSocket] = set()
+        for ws in list(_ws_clients):
+            try:
+                await ws.send_text(text)
+            except Exception:
+                dead.add(ws)
+        _ws_clients -= dead
 
 
 def _push(msg: dict):
-    """Schedule a broadcast from any thread onto the asyncio event loop."""
-    if _loop and not _loop.is_closed():
-        asyncio.run_coroutine_threadsafe(_broadcast(msg), _loop)
+    """Thread-safe push: serialise msg and schedule delivery on the asyncio loop."""
+    if _loop and _msg_queue is not None and not _loop.is_closed():
+        text = json.dumps(msg, default=str)
+        _loop.call_soon_threadsafe(_msg_queue.put_nowait, text)
 
 
 # ── Log handler that forwards Python log records to the browser ───────────────
@@ -141,8 +145,10 @@ def _start_worker(host: str, port: int, slave_id: int, poll_interval: float):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _loop
+    global _loop, _msg_queue
     _loop = asyncio.get_running_loop()
+    _msg_queue = asyncio.Queue()
+    asyncio.create_task(_broadcaster())
 
     handler = _WebLogHandler()
     handler.setLevel(logging.DEBUG)
