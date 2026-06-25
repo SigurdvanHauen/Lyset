@@ -200,14 +200,11 @@ class ModbusWorker(threading.Thread):
                     continue
                 for i, val in enumerate(result.registers):
                     raw[start + i] = val
-            except ModbusException as exc:
-                # This batch is unresponsive (register not supported on this firmware/slave).
-                # Skip it and continue reading the remaining batches.
-                log.warning('Modbus error at %d+%d: %s', start, length, exc)
-            except (ConnectionError, OSError) as exc:
-                # TCP-level failure — abort the poll so _run_loop can reconnect.
-                log.warning('TCP error at %d+%d: %s', start, length, exc)
-                raise
+            except Exception as exc:
+                # Any error reading this batch (timeout, no response, bad register) —
+                # skip it and continue with the remaining batches. TCP failures will
+                # be detected on the next cycle when _open_tcp() fails.
+                log.warning('Batch error at %d+%d: %s', start, length, exc)
 
         data: dict = {}
         for reg in regs:
