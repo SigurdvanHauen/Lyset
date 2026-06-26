@@ -353,6 +353,40 @@ async def charger_scan(
     return await loop.run_in_executor(None, _charger_scan_sync, host, port, slave_id, fc)
 
 
+def _probe_slave_sync(host: str, port: int, slave_id: int) -> dict:
+    """Try a handful of address ranges on one slave_id. Fresh connection per range."""
+    PROBE_RANGES = [
+        (0, 25), (100, 25),
+        (1000, 25), (1100, 25),
+        (2000, 25), (3000, 25),
+        (40000, 25), (47000, 25),
+    ]
+    registers: dict[int, int] = {}
+    for start, count in PROBE_RANGES:
+        raw, err = _modbus_scan_once(host, port, slave_id, 3, start, count)
+        if not err:
+            for addr, val in raw.items():
+                if val != 0:
+                    registers[addr] = val
+        if registers:
+            break  # found something — no need to keep scanning this slave
+    return {'slave_id': slave_id, 'found': len(registers) > 0, 'registers': registers}
+
+
+def _multi_slave_probe_sync(host: str, port: int, slave_ids: list[int]) -> dict:
+    results = []
+    for sid in slave_ids:
+        results.append(_probe_slave_sync(host, port, sid))
+    return {'host': host, 'port': port, 'results': results}
+
+
+@app.get('/api/charger/probe')
+async def charger_probe(host: str = '192.168.1.185', port: int = 502):
+    slave_ids = [1, 2, 3, 6, 10, 100, 101, 200, 201]
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _multi_slave_probe_sync, host, port, slave_ids)
+
+
 @app.get('/api/state')
 async def api_state():
     return {

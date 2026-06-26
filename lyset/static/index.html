@@ -463,6 +463,27 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
+    <div class="ctrl-box" style="margin-top:12px">
+      <h3>Auto-Probe — Inverter SDongle (192.168.1.185)</h3>
+      <p class="hint" style="margin-bottom:12px">Tries slave IDs 1, 2, 3, 6, 10, 100, 101, 200, 201 on the inverter's SDongle to check if the EV charger registers are accessible there. Takes ~30–60 s.</p>
+      <div class="ctrl-row">
+        <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Auto-Probe SDongle</button>
+        <span id="chr-probe-status" style="font-size:11px;margin-left:4px"></span>
+      </div>
+      <div id="chr-probe-results" style="display:none;margin-top:12px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="background:var(--surf2)">
+              <th style="text-align:left;padding:7px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Slave ID</th>
+              <th style="text-align:left;padding:7px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Result</th>
+              <th style="text-align:left;padding:7px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Non-zero registers found</th>
+            </tr>
+          </thead>
+          <tbody id="chr-probe-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div id="chr-results" style="display:none">
       <div class="sec">Scan Results</div>
       <div class="ctrl-box" style="padding:0;overflow:hidden">
@@ -1107,6 +1128,55 @@ async function runChargerScan() {
       errBox.style.display = 'none';
     }
 
+    resDiv.style.display = '';
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Request failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runChargerProbe() {
+  const btn    = document.getElementById('chr-probe-btn');
+  const status = document.getElementById('chr-probe-status');
+  const resDiv = document.getElementById('chr-probe-results');
+
+  btn.disabled = true;
+  status.style.color = 'var(--muted)';
+  status.textContent = 'Probing slave IDs on 192.168.1.185… (~30–60 s)';
+  resDiv.style.display = 'none';
+
+  try {
+    const r    = await fetch('/api/charger/probe');
+    const data = await r.json();
+
+    const tbody = document.getElementById('chr-probe-tbody');
+    tbody.innerHTML = '';
+    let anyFound = false;
+
+    for (const row of (data.results || [])) {
+      const found = row.found;
+      if (found) anyFound = true;
+      const addrs = Object.keys(row.registers || {}).map(Number).sort((a,b)=>a-b);
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid var(--border)';
+      tr.innerHTML = `
+        <td style="padding:6px 12px;font-weight:700">${row.slave_id}</td>
+        <td style="padding:6px 12px;color:${found ? 'var(--success)' : 'var(--muted)'}">
+          ${found ? '&#10003; Responded' : '&#8212; No data'}
+        </td>
+        <td style="padding:6px 12px;font-size:11px;color:var(--muted)">
+          ${found ? addrs.slice(0,10).join(', ') + (addrs.length > 10 ? ' …' : '') : ''}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    status.style.color = anyFound ? 'var(--success)' : 'var(--warning)';
+    status.textContent = anyFound
+      ? 'Found responding slave(s) — see table below.'
+      : 'No slave IDs responded with data on 192.168.1.185.';
     resDiv.style.display = '';
   } catch (e) {
     status.style.color = 'var(--danger)';
