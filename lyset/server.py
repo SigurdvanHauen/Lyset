@@ -47,14 +47,22 @@ _msg_queue: Optional[asyncio.Queue] = None
 async def _broadcaster():
     """Asyncio task: drain _msg_queue and fan out to all WebSocket clients."""
     while True:
-        text: str = await _msg_queue.get()
-        dead: set[WebSocket] = set()
-        for ws in list(_ws_clients):
-            try:
-                await ws.send_text(text)
-            except Exception:
-                dead.add(ws)
-        _ws_clients -= dead
+        try:
+            text: str = await _msg_queue.get()
+            dead: set[WebSocket] = set()
+            for ws in list(_ws_clients):
+                try:
+                    await ws.send_text(text)
+                except Exception:
+                    dead.add(ws)
+            for ws in dead:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            _ws_clients.difference_update(dead)
+        except Exception as exc:
+            log.error('Broadcaster error: %s', exc)
 
 
 def _push(msg: dict):
@@ -233,11 +241,11 @@ async def api_write(body: WriteRequest):
 async def api_read(address: int, type: str = 'u16'):
     if not _worker or not _worker.is_alive():
         raise HTTPException(status_code=400, detail='Not connected')
-    val: Optional[int] = None
+    loop = asyncio.get_running_loop()
     if type == 'u16':
-        val = _worker.read_u16_now(address)
+        val = await loop.run_in_executor(None, _worker.read_u16_now, address)
     elif type == 'u32':
-        val = _worker.read_u32_now(address)
+        val = await loop.run_in_executor(None, _worker.read_u32_now, address)
     else:
         raise HTTPException(status_code=400, detail=f'Unknown type: {type}')
     if val is None:
@@ -260,18 +268,19 @@ async def api_state():
 @app.websocket('/ws')
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
-    _ws_clients.add(ws)
     try:
-        # Immediately deliver current state so a page refresh feels instant
+        # Send current state before registering — avoids a concurrent-send race
+        # with _broadcaster which could silently prune this ws from _ws_clients.
         await ws.send_text(json.dumps({
             'type': 'connection', 'ok': _connected, 'msg': _connection_msg,
         }))
         if _last_data:
             await ws.send_text(json.dumps({'type': 'data', 'payload': _last_data}, default=str))
-        # Keep the socket open; data flows via broadcasts from the worker thread
-        while True:
-            await ws.receive_text()
+        _ws_clients.add(ws)
+        try:
+            while True:
+                await ws.receive_text()
+        finally:
+            _ws_clients.discard(ws)
     except WebSocketDisconnect:
         pass
-    finally:
-        _ws_clients.discard(ws)

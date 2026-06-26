@@ -523,7 +523,8 @@ function showTab(name, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
-  if (name === 'charts' && Object.keys(charts).length === 0) initCharts();
+  if (name === 'charts'  && Object.keys(charts).length === 0) initCharts();
+  if (name === 'control' && isConnected) refreshCtrl();
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -581,7 +582,6 @@ function onConn(ok, msg) {
   cs.style.color = ok ? 'var(--success)' : 'var(--warning)';
   cs.textContent  = ok ? 'Connected — values loaded from inverter.' : msg;
   setCtrlEnabled(ok);
-  if (ok) refreshCtrl();
   addLog(ok ? 'info' : 'warn', '[connection] ' + msg);
 }
 
