@@ -495,7 +495,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
     <!-- Stair-step import vs export line chart -->
     <div class="sec" style="margin-top:16px">Import vs Export — Stair-Step</div>
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div style="display:flex;gap:18px;margin-bottom:10px;font-size:11px;flex-wrap:wrap;align-items:center">
+      <div style="display:flex;gap:18px;margin-bottom:10px;font-size:11px">
         <span style="display:flex;align-items:center;gap:5px">
           <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>
           Import (all-in incl. VAT)
@@ -504,13 +504,8 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
           <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>
           Export est. (spot only)
         </span>
-        <span style="display:flex;align-items:center;gap:5px">
-          <span style="width:22px;height:3px;background:#818CF8;border-top:2px dashed #818CF8;display:inline-block;border-radius:2px"></span>
-          Predicted grid import
-        </span>
-        <button id="pr-btn-cons" onclick="toggleConsumption()" style="font-size:11px;padding:3px 12px;margin-left:auto">Consumption</button>
       </div>
-      <div style="position:relative;height:240px">
+      <div style="position:relative;height:220px">
         <canvas id="pr-line-chart"></canvas>
       </div>
     </div>
@@ -877,10 +872,13 @@ function openChart(key, label, unit, color) {
   const hist  = historyMap[key] || { ts: [], val: [] };
   const pts   = hist.val.length;
   const data  = makeChartPoints(hist.ts, hist.val);
-  const hasFc = key === 'active_power' && _solcastData.length > 0;
+  const hasFc   = key === 'active_power'      && _solcastData.length > 0;
+  const hasCons = key === 'meter_active_power' && _consumptionForecast.some(r => r.w != null);
 
   document.getElementById('modal-title').textContent =
-    label + (unit ? ' (' + unit + ')' : '') + (hasFc ? ' + Solcast forecast' : '');
+    label + (unit ? ' (' + unit + ')' : '')
+    + (hasFc   ? ' + Solcast forecast' : '')
+    + (hasCons ? ' + predicted import' : '');
   document.getElementById('modal-fc-btn').style.display = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-overlay').classList.add('active');
 
@@ -948,10 +946,31 @@ function openChart(key, label, unit, color) {
     });
   }
 
+  if (hasCons) {
+    // Negate so import shows as negative, matching meter_active_power sign convention
+    const consPts = _consumptionForecast
+      .filter(r => r.w != null)
+      .map(r => ({ x: r.ts_ms, y: -r.w }));
+    datasets.push({
+      label: 'Predicted import',
+      data: consPts,
+      borderColor: '#818CF8AA',
+      backgroundColor: '#818CF810',
+      borderWidth: 2,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: true,
+      tension: 0.3,
+      order: 1,
+    });
+  }
+
   // Show date in x-axis ticks when the range spans more than 18 h
   const allTs = [
     ...hist.ts,
-    ...(hasFc ? _solcastData.map(d => d.ts_ms) : []),
+    ...(hasFc  ? _solcastData.map(d => d.ts_ms)          : []),
+    ...(hasCons ? _consumptionForecast.map(d => d.ts_ms)  : []),
   ];
   const xSpan   = allTs.length >= 2 ? Math.max(...allTs) - Math.min(...allTs) : 0;
   const showDate = xSpan > 18 * 3600000;
@@ -990,7 +1009,7 @@ function openChart(key, label, unit, color) {
       },
       plugins: {
         legend: {
-          display: hasFc,
+          display: hasFc || hasCons,
           labels: {
             color: '#8892AA',
             font:  { size: 10 },
@@ -1191,18 +1210,12 @@ function onSolarForecast(data) {
 
 // ── Consumption forecast ──────────────────────────────────────────────────────
 let _consumptionForecast = [];
-let _showConsumption     = false;
 
 function onConsumptionForecast(data) {
   _consumptionForecast = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
-  const prPanel = document.getElementById('panel-prices');
-  if (prPanel.classList.contains('active')) renderPriceLineChart();
-}
-
-function toggleConsumption() {
-  _showConsumption = !_showConsumption;
-  document.getElementById('pr-btn-cons').className = _showConsumption ? 'primary' : '';
-  renderPriceLineChart();
+  if (_modalChart && _modalKey === 'meter_active_power') {
+    openChart('meter_active_power', 'Grid Power', 'W', '#4F8EF7');
+  }
 }
 
 // ── Prices ────────────────────────────────────────────────────────────────────
@@ -1425,17 +1438,11 @@ function renderPriceLineChart() {
     return p && p.forecast ? [6, 4] : [];
   };
 
-  const hasConsumption = _showConsumption && _consumptionForecast.some(r => r.w != null);
-  const consPts = hasConsumption
-    ? _consumptionForecast.filter(r => r.w != null).map(r => ({ x: r.ts_ms, y: +(r.w / 1000).toFixed(3) }))
-    : [];
-
   const chartData = {
     datasets: [
       {
         label:            'Import (all-in incl. VAT)',
         data:             importPts,
-        yAxisID:          'y',
         borderColor:      '#F59E0B',
         backgroundColor:  '#F59E0B18',
         borderWidth:      2,
@@ -1450,7 +1457,6 @@ function renderPriceLineChart() {
       {
         label:            'Export est. (spot only)',
         data:             exportPts,
-        yAxisID:          'y',
         borderColor:      '#34D399',
         backgroundColor:  '#34D39912',
         borderWidth:      2,
@@ -1461,20 +1467,6 @@ function renderPriceLineChart() {
         fill:             true,
         tension:          0,
         segment: { borderDash: forecastBorder },
-      },
-      {
-        label:            'Predicted grid import',
-        data:             consPts,
-        yAxisID:          'y2',
-        borderColor:      '#818CF8',
-        backgroundColor:  '#818CF820',
-        borderWidth:      2,
-        pointRadius:      0,
-        pointHoverRadius: 4,
-        pointHoverBackgroundColor: '#818CF8',
-        fill:             true,
-        tension:          0.3,
-        borderDash:       [5, 3],
       },
     ],
   };
@@ -1493,10 +1485,6 @@ function renderPriceLineChart() {
         return _fmtDT(p.ts) + (p.forecast ? ' (forecast)' : '') + ` · ${p.resolution || '1h'}`;
       },
       label: ctx => {
-        if (ctx.dataset.yAxisID === 'y2') {
-          const v = ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) : '—';
-          return `🟣 Predicted grid import: ${v} kW`;
-        }
         const p  = _pricesData[ctx.dataIndex];
         if (!p) return ctx.dataset.label + ': —';
         const v  = ctx.parsed.y != null ? ctx.parsed.y.toFixed(4) : '—';
@@ -1513,7 +1501,6 @@ function renderPriceLineChart() {
 
   if (_priceLineChart) {
     _priceLineChart.data = chartData;
-    _priceLineChart.options.scales.y2.display = hasConsumption;
     _priceLineChart.update('none');
     return;
   }
@@ -1586,14 +1573,6 @@ function renderPriceLineChart() {
           title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(2) },
           grid:  { color: '#2D3555' },
-          min:   0,
-        },
-        y2: {
-          display:  hasConsumption,
-          position: 'right',
-          title: { display: true, text: 'Grid import (kW)', color: '#818CF8', font: { size: 10 } },
-          ticks: { color: '#818CF8', font: { size: 10 }, callback: v => v.toFixed(1) },
-          grid:  { drawOnChartArea: false },
           min:   0,
         },
       },
