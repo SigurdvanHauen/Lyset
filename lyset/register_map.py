@@ -77,7 +77,7 @@ REGISTERS: list[Register] = [
     Register(37760,  1, 'U16',  10,   '%',   'Battery SOC',               'Battery', 'batt_soc'),
 
     # ── Power meter (DTSU666 / SDongle) ──────────────────────────────────────
-    Register(37113,  2, 'I32',  1,    'W',   'Grid power (+ export)',    'Meter',   'meter_active_power'),
+    Register(37113,  2, 'I32',  1,    'W',   'Grid power (+ import)',    'Meter',   'meter_active_power'),
     Register(37115,  2, 'I32',  1,    'var', 'Grid reactive power',      'Meter',   'meter_reactive_power'),
     Register(37119,  2, 'U32',  100,  'kWh', 'Grid exported energy',     'Meter',   'meter_export_energy'),
     Register(37121,  2, 'U32',  100,  'kWh', 'Grid imported energy',     'Meter',   'meter_import_energy'),

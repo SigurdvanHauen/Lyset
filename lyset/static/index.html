@@ -947,10 +947,9 @@ function openChart(key, label, unit, color) {
   }
 
   if (hasCons) {
-    // Negate so import shows as negative, matching meter_active_power sign convention
     const consPts = _consumptionForecast
       .filter(r => r.w != null)
-      .map(r => ({ x: r.ts_ms, y: -r.w }));
+      .map(r => ({ x: r.ts_ms, y: r.w }));
     datasets.push({
       label: 'Predicted import',
       data: consPts,
