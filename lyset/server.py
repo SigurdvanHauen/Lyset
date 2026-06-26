@@ -377,34 +377,36 @@ def _probe_slave_sync(host: str, port: int, slave_id: int) -> dict:
     return {'slave_id': slave_id, 'found': len(registers) > 0, 'registers': registers}
 
 
-def _multi_slave_probe_sync(host: str, port: int, slave_ids: list[int]) -> dict:
-    results = []
-    for sid in slave_ids:
-        results.append(_probe_slave_sync(host, port, sid))
-    return {'host': host, 'port': port, 'results': results}
+_probe_restart_params: Optional[tuple] = None  # set while worker is paused for a probe
 
 
-@app.get('/api/charger/probe')
-async def charger_probe(host: str = '192.168.1.185', port: int = 502):
-    global _worker
-    slave_ids = [1, 2, 3, 6, 10, 100, 101, 200, 201]
-    loop = asyncio.get_running_loop()
-
-    # If probing the same host as the inverter, stop the worker first —
-    # the SDongle only allows one Modbus TCP client at a time.
-    restart_params = None
+@app.get('/api/charger/probe/start')
+async def charger_probe_start(host: str = '192.168.1.185', port: int = 502):
+    """Pause the inverter worker if it shares the same host. Call once before looping slave probes."""
+    global _probe_restart_params
     if _worker and _worker.is_alive() and _worker.host == host and _worker.port == port:
-        restart_params = (_worker.host, _worker.port, _worker.slave_id, _worker.poll_interval)
+        _probe_restart_params = (_worker.host, _worker.port, _worker.slave_id, _worker.poll_interval)
         _worker.stop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, lambda: _worker.join(timeout=5))
+    return {'ok': True}
 
-    try:
-        result = await loop.run_in_executor(None, _multi_slave_probe_sync, host, port, slave_ids)
-    finally:
-        if restart_params:
-            _start_worker(*restart_params)
 
-    return result
+@app.get('/api/charger/probe/slave')
+async def charger_probe_slave(host: str = '192.168.1.185', port: int = 502, slave_id: int = 1):
+    """Probe a single slave ID and return immediately. Frontend calls this per slave for live progress."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _probe_slave_sync, host, port, slave_id)
+
+
+@app.get('/api/charger/probe/finish')
+async def charger_probe_finish():
+    """Restart the inverter worker after all slave probes are done."""
+    global _probe_restart_params
+    if _probe_restart_params:
+        _start_worker(*_probe_restart_params)
+        _probe_restart_params = None
+    return {'ok': True}
 
 
 @app.get('/api/state')

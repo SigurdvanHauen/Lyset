@@ -1138,51 +1138,76 @@ async function runChargerScan() {
 }
 
 async function runChargerProbe() {
+  const SLAVE_IDS = [1, 2, 3, 6, 10, 100, 101, 200, 201];
   const btn    = document.getElementById('chr-probe-btn');
   const status = document.getElementById('chr-probe-status');
   const resDiv = document.getElementById('chr-probe-results');
+  const tbody  = document.getElementById('chr-probe-tbody');
 
   btn.disabled = true;
-  status.style.color = 'var(--muted)';
-  status.textContent = 'Probing slave IDs on 192.168.1.185… (~30–60 s)';
-  resDiv.style.display = 'none';
+  tbody.innerHTML = '';
+  resDiv.style.display = '';
+
+  // Pre-populate table rows so the user sees them filling in
+  const rows = {};
+  for (const sid of SLAVE_IDS) {
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid var(--border)';
+    tr.innerHTML = `
+      <td style="padding:6px 12px;font-weight:700">${sid}</td>
+      <td id="chr-probe-res-${sid}" style="padding:6px 12px;color:var(--muted)">&#8230; scanning</td>
+      <td id="chr-probe-addr-${sid}" style="padding:6px 12px;font-size:11px;color:var(--muted)"></td>
+    `;
+    tbody.appendChild(tr);
+    rows[sid] = tr;
+  }
+
+  const host = '192.168.1.185';
+  let anyFound = false;
 
   try {
-    const r    = await fetch('/api/charger/probe');
-    const data = await r.json();
+    // Pause inverter worker
+    status.style.color = 'var(--muted)';
+    status.textContent = 'Pausing inverter polling…';
+    await fetch(`/api/charger/probe/start?host=${host}`);
 
-    const tbody = document.getElementById('chr-probe-tbody');
-    tbody.innerHTML = '';
-    let anyFound = false;
+    // Probe each slave ID one at a time — live results
+    for (let i = 0; i < SLAVE_IDS.length; i++) {
+      const sid = SLAVE_IDS[i];
+      status.textContent = `Probing slave ID ${sid}… (${i + 1}/${SLAVE_IDS.length})`;
+      const resEl  = document.getElementById(`chr-probe-res-${sid}`);
+      const addrEl = document.getElementById(`chr-probe-addr-${sid}`);
 
-    for (const row of (data.results || [])) {
-      const found = row.found;
-      if (found) anyFound = true;
-      const addrs = Object.keys(row.registers || {}).map(Number).sort((a,b)=>a-b);
-      const tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid var(--border)';
-      tr.innerHTML = `
-        <td style="padding:6px 12px;font-weight:700">${row.slave_id}</td>
-        <td style="padding:6px 12px;color:${found ? 'var(--success)' : 'var(--muted)'}">
-          ${found ? '&#10003; Responded' : '&#8212; No data'}
-        </td>
-        <td style="padding:6px 12px;font-size:11px;color:var(--muted)">
-          ${found ? addrs.slice(0,10).join(', ') + (addrs.length > 10 ? ' …' : '') : ''}
-        </td>
-      `;
-      tbody.appendChild(tr);
+      try {
+        const r    = await fetch(`/api/charger/probe/slave?host=${host}&slave_id=${sid}`);
+        const data = await r.json();
+        const found = data.found;
+        if (found) anyFound = true;
+        const addrs = Object.keys(data.registers || {}).map(Number).sort((a,b)=>a-b);
+        resEl.style.color = found ? 'var(--success)' : 'var(--muted)';
+        resEl.innerHTML   = found ? '&#10003; Responded' : '&#8212; No data';
+        addrEl.textContent = found
+          ? addrs.slice(0, 12).join(', ') + (addrs.length > 12 ? ' …' : '')
+          : '';
+      } catch (e) {
+        resEl.style.color = 'var(--danger)';
+        resEl.textContent = 'Error: ' + e.message;
+      }
     }
 
     status.style.color = anyFound ? 'var(--success)' : 'var(--warning)';
     status.textContent = anyFound
-      ? 'Found responding slave(s) — see table below.'
-      : 'No slave IDs responded with data on 192.168.1.185.';
-    resDiv.style.display = '';
+      ? 'Done — found responding slave(s). Inverter polling restarting…'
+      : 'Done — no slave IDs responded. Inverter polling restarting…';
   } catch (e) {
     status.style.color = 'var(--danger)';
-    status.textContent = 'Request failed: ' + e.message;
+    status.textContent = 'Error: ' + e.message;
   } finally {
+    await fetch('/api/charger/probe/finish').catch(() => {});
     btn.disabled = false;
+    if (status.textContent.includes('restarting')) {
+      setTimeout(() => { status.textContent = status.textContent.replace(' Inverter polling restarting…', ''); }, 5000);
+    }
   }
 }
 
