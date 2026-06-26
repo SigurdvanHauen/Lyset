@@ -457,6 +457,17 @@ async def api_prices():
     return {'prices': data if data else _last_prices, 'status': _price_status}
 
 
+@app.delete('/api/history')
+async def api_clear_history():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, store.clear_history)
+    global _last_data
+    _last_data = {}
+    _push({'type': 'history', 'points': []})
+    log.info('History cleared by user request')
+    return {'ok': True}
+
+
 @app.get('/api/state')
 async def api_state():
     return {

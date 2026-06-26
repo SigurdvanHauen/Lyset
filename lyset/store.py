@@ -145,6 +145,14 @@ def load_consumption_forecast(from_ms: int, to_ms: int) -> list[dict]:
     return [{'ts_ms': ts, 'w': w} for ts, w in rows]
 
 
+def clear_history():
+    """Delete all inverter poll records."""
+    with _lock:
+        con = _get_con()
+        con.execute('DELETE FROM polls')
+        con.commit()
+
+
 def load_last_24h() -> list[tuple[float, dict]]:
     cutoff = time.time() - 86400
     with _lock:
