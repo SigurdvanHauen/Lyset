@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lyset — SUN2000 Monitor</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <style>
 :root {
   --bg:      #0F1117;
@@ -167,6 +169,14 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
   border-radius: 10px;
   padding: 14px 16px;
 }
+.card.clickable {
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+.card.clickable:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
 .card.pv   { border-top-color: var(--pv);    }
 .card.grid { border-top-color: var(--gridc); }
 .card.batt { border-top-color: var(--batt);  }
@@ -178,16 +188,46 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 .card-val  { font-size: 22px; font-weight: 700; line-height: 1; }
 .unit      { font-size: 12px; color: var(--muted); margin-left: 2px; }
 
-/* ── Charts ── */
-.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-@media (max-width: 760px) { .chart-grid { grid-template-columns: 1fr; } }
-.chart-box  {
+/* ── Chart modal ── */
+#modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+#modal-overlay.active { display: flex; }
+.modal-box {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px;
-  height: 260px;
+  border-radius: 12px;
+  width: min(92vw, 900px);
+  height: min(74vh, 520px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+}
+.modal-hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.modal-hdr-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.modal-hdr-hint  { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.modal-actions   { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.modal-close     { font-size: 18px; padding: 2px 10px; line-height: 1; }
+#modal-canvas-wrap {
+  flex: 1;
+  min-height: 0;
   position: relative;
+  padding: 12px 16px 16px;
 }
 
 /* ── Control ── */
@@ -270,7 +310,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
 <!-- ── Top bar ── -->
 <div id="topbar">
-  <h1>⚡ Lyset</h1>
+  <h1>&#9889; Lyset</h1>
   <label>Host</label>
   <input type="text"   id="c-host"  value="192.168.1.185" style="width:140px">
   <label>Port</label>
@@ -287,7 +327,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <!-- ── Tab bar ── -->
 <div id="tabbar">
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
-  <button class="tab-btn"        onclick="showTab('charts',this)">Charts</button>
   <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
 </div>
@@ -299,59 +338,100 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <div id="panel-dashboard" class="panel active">
     <div class="sec">Power Flow</div>
     <div class="cards">
-      <div class="card pv">  <div class="card-top"><div class="card-lbl">PV Power</div>     <div class="card-times" id="t-d-pv"></div></div>  <div class="card-val" id="d-pv">—<span class="unit">W</span></div></div>
-      <div class="card grid"><div class="card-top"><div class="card-lbl">Grid Power</div>    <div class="card-times" id="t-d-grid"></div></div> <div class="card-val" id="d-grid">—<span class="unit">W</span></div></div>
-      <div class="card batt"><div class="card-top"><div class="card-lbl">Battery Power</div> <div class="card-times" id="t-d-batt"></div></div> <div class="card-val" id="d-batt">—<span class="unit">W</span></div></div>
-      <div class="card load"><div class="card-top"><div class="card-lbl">House Load</div>    <div class="card-times" id="t-d-load"></div></div> <div class="card-val" id="d-load">—<span class="unit">W</span></div></div>
+      <div class="card pv clickable"   onclick="openChart('active_power','PV Power','W','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV Power</div><div class="card-times" id="t-d-pv"></div></div>
+        <div class="card-val" id="d-pv">&#8212;<span class="unit">W</span></div>
+      </div>
+      <div class="card grid clickable" onclick="openChart('meter_active_power','Grid Power','W','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Grid Power</div><div class="card-times" id="t-d-grid"></div></div>
+        <div class="card-val" id="d-grid">&#8212;<span class="unit">W</span></div>
+      </div>
+      <div class="card batt clickable" onclick="openChart('batt_power','Battery Power','W','#34D399')">
+        <div class="card-top"><div class="card-lbl">Battery Power</div><div class="card-times" id="t-d-batt"></div></div>
+        <div class="card-val" id="d-batt">&#8212;<span class="unit">W</span></div>
+      </div>
+      <div class="card load clickable" onclick="openChart('house_load','House Load','W','#F87171')">
+        <div class="card-top"><div class="card-lbl">House Load</div><div class="card-times" id="t-d-load"></div></div>
+        <div class="card-val" id="d-load">&#8212;<span class="unit">W</span></div>
+      </div>
     </div>
 
     <div class="sec">Battery</div>
     <div class="cards">
-      <div class="card batt"><div class="card-top"><div class="card-lbl">SOC</div>         <div class="card-times" id="t-d-soc"></div></div>   <div class="card-val" id="d-soc">—<span class="unit">%</span></div></div>
-      <div class="card batt"><div class="card-top"><div class="card-lbl">SOH</div>         <div class="card-times" id="t-d-soh"></div></div>   <div class="card-val" id="d-soh">—<span class="unit">%</span></div></div>
-      <div class="card acc"> <div class="card-top"><div class="card-lbl">Temperature</div> <div class="card-times" id="t-d-btemp"></div></div> <div class="card-val" id="d-btemp">—<span class="unit">°C</span></div></div>
-      <div class="card acc"> <div class="card-top"><div class="card-lbl">Bus Voltage</div> <div class="card-times" id="t-d-bvolt"></div></div> <div class="card-val" id="d-bvolt">—<span class="unit">V</span></div></div>
-      <div class="card acc"> <div class="card-top"><div class="card-lbl">Status</div>      <div class="card-times" id="t-d-bstat"></div></div> <div class="card-val" style="font-size:14px" id="d-bstat">—</div></div>
+      <div class="card batt clickable" onclick="openChart('batt_soc','Battery SOC','%','#34D399')">
+        <div class="card-top"><div class="card-lbl">SOC</div><div class="card-times" id="t-d-soc"></div></div>
+        <div class="card-val" id="d-soc">&#8212;<span class="unit">%</span></div>
+      </div>
+      <div class="card batt clickable" onclick="openChart('batt_soh','Battery SOH','%','#34D399')">
+        <div class="card-top"><div class="card-lbl">SOH</div><div class="card-times" id="t-d-soh"></div></div>
+        <div class="card-val" id="d-soh">&#8212;<span class="unit">%</span></div>
+      </div>
+      <div class="card acc clickable"  onclick="openChart('batt_temperature','Batt Temperature','°C','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Temperature</div><div class="card-times" id="t-d-btemp"></div></div>
+        <div class="card-val" id="d-btemp">&#8212;<span class="unit">&#176;C</span></div>
+      </div>
+      <div class="card acc clickable"  onclick="openChart('batt_bus_voltage','Batt Bus Voltage','V','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Bus Voltage</div><div class="card-times" id="t-d-bvolt"></div></div>
+        <div class="card-val" id="d-bvolt">&#8212;<span class="unit">V</span></div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Status</div><div class="card-times" id="t-d-bstat"></div></div>
+        <div class="card-val" style="font-size:14px" id="d-bstat">&#8212;</div>
+      </div>
     </div>
 
     <div class="sec">PV Strings</div>
     <div class="cards">
-      <div class="card pv"><div class="card-top"><div class="card-lbl">PV1 Voltage</div> <div class="card-times" id="t-d-pv1v"></div></div> <div class="card-val" id="d-pv1v">—<span class="unit">V</span></div></div>
-      <div class="card pv"><div class="card-top"><div class="card-lbl">PV1 Current</div> <div class="card-times" id="t-d-pv1a"></div></div> <div class="card-val" id="d-pv1a">—<span class="unit">A</span></div></div>
-      <div class="card pv"><div class="card-top"><div class="card-lbl">PV1 Power</div>   <div class="card-times" id="t-d-pv1w"></div></div> <div class="card-val" id="d-pv1w">—<span class="unit">W</span></div></div>
-      <div class="card pv"><div class="card-top"><div class="card-lbl">PV2 Voltage</div> <div class="card-times" id="t-d-pv2v"></div></div> <div class="card-val" id="d-pv2v">—<span class="unit">V</span></div></div>
-      <div class="card pv"><div class="card-top"><div class="card-lbl">PV2 Current</div> <div class="card-times" id="t-d-pv2a"></div></div> <div class="card-val" id="d-pv2a">—<span class="unit">A</span></div></div>
-      <div class="card pv"><div class="card-top"><div class="card-lbl">PV2 Power</div>   <div class="card-times" id="t-d-pv2w"></div></div> <div class="card-val" id="d-pv2w">—<span class="unit">W</span></div></div>
+      <div class="card pv clickable" onclick="openChart('pv1_voltage','PV1 Voltage','V','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV1 Voltage</div><div class="card-times" id="t-d-pv1v"></div></div>
+        <div class="card-val" id="d-pv1v">&#8212;<span class="unit">V</span></div>
+      </div>
+      <div class="card pv clickable" onclick="openChart('pv1_current','PV1 Current','A','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV1 Current</div><div class="card-times" id="t-d-pv1a"></div></div>
+        <div class="card-val" id="d-pv1a">&#8212;<span class="unit">A</span></div>
+      </div>
+      <div class="card pv clickable" onclick="openChart('pv1_power','PV1 Power','W','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV1 Power</div><div class="card-times" id="t-d-pv1w"></div></div>
+        <div class="card-val" id="d-pv1w">&#8212;<span class="unit">W</span></div>
+      </div>
+      <div class="card pv clickable" onclick="openChart('pv2_voltage','PV2 Voltage','V','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV2 Voltage</div><div class="card-times" id="t-d-pv2v"></div></div>
+        <div class="card-val" id="d-pv2v">&#8212;<span class="unit">V</span></div>
+      </div>
+      <div class="card pv clickable" onclick="openChart('pv2_current','PV2 Current','A','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV2 Current</div><div class="card-times" id="t-d-pv2a"></div></div>
+        <div class="card-val" id="d-pv2a">&#8212;<span class="unit">A</span></div>
+      </div>
+      <div class="card pv clickable" onclick="openChart('pv2_power','PV2 Power','W','#F59E0B')">
+        <div class="card-top"><div class="card-lbl">PV2 Power</div><div class="card-times" id="t-d-pv2w"></div></div>
+        <div class="card-val" id="d-pv2w">&#8212;<span class="unit">W</span></div>
+      </div>
     </div>
 
     <div class="sec">Grid</div>
     <div class="cards">
-      <div class="card grid"><div class="card-top"><div class="card-lbl">Frequency</div>     <div class="card-times" id="t-d-freq"></div></div>  <div class="card-val" id="d-freq">—<span class="unit">Hz</span></div></div>
-      <div class="card grid"><div class="card-top"><div class="card-lbl">Voltage L1</div>    <div class="card-times" id="t-d-va"></div></div>    <div class="card-val" id="d-va">—<span class="unit">V</span></div></div>
-      <div class="card grid"><div class="card-top"><div class="card-lbl">Power Factor</div>  <div class="card-times" id="t-d-pf"></div></div>    <div class="card-val" id="d-pf">—</div></div>
-      <div class="card acc"> <div class="card-top"><div class="card-lbl">Internal Temp</div> <div class="card-times" id="t-d-itemp"></div></div> <div class="card-val" id="d-itemp">—<span class="unit">°C</span></div></div>
-      <div class="card acc"> <div class="card-top"><div class="card-lbl">Inverter State</div><div class="card-times" id="t-d-istate"></div></div><div class="card-val" style="font-size:12px" id="d-istate">—</div></div>
+      <div class="card grid clickable" onclick="openChart('meter_frequency','Grid Frequency','Hz','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Frequency</div><div class="card-times" id="t-d-freq"></div></div>
+        <div class="card-val" id="d-freq">&#8212;<span class="unit">Hz</span></div>
+      </div>
+      <div class="card grid clickable" onclick="openChart('grid_voltage_a','Grid Voltage L1','V','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Voltage L1</div><div class="card-times" id="t-d-va"></div></div>
+        <div class="card-val" id="d-va">&#8212;<span class="unit">V</span></div>
+      </div>
+      <div class="card grid clickable" onclick="openChart('power_factor','Power Factor','','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Power Factor</div><div class="card-times" id="t-d-pf"></div></div>
+        <div class="card-val" id="d-pf">&#8212;</div>
+      </div>
+      <div class="card acc clickable"  onclick="openChart('internal_temp','Internal Temp','°C','#4F8EF7')">
+        <div class="card-top"><div class="card-lbl">Internal Temp</div><div class="card-times" id="t-d-itemp"></div></div>
+        <div class="card-val" id="d-itemp">&#8212;<span class="unit">&#176;C</span></div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Inverter State</div><div class="card-times" id="t-d-istate"></div></div>
+        <div class="card-val" style="font-size:12px" id="d-istate">&#8212;</div>
+      </div>
     </div>
 
-    <div class="sec">Energy Totals</div>
-    <div class="cards">
-      <div class="card pv">  <div class="card-top"><div class="card-lbl">Today's Yield</div>    <div class="card-times" id="t-d-daily"></div></div> <div class="card-val" id="d-daily">—<span class="unit">kWh</span></div></div>
-      <div class="card pv">  <div class="card-top"><div class="card-lbl">Total Yield</div>      <div class="card-times" id="t-d-total"></div></div> <div class="card-val" id="d-total">—<span class="unit">kWh</span></div></div>
-      <div class="card grid"><div class="card-top"><div class="card-lbl">Grid Export</div>       <div class="card-times" id="t-d-exp"></div></div>   <div class="card-val" id="d-exp">—<span class="unit">kWh</span></div></div>
-      <div class="card load"><div class="card-top"><div class="card-lbl">Grid Import</div>       <div class="card-times" id="t-d-imp"></div></div>   <div class="card-val" id="d-imp">—<span class="unit">kWh</span></div></div>
-      <div class="card batt"><div class="card-top"><div class="card-lbl">Batt Charged</div>      <div class="card-times" id="t-d-bchg"></div></div>  <div class="card-val" id="d-bchg">—<span class="unit">kWh</span></div></div>
-      <div class="card batt"><div class="card-top"><div class="card-lbl">Batt Discharged</div>   <div class="card-times" id="t-d-bdchg"></div></div> <div class="card-val" id="d-bdchg">—<span class="unit">kWh</span></div></div>
-    </div>
-  </div>
-
-  <!-- Charts -->
-  <div id="panel-charts" class="panel">
-    <div class="chart-grid">
-      <div class="chart-box"><canvas id="chart-pv"></canvas></div>
-      <div class="chart-box"><canvas id="chart-grid"></canvas></div>
-      <div class="chart-box"><canvas id="chart-batt"></canvas></div>
-      <div class="chart-box"><canvas id="chart-house"></canvas></div>
-    </div>
   </div>
 
   <!-- Control -->
@@ -412,9 +492,9 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <span class="unit">W</span>
       </div>
       <div class="ctrl-row" style="gap:8px">
-        <button class="ctrl-write success" onclick="forceCmd(1)">⚡ Force Charge</button>
-        <button class="ctrl-write warning" onclick="forceCmd(2)">⬇ Force Discharge</button>
-        <button class="ctrl-write danger"  onclick="forceCmd(0)">■ Stop</button>
+        <button class="ctrl-write success" onclick="forceCmd(1)">&#9889; Force Charge</button>
+        <button class="ctrl-write warning" onclick="forceCmd(2)">&#11015; Force Discharge</button>
+        <button class="ctrl-write danger"  onclick="forceCmd(0)">&#9632; Stop</button>
       </div>
     </div>
 
@@ -452,7 +532,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <input type="number" id="ctrl-pwr-w" value="6000" min="0" max="6000" step="100">
         <span class="unit">W</span>
       </div>
-      <p class="note">⚠ Register 40525 — may return "illegal address" on some firmware versions.</p>
+      <p class="note">&#9888; Register 40525 — may return "illegal address" on some firmware versions.</p>
       <br>
       <button class="ctrl-write" onclick="applyActivePower()">Apply</button>
     </div>
@@ -463,7 +543,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <label>Target power factor</label>
         <input type="number" id="ctrl-pf" value="1.000" min="-1" max="1" step="0.001" style="width:110px">
       </div>
-      <p class="hint">Writes to register 40122 (×1000). Check your grid code before changing.</p>
+      <p class="hint">Writes to register 40122 (&#215;1000). Check your grid code before changing.</p>
       <br>
       <button class="ctrl-write" onclick="applyPF()">Apply</button>
     </div>
@@ -471,7 +551,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
     <div class="ctrl-box">
       <h3>Device</h3>
       <div class="ctrl-row">
-        <button class="ctrl-write danger" onclick="doShutdown()">⏻ Shutdown Inverter</button>
+        <button class="ctrl-write danger" onclick="doShutdown()">&#9211; Shutdown Inverter</button>
         <span class="hint">Sends 1 to register 40200. Use the physical DC switch to restart.</span>
       </div>
     </div>
@@ -484,21 +564,35 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
 </div><!-- #panels -->
 
+<!-- ── Chart modal ── -->
+<div id="modal-overlay" onclick="overlayClick(event)">
+  <div class="modal-box">
+    <div class="modal-hdr">
+      <div>
+        <div class="modal-hdr-title" id="modal-title"></div>
+        <div class="modal-hdr-hint">Scroll to zoom &middot; Drag to pan</div>
+      </div>
+      <div class="modal-actions">
+        <button onclick="resetZoom()" style="font-size:11px;padding:4px 10px">Reset zoom</button>
+        <button class="modal-close" onclick="closeModal()">&#215;</button>
+      </div>
+    </div>
+    <div id="modal-canvas-wrap">
+      <canvas id="modal-canvas"></canvas>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 let ws = null;
 let isConnected = false;
-const charts = {};
-const MAX_PTS = 120;
-const bufs = {
-  pv:   { labels: [], data: [] },
-  grid: { labels: [], data: [] },
-  batt: { labels: [], data: [] },
-  house:{ labels: [], data: [] },
-};
-// card suffix → data key (used for meta timers)
+const historyMap = {}; // dataKey → { ts: number[], val: number[] }
+let _modalChart = null;
+let _modalKey   = null;
+
 const KEY_MAP = {
   pv:    'active_power',      grid:   'meter_active_power',
   batt:  'batt_power',        load:   'house_load',
@@ -507,15 +601,12 @@ const KEY_MAP = {
   bstat: 'batt_status_label', pv1v:   'pv1_voltage',
   pv1a:  'pv1_current',       pv1w:   'pv1_power',
   pv2v:  'pv2_voltage',       pv2a:   'pv2_current',
-  pv2w:  'pv2_power',         freq:   'grid_frequency',
+  pv2w:  'pv2_power',         freq:   'meter_frequency',
   va:    'grid_voltage_a',    pf:     'power_factor',
   itemp: 'internal_temp',     istate: 'inverter_state_label',
-  daily: 'daily_yield',       total:  'total_yield',
-  exp:   'meter_export_energy', imp:  'meter_import_energy',
-  bchg:  'batt_charge_total', bdchg:  'batt_discharge_total',
 };
 let lastRead = null;
-const lastChanged = {}; // key → { val, ts }
+const lastChanged = {};
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function showTab(name, btn) {
@@ -523,7 +614,6 @@ function showTab(name, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
-  if (name === 'charts'  && Object.keys(charts).length === 0) initCharts();
   if (name === 'control' && isConnected) refreshCtrl();
 }
 
@@ -608,14 +698,30 @@ function setText(id, val) {
 }
 
 function onData(d) {
-  // Track read time and per-key change time
-  lastRead = Date.now();
+  const now = Date.now();
+  lastRead = now;
+  const cutoff = now - 86400000; // 24 h rolling window
+
   for (const [sfx, key] of Object.entries(KEY_MAP)) {
     const val = d[key];
     if (val !== undefined) {
       const prev = lastChanged[key];
-      if (!prev || prev.val !== val) lastChanged[key] = { val, ts: Date.now() };
+      if (!prev || prev.val !== val) lastChanged[key] = { val, ts: now };
     }
+    if (typeof val === 'number') {
+      if (!historyMap[key]) historyMap[key] = { ts: [], val: [] };
+      const h = historyMap[key];
+      h.ts.push(now);
+      h.val.push(val);
+      while (h.ts.length > 0 && h.ts[0] < cutoff) { h.ts.shift(); h.val.shift(); }
+    }
+  }
+
+  if (_modalChart && _modalKey && historyMap[_modalKey]) {
+    const h = historyMap[_modalKey];
+    _modalChart.data.labels              = h.ts.map(t => new Date(t).toLocaleTimeString());
+    _modalChart.data.datasets[0].data   = h.val.slice();
+    _modalChart.update('none');
   }
 
   setCard('d-pv',   d.active_power,       0);
@@ -636,54 +742,42 @@ function onData(d) {
   setCard('d-pv2a', d.pv2_current, 2);
   setCard('d-pv2w', d.pv2_power,   0);
 
-  setCard('d-freq',  d.grid_frequency, 2);
+  setCard('d-freq',  d.meter_frequency, 2);
   setCard('d-va',    d.grid_voltage_a, 1);
   setCard('d-pf',    d.power_factor,   3);
   setCard('d-itemp', d.internal_temp,  1);
   setText('d-istate', d.inverter_state_label);
 
-  setCard('d-daily', d.daily_yield,          2);
-  setCard('d-total', d.total_yield,          1);
-  setCard('d-exp',   d.meter_export_energy,  1);
-  setCard('d-imp',   d.meter_import_energy,  1);
-  setCard('d-bchg',  d.batt_charge_total,    1);
-  setCard('d-bdchg', d.batt_discharge_total, 1);
-
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
-
-  if (Object.keys(charts).length > 0) {
-    const ts = new Date().toLocaleTimeString();
-    pushPt('pv',   d.active_power       ?? 0, ts);
-    pushPt('grid', d.meter_active_power ?? 0, ts);
-    pushPt('batt', d.batt_power         ?? 0, ts);
-    pushPt('house',d.house_load         ?? 0, ts);
-    Object.values(charts).forEach(c => c.update('none'));
-  }
 }
 
-// ── Charts ────────────────────────────────────────────────────────────────────
-function initCharts() {
-  Chart.defaults.color       = '#8892AA';
-  Chart.defaults.borderColor = '#2D3555';
-  charts.pv   = mkChart('chart-pv',   'PV Power (W)',     '#F59E0B', bufs.pv);
-  charts.grid = mkChart('chart-grid', 'Grid Power (W)',   '#4F8EF7', bufs.grid);
-  charts.batt = mkChart('chart-batt', 'Battery Power (W)','#34D399', bufs.batt);
-  charts.house= mkChart('chart-house','House Load (W)',   '#F87171', bufs.house);
-}
+// ── Chart modal ───────────────────────────────────────────────────────────────
+function openChart(key, label, unit, color) {
+  const hist   = historyMap[key] || { ts: [], val: [] };
+  const labels = hist.ts.map(t => new Date(t).toLocaleTimeString());
+  const pts    = hist.val.length;
 
-function mkChart(id, label, color, buf) {
-  return new Chart(document.getElementById(id), {
+  document.getElementById('modal-title').textContent =
+    label + (unit ? ' (' + unit + ')' : '');
+  document.getElementById('modal-overlay').classList.add('active');
+
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = key;
+
+  _modalChart = new Chart(
+    document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
     data: {
-      labels: buf.labels,
+      labels,
       datasets: [{
-        label,
-        data: buf.data,
+        label: label + (unit ? ' (' + unit + ')' : ''),
+        data: hist.val.slice(),
         borderColor: color,
-        backgroundColor: color + '1A',
+        backgroundColor: color + '22',
         borderWidth: 2,
-        pointRadius: 0,
+        pointRadius: pts <= 120 ? 2 : 0,
+        pointHoverRadius: 5,
         fill: true,
         tension: 0.3,
       }]
@@ -692,19 +786,53 @@ function mkChart(id, label, color, buf) {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
+      interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ticks: { color: '#8892AA', maxTicksLimit: 6, font: { size: 10 } }, grid: { color: '#2D3555' } },
-        y: { ticks: { color: '#8892AA', font: { size: 10 } },                   grid: { color: '#2D3555' } },
+        x: {
+          ticks: { color: '#8892AA', maxTicksLimit: 8, font: { size: 10 } },
+          grid:  { color: '#2D3555' },
+        },
+        y: {
+          grace: '10%',
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid:  { color: '#2D3555' },
+        },
       },
-      plugins: { legend: { labels: { color: '#E2E8F4', font: { size: 11 } } } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032',
+          titleColor:  '#8892AA',
+          bodyColor:   '#E2E8F4',
+          borderColor: '#2D3555',
+          borderWidth: 1,
+          padding: 10,
+          callbacks: {
+            title: ctx => ctx[0].label,
+            label: ctx => label + ': ' + ctx.formattedValue + (unit ? ' ' + unit : ''),
+          }
+        },
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        }
+      }
     }
   });
 }
 
-function pushPt(key, val, ts) {
-  const b = bufs[key];
-  b.labels.push(ts); b.data.push(val);
-  if (b.labels.length > MAX_PTS) { b.labels.shift(); b.data.shift(); }
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('active');
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = null;
+}
+
+function overlayClick(e) {
+  if (e.target === document.getElementById('modal-overlay')) closeModal();
+}
+
+function resetZoom() {
+  if (_modalChart) _modalChart.resetZoom();
 }
 
 // ── Control ───────────────────────────────────────────────────────────────────
@@ -834,6 +962,7 @@ function toast(msg, cls = 'tok') {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 setCtrlEnabled(false);
 connectWS();
 setInterval(updateMeta, 1000);

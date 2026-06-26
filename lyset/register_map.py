@@ -81,8 +81,7 @@ REGISTERS: list[Register] = [
     Register(37115,  2, 'I32',  1,    'var', 'Grid reactive power',      'Meter',   'meter_reactive_power'),
     Register(37119,  2, 'U32',  100,  'kWh', 'Grid exported energy',     'Meter',   'meter_export_energy'),
     Register(37121,  2, 'U32',  100,  'kWh', 'Grid imported energy',     'Meter',   'meter_import_energy'),
-    Register(37133,  1, 'U16',  100,  'Hz',  'Meter frequency',          'Meter',   'meter_frequency'),
-    Register(37135,  1, 'U16',  1,    '',    'Meter status',             'Meter',   'meter_status'),
+    Register(37118,  1, 'U16',  100,  'Hz',  'Meter frequency',          'Meter',   'meter_frequency'),
 ]
 
 # Quick lookup by key
