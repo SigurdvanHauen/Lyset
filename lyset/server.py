@@ -259,48 +259,98 @@ async def api_read(address: int, type: str = 'u16'):
     return {'value': val}
 
 
-def _charger_scan_sync(host: str, port: int, slave_id: int) -> dict:
-    """Blocking Modbus scan — call via run_in_executor."""
-    RANGES = [
-        (0, 100), (100, 100),
-        (1000, 100), (1100, 100), (1200, 100),
-        (2000, 100),
-        (3000, 100),
-        (40000, 100), (47000, 100),
-    ]
-    client = ModbusTcpClient(host=host, port=port, timeout=3, retries=0)
+import socket as _socket
+
+
+def _probe_ports(host: str, ports: list[int], timeout: float = 2.0) -> list[int]:
+    """Return which TCP ports on host accept connections."""
+    open_ports = []
+    for p in ports:
+        try:
+            s = _socket.create_connection((host, p), timeout=timeout)
+            s.close()
+            open_ports.append(p)
+        except Exception:
+            pass
+    return open_ports
+
+
+def _modbus_scan_once(host: str, port: int, slave_id: int,
+                       fc: int, start: int, count: int, timeout: float = 3.0
+                       ) -> tuple[dict[int, int], str | None]:
+    """Open a fresh connection, read one batch, close. Returns (raw_regs, error_str)."""
+    client = ModbusTcpClient(host=host, port=port, timeout=timeout, retries=0)
     if not client.connect():
-        return {'ok': False, 'error': f'TCP connect failed — {host}:{port}',
-                'registers': {}, 'scan_errors': {}}
-    registers: dict[int, int] = {}
-    scan_errors: dict[str, str] = {}
+        return {}, f'TCP connect failed'
     try:
-        for start, count in RANGES:
-            try:
-                r = client.read_holding_registers(address=start, count=count, device_id=slave_id)
-                if r.isError():
-                    scan_errors[str(start)] = str(r)
-                else:
-                    for i, val in enumerate(r.registers):
-                        if val != 0:
-                            registers[start + i] = val
-            except Exception as exc:
-                scan_errors[str(start)] = str(exc)
+        if fc == 3:
+            r = client.read_holding_registers(address=start, count=count, device_id=slave_id)
+        else:
+            r = client.read_input_registers(address=start, count=count, device_id=slave_id)
+        if r.isError():
+            return {}, str(r)
+        return {start + i: v for i, v in enumerate(r.registers)}, None
+    except Exception as exc:
+        return {}, str(exc)
     finally:
         try:
             client.close()
         except Exception:
             pass
+
+
+def _charger_scan_sync(host: str, port: int, slave_id: int, fc: int) -> dict:
+    """Full register scan — call via run_in_executor."""
+    RANGES = [
+        (0, 25), (25, 25), (50, 25), (75, 25),
+        (100, 25), (125, 25),
+        (1000, 25), (1025, 25), (1050, 25), (1075, 25),
+        (1100, 25), (1125, 25), (1150, 25), (1175, 25),
+        (1200, 25),
+        (2000, 25), (2025, 25),
+        (3000, 25),
+        (40000, 25),
+        (47000, 25),
+    ]
+
+    # Quick port probe so we know what's actually listening
+    probe_ports = [502, 6607, 8080, 8899, 8888, 9999, 10000]
+    open_ports = _probe_ports(host, probe_ports)
+
+    registers: dict[int, int] = {}
+    scan_errors: dict[str, str] = {}
+
+    # Verify the target port is open first
+    if port not in open_ports and not any(True for p in open_ports if p == port):
+        # Still try even if probe missed it, but flag it
+        pass
+
+    for start, count in RANGES:
+        raw, err = _modbus_scan_once(host, port, slave_id, fc, start, count)
+        if err:
+            scan_errors[str(start)] = err
+        else:
+            for addr, val in raw.items():
+                if val != 0:
+                    registers[addr] = val
+
     return {
-        'ok': True, 'host': host, 'port': port, 'slave_id': slave_id,
-        'registers': registers, 'scan_errors': scan_errors,
+        'ok': True, 'host': host, 'port': port, 'slave_id': slave_id, 'fc': fc,
+        'open_ports': open_ports,
+        'registers': registers,
+        'scan_errors': scan_errors,
     }
 
 
 @app.get('/api/charger/scan')
-async def charger_scan(host: str = '192.168.1.97', port: int = 502, slave_id: int = 1):
+async def charger_scan(
+    host: str = '192.168.1.97',
+    port: int = 502,
+    slave_id: int = 1,
+    fc: int = 3,
+):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _charger_scan_sync, host, port, slave_id)
+    return await loop.run_in_executor(None, _charger_scan_sync, host, port, slave_id, fc)
 
 
 @app.get('/api/state')

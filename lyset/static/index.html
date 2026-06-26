@@ -439,7 +439,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <div id="panel-charger" class="panel">
     <div class="ctrl-box">
       <h3>EV Charger — Register Scanner</h3>
-      <p class="hint" style="margin-bottom:12px">Scans the charger's Modbus registers to discover the register map. Covers address ranges 0–199, 1000–1299, 2000–2099, 3000–3099, 40000–40099, 47000–47099. Takes ~5–30 seconds depending on how many ranges time out.</p>
+      <p class="hint" style="margin-bottom:12px">Scans the charger's Modbus registers to discover the register map. Each range gets a fresh TCP connection. Also probes common ports (502, 6607, 8080…) so we can see what's actually listening.</p>
       <div class="ctrl-row">
         <label>Charger IP</label>
         <input type="text"   id="chr-host"  value="192.168.1.97" style="width:140px">
@@ -447,10 +447,19 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <input type="number" id="chr-port"  value="502" min="1" max="65535" style="width:66px">
         <label>Slave ID</label>
         <input type="number" id="chr-slave" value="1"   min="0" max="255"   style="width:52px">
+        <label>FC</label>
+        <select id="chr-fc" style="width:90px">
+          <option value="3">FC3 (holding)</option>
+          <option value="4">FC4 (input)</option>
+        </select>
       </div>
-      <div class="ctrl-row">
+      <p class="hint">Try FC3 first. If all ranges error, try FC4. Also try Slave ID 0, 100, or 200.</p>
+      <div class="ctrl-row" style="margin-top:8px">
         <button id="chr-scan-btn" class="primary" onclick="runChargerScan()">Scan Registers</button>
         <span id="chr-scan-status" style="font-size:11px;margin-left:4px"></span>
+      </div>
+      <div id="chr-ports-row" style="display:none;margin-top:8px;font-size:11px;color:var(--muted)">
+        Open ports on <span id="chr-ports-host"></span>: <span id="chr-ports-list" style="color:var(--success);font-weight:700"></span>
       </div>
     </div>
 
@@ -1032,16 +1041,25 @@ async function runChargerScan() {
 
   btn.disabled = true;
   status.style.color = 'var(--muted)';
-  status.textContent = 'Scanning… (may take up to 30 s)';
+  status.textContent = 'Scanning… (may take up to 60 s)';
   resDiv.style.display = 'none';
 
   const host  = document.getElementById('chr-host').value.trim();
   const port  = parseInt(document.getElementById('chr-port').value);
   const slave = parseInt(document.getElementById('chr-slave').value);
+  const fc    = parseInt(document.getElementById('chr-fc').value);
 
   try {
-    const r    = await fetch(`/api/charger/scan?host=${encodeURIComponent(host)}&port=${port}&slave_id=${slave}`);
+    const r    = await fetch(`/api/charger/scan?host=${encodeURIComponent(host)}&port=${port}&slave_id=${slave}&fc=${fc}`);
     const data = await r.json();
+
+    // Show open ports
+    if (data.open_ports !== undefined) {
+      document.getElementById('chr-ports-host').textContent = host;
+      document.getElementById('chr-ports-list').textContent =
+        data.open_ports.length ? data.open_ports.join(', ') : 'none found';
+      document.getElementById('chr-ports-row').style.display = '';
+    }
 
     if (!data.ok) {
       status.style.color = 'var(--danger)';
