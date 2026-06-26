@@ -28,8 +28,8 @@ from pydantic import BaseModel
 from pymodbus.client import ModbusTcpClient
 
 from .modbus_client import ModbusWorker
-from .fusionsolar import ChargerWorker, worker_from_env
 from .prices import PriceWorker, worker_from_env as prices_from_env
+from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from . import store
 
 log = logging.getLogger(__name__)
@@ -46,15 +46,15 @@ _ws_clients: set[WebSocket] = set()
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _msg_queue: Optional[asyncio.Queue] = None
 
-_charger_worker: Optional[ChargerWorker] = None
-_charger_status: str = 'Not configured'
-_charger_status_ok: bool = False
-_last_charger_data: dict = {}
-
 _price_worker: Optional[PriceWorker] = None
 _last_prices: list[dict] = []
 _price_status: str = 'Not configured'
 _price_status_ok: bool = False
+
+_solcast_worker: Optional[SolcastWorker] = None
+_last_solar_forecast: list[dict] = []
+_solcast_status: str = 'Not configured'
+_solcast_status_ok: bool = False
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -147,21 +147,6 @@ def _on_error(msg: str):
     _push({'type': 'error', 'msg': msg})
 
 
-def _on_charger_data(data: dict):
-    global _last_charger_data
-    clean = {k: v for k, v in data.items()
-             if isinstance(v, (int, float, str, bool, type(None)))}
-    _last_charger_data = clean
-    _push({'type': 'charger_data', 'payload': clean})
-
-
-def _on_charger_status(msg: str, ok: bool):
-    global _charger_status, _charger_status_ok
-    _charger_status = msg
-    _charger_status_ok = ok
-    _push({'type': 'charger_status', 'ok': ok, 'msg': msg})
-
-
 def _on_prices(prices: list[dict]):
     global _last_prices
     _last_prices = prices
@@ -173,6 +158,19 @@ def _on_price_status(msg: str, ok: bool):
     global _price_status, _price_status_ok
     _price_status = msg
     _price_status_ok = ok
+
+
+def _on_solar_forecast(records: list[dict]):
+    global _last_solar_forecast
+    _last_solar_forecast = records
+    store.save_solar_forecast(records)
+    _push({'type': 'solar_forecast', 'payload': records})
+
+
+def _on_solcast_status(msg: str, ok: bool):
+    global _solcast_status, _solcast_status_ok
+    _solcast_status = msg
+    _solcast_status_ok = ok
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -215,29 +213,29 @@ async def lifespan(app: FastAPI):
     defaults = ConnectRequest()
     _start_worker(defaults.host, defaults.port, defaults.slave_id, defaults.poll_interval)
 
-    # Start FusionSolar charger worker if credentials are configured
-    global _charger_worker
-    _charger_worker = worker_from_env(on_data=_on_charger_data, on_status=_on_charger_status)
-    if _charger_worker:
-        _charger_worker.start()
-
     # Start electricity price worker if API key is configured
     global _price_worker
     _price_worker = prices_from_env(on_prices=_on_prices, on_status=_on_price_status)
     if _price_worker:
         _price_worker.start()
 
+    # Start Solcast solar forecast worker if API key is configured
+    global _solcast_worker
+    _solcast_worker = solcast_from_env(on_forecast=_on_solar_forecast, on_status=_on_solcast_status)
+    if _solcast_worker:
+        _solcast_worker.start()
+
     yield
 
     if _worker and _worker.is_alive():
         _worker.stop()
         _worker.join(timeout=3)
-    if _charger_worker and _charger_worker.is_alive():
-        _charger_worker.stop()
-        _charger_worker.join(timeout=5)
     if _price_worker and _price_worker.is_alive():
         _price_worker.stop()
         _price_worker.join(timeout=5)
+    if _solcast_worker and _solcast_worker.is_alive():
+        _solcast_worker.stop()
+        _solcast_worker.join(timeout=5)
 
 
 class ConnectRequest(BaseModel):
@@ -317,209 +315,24 @@ async def api_read(address: int, type: str = 'u16'):
     return {'value': val}
 
 
-import socket as _socket
 
 
-def _probe_ports(host: str, ports: list[int], timeout: float = 2.0) -> list[int]:
-    """Return which TCP ports on host accept connections."""
-    open_ports = []
-    for p in ports:
-        try:
-            s = _socket.create_connection((host, p), timeout=timeout)
-            s.close()
-            open_ports.append(p)
-        except Exception:
-            pass
-    return open_ports
+@app.get('/api/solar-forecast')
+async def api_solar_forecast():
+    now_ms = int(time.time() * 1000)
+    loop   = asyncio.get_running_loop()
+    data   = await loop.run_in_executor(
+        None, store.load_solar_forecast, now_ms - 86_400_000, now_ms + 2 * 86_400_000
+    )
+    return {'forecast': data if data else _last_solar_forecast, 'status': _solcast_status}
 
 
-def _modbus_scan_once(host: str, port: int, slave_id: int,
-                       fc: int, start: int, count: int, timeout: float = 1.5
-                       ) -> tuple[dict[int, int], str | None]:
-    """Open a fresh connection, read one batch, close. Returns (raw_regs, error_str)."""
-    client = ModbusTcpClient(host=host, port=port, timeout=timeout, retries=0)
-    if not client.connect():
-        return {}, f'TCP connect failed'
-    try:
-        if fc == 3:
-            r = client.read_holding_registers(address=start, count=count, device_id=slave_id)
-        else:
-            r = client.read_input_registers(address=start, count=count, device_id=slave_id)
-        if r.isError():
-            return {}, str(r)
-        return {start + i: v for i, v in enumerate(r.registers)}, None
-    except Exception as exc:
-        return {}, str(exc)
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
-
-
-def _charger_scan_sync(host: str, port: int, slave_id: int, fc: int) -> dict:
-    """Full register scan — call via run_in_executor."""
-    RANGES = [
-        (0, 25), (25, 25), (50, 25), (75, 25),
-        (100, 25), (125, 25),
-        (1000, 25), (1025, 25), (1050, 25), (1075, 25),
-        (1100, 25), (1125, 25), (1150, 25), (1175, 25),
-        (1200, 25),
-        (2000, 25), (2025, 25),
-        (3000, 25),
-        (40000, 25),
-        (47000, 25),
-    ]
-
-    # Quick port probe so we know what's actually listening
-    probe_ports = [502, 6607, 8080, 8899, 8888, 9999, 10000]
-    open_ports = _probe_ports(host, probe_ports)
-
-    registers: dict[int, int] = {}
-    scan_errors: dict[str, str] = {}
-
-    # Verify the target port is open first
-    if port not in open_ports and not any(True for p in open_ports if p == port):
-        # Still try even if probe missed it, but flag it
-        pass
-
-    for start, count in RANGES:
-        raw, err = _modbus_scan_once(host, port, slave_id, fc, start, count)
-        if err:
-            scan_errors[str(start)] = err
-        else:
-            for addr, val in raw.items():
-                if val != 0:
-                    registers[addr] = val
-
-    return {
-        'ok': True, 'host': host, 'port': port, 'slave_id': slave_id, 'fc': fc,
-        'open_ports': open_ports,
-        'registers': registers,
-        'scan_errors': scan_errors,
-    }
-
-
-@app.get('/api/charger/scan')
-async def charger_scan(
-    host: str = '192.168.1.97',
-    port: int = 502,
-    slave_id: int = 1,
-    fc: int = 3,
-):
+@app.post('/api/solar-forecast/refresh')
+async def api_solar_forecast_refresh():
+    if not _solcast_worker or not _solcast_worker.is_alive():
+        raise HTTPException(status_code=503, detail='Solcast worker not running')
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _charger_scan_sync, host, port, slave_id, fc)
-
-
-def _fc43_probe_slave(host: str, port: int, slave_id: int) -> dict:
-    """FC43 Read Device Identification — how the HA integration discovers devices on the SDongle."""
-    client = ModbusTcpClient(host=host, port=port, timeout=1.5, retries=0)
-    if not client.connect():
-        return {'ok': False, 'error': 'TCP connect failed'}
-    try:
-        # read_code=3 (specific), object_id=0x87 (Huawei vendor-specific device list)
-        r = client.read_device_information(read_code=3, object_id=0x87, device_id=slave_id)
-        if r.isError():
-            return {'ok': False, 'error': str(r)}
-        info: dict = r.information or {}
-        devices: list[dict] = []
-        for obj_id in sorted(k for k in info if k >= 0x88):
-            raw = info[obj_id]
-            if isinstance(raw, (bytes, bytearray)):
-                raw = raw.decode('ascii', errors='replace')
-            fields: dict[int, str] = {}
-            for part in str(raw).split(';'):
-                if '=' in part:
-                    k, v = part.split('=', 1)
-                    try:
-                        fields[int(k)] = v.strip()
-                    except ValueError:
-                        pass
-            if fields:
-                devices.append({
-                    'model':     fields.get(1, '?'),
-                    'version':   fields.get(2, '?'),
-                    'esn':       fields.get(4, '?'),
-                    'device_id': int(fields[5]) if fields.get(5, '').isdigit() else None,
-                })
-        log.debug('FC43 slave %d: %d device(s) — %s',
-                  slave_id, len(devices), [d['model'] for d in devices])
-        return {'ok': True, 'devices': devices, 'n_objects': len(info)}
-    except Exception as exc:
-        return {'ok': False, 'error': str(exc)}
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
-
-
-def _probe_slave_sync(host: str, port: int, slave_id: int) -> dict:
-    """FC43 + FC3 sweep on one slave_id. Fresh connection per request."""
-    PROBE_RANGES = [
-        # Low ranges (generic devices)
-        (0, 25), (100, 25), (1000, 25), (2000, 25), (3000, 25),
-        # SCharger / SDongle device-info registers (30000 range)
-        (30000, 25), (30025, 25), (30050, 25), (30075, 25),
-        # SCharger operational registers (confirmed: 30500–30510)
-        (30500, 25),
-        # SUN2000 inverter / PV / grid registers
-        (32000, 25), (32064, 25), (32080, 25), (32100, 25), (32114, 25),
-        # Battery / meter registers
-        (37000, 25), (37060, 25), (37100, 25),
-        # Control registers
-        (40000, 25), (47000, 25), (47060, 25), (47080, 25),
-    ]
-    fc43 = _fc43_probe_slave(host, port, slave_id)
-
-    registers: dict[int, int] = {}
-    for i, (start, count) in enumerate(PROBE_RANGES):
-        log.debug('slave %d: FC3 %d–%d (%d/%d)',
-                  slave_id, start, start + count - 1, i + 1, len(PROBE_RANGES))
-        raw, err = _modbus_scan_once(host, port, slave_id, 3, start, count)
-        if not err:
-            for addr, val in raw.items():
-                if val != 0:
-                    registers[addr] = val
-
-    found = len(registers) > 0 or (fc43.get('ok') and bool(fc43.get('devices')))
-    return {
-        'slave_id': slave_id,
-        'found': found,
-        'fc43': fc43,
-        'registers': registers,
-    }
-
-
-_probe_restart_params: Optional[tuple] = None  # set while worker is paused for a probe
-
-
-@app.get('/api/charger/probe/start')
-async def charger_probe_start(host: str = '192.168.1.185', port: int = 502):
-    """Pause the inverter worker if it shares the same host. Call once before looping slave probes."""
-    global _probe_restart_params
-    if _worker and _worker.is_alive() and _worker.host == host and _worker.port == port:
-        _probe_restart_params = (_worker.host, _worker.port, _worker.slave_id, _worker.poll_interval)
-        _worker.stop()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: _worker.join(timeout=5))
-    return {'ok': True}
-
-
-@app.get('/api/charger/probe/slave')
-async def charger_probe_slave(host: str = '192.168.1.185', port: int = 502, slave_id: int = 1):
-    """Probe a single slave ID and return immediately. Frontend calls this per slave for live progress."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _probe_slave_sync, host, port, slave_id)
-
-
-@app.get('/api/charger/probe/finish')
-async def charger_probe_finish():
-    """Restart the inverter worker after all slave probes are done."""
-    global _probe_restart_params
-    if _probe_restart_params:
-        _start_worker(*_probe_restart_params)
-        _probe_restart_params = None
+    await loop.run_in_executor(None, _solcast_worker._fetch_once)
     return {'ok': True}
 
 
@@ -540,9 +353,6 @@ async def api_state():
         'msg': _connection_msg,
         'data': _last_data,
         'log': _log_buffer[-100:],
-        'charger_status': _charger_status,
-        'charger_status_ok': _charger_status_ok,
-        'charger_data': _last_charger_data,
         'price_status': _price_status,
         'price_status_ok': _price_status_ok,
     }
@@ -568,13 +378,10 @@ async def websocket_endpoint(ws: WebSocket):
         }))
         if _last_data:
             await ws.send_text(json.dumps({'type': 'data', 'payload': _last_data}, default=str))
-        await ws.send_text(json.dumps({
-            'type': 'charger_status', 'ok': _charger_status_ok, 'msg': _charger_status,
-        }))
-        if _last_charger_data:
-            await ws.send_text(json.dumps({'type': 'charger_data', 'payload': _last_charger_data}))
         if _last_prices:
             await ws.send_text(json.dumps({'type': 'prices', 'payload': _last_prices}))
+        if _last_solar_forecast:
+            await ws.send_text(json.dumps({'type': 'solar_forecast', 'payload': _last_solar_forecast}))
         _ws_clients.add(ws)
         try:
             while True:

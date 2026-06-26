@@ -328,7 +328,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <div id="tabbar">
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
   <button class="tab-btn"        onclick="showTab('prices',this)">Prices</button>
-  <button class="tab-btn"        onclick="showTab('charger',this)">Charger</button>
   <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
 </div>
@@ -513,119 +512,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   </div>
 
-  <!-- Charger -->
-  <div id="panel-charger" class="panel">
-
-    <!-- FusionSolar live data -->
-    <div class="ctrl-box" id="chr-live-box">
-      <h3>EV Charger — Live (FusionSolar)</h3>
-      <div id="chr-fs-status" style="font-size:12px;margin-bottom:12px;color:var(--muted)">Not configured — add credentials to .env and restart.</div>
-
-      <!-- KPI cards -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px" id="chr-kpi-cards">
-        <div class="stat-card"><div class="stat-label">Charge Power</div><div class="stat-value" id="chr-kpi-power">—</div><div class="stat-unit">kW</div></div>
-        <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="chr-kpi-status" style="font-size:16px">—</div><div class="stat-unit"></div></div>
-        <div class="stat-card"><div class="stat-label">Session Energy</div><div class="stat-value" id="chr-kpi-session">—</div><div class="stat-unit">kWh</div></div>
-        <div class="stat-card"><div class="stat-label">Total Energy</div><div class="stat-value" id="chr-kpi-total">—</div><div class="stat-unit">kWh</div></div>
-        <div class="stat-card"><div class="stat-label">Phase A</div><div class="stat-value" id="chr-kpi-ia">—</div><div class="stat-unit">A</div></div>
-        <div class="stat-card"><div class="stat-label">Phase B</div><div class="stat-value" id="chr-kpi-ib">—</div><div class="stat-unit">A</div></div>
-        <div class="stat-card"><div class="stat-label">Phase C</div><div class="stat-value" id="chr-kpi-ic">—</div><div class="stat-unit">A</div></div>
-      </div>
-
-      <!-- Raw fields — shown as a table so we can see whatever the API actually returns -->
-      <details style="margin-top:4px">
-        <summary style="font-size:11px;color:var(--muted);cursor:pointer">All raw fields from API</summary>
-        <table id="chr-raw-table" style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px">
-          <thead><tr style="background:var(--surf2)">
-            <th style="text-align:left;padding:5px 10px;color:var(--muted);border-bottom:1px solid var(--border)">Field</th>
-            <th style="text-align:right;padding:5px 10px;color:var(--muted);border-bottom:1px solid var(--border)">Value</th>
-          </tr></thead>
-          <tbody id="chr-raw-tbody"><tr><td colspan="2" style="padding:8px 10px;color:var(--muted)">No data yet</td></tr></tbody>
-        </table>
-      </details>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>EV Charger — Register Scanner</h3>
-      <p class="hint" style="margin-bottom:12px">Scans the charger's Modbus registers to discover the register map. Each range gets a fresh TCP connection. Also probes common ports (502, 6607, 8080…) so we can see what's actually listening.</p>
-      <div class="ctrl-row">
-        <label>Charger IP</label>
-        <input type="text"   id="chr-host"  value="192.168.1.97" style="width:140px">
-        <label>Port</label>
-        <input type="number" id="chr-port"  value="502" min="1" max="65535" style="width:66px">
-        <label>Slave ID</label>
-        <input type="number" id="chr-slave" value="1"   min="0" max="255"   style="width:52px">
-        <label>FC</label>
-        <select id="chr-fc" style="width:90px">
-          <option value="3">FC3 (holding)</option>
-          <option value="4">FC4 (input)</option>
-        </select>
-      </div>
-      <p class="hint">Try FC3 first. If all ranges error, try FC4. Also try Slave ID 0, 100, or 200.</p>
-      <div class="ctrl-row" style="margin-top:8px">
-        <button id="chr-scan-btn" class="primary" onclick="runChargerScan()">Scan Registers</button>
-        <span id="chr-scan-status" style="font-size:11px;margin-left:4px"></span>
-      </div>
-      <div id="chr-ports-row" style="display:none;margin-top:8px;font-size:11px;color:var(--muted)">
-        Open ports on <span id="chr-ports-host"></span>: <span id="chr-ports-list" style="color:var(--success);font-weight:700"></span>
-      </div>
-    </div>
-
-    <div class="ctrl-box" style="margin-top:12px">
-      <h3>Device Discovery — FC43 + FC3 Sweep</h3>
-      <p class="hint" style="margin-bottom:12px">
-        Two-phase scan: <b>FC43</b> (Read Device Identification) lists every device the SDongle knows about,
-        then <b>FC3</b> sweeps register ranges 0–3000, 30000–30524, 32000–47100.
-        Slave ID order matches the Huawei HA integration: 0, 100, then 1–16.
-        If scanning the inverter host, polling is paused and restarted automatically.
-      </p>
-      <div class="ctrl-row">
-        <label>Host</label>
-        <input type="text" id="chr-probe-host" value="192.168.1.185" style="width:140px">
-        <label>Port</label>
-        <input type="number" id="chr-probe-port" value="502" style="width:66px">
-      </div>
-      <div class="ctrl-row">
-        <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Start Discovery</button>
-        <span id="chr-probe-status" style="font-size:11px;margin-left:8px"></span>
-      </div>
-      <div id="chr-probe-results" style="display:none;margin-top:14px;overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:11.5px">
-          <thead>
-            <tr style="background:var(--surf2)">
-              <th style="text-align:center;padding:7px 10px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border);width:70px">Slave ID</th>
-              <th style="text-align:left;padding:7px 10px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border);width:220px">FC43 — Device Identification</th>
-              <th style="text-align:left;padding:7px 10px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">FC3 — Non-zero registers</th>
-            </tr>
-          </thead>
-          <tbody id="chr-probe-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div id="chr-results" style="display:none">
-      <div class="sec">Scan Results</div>
-      <div class="ctrl-box" style="padding:0;overflow:hidden">
-        <table id="chr-table" style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead>
-            <tr style="background:var(--surf2)">
-              <th style="text-align:left;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Address</th>
-              <th style="text-align:left;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Hex</th>
-              <th style="text-align:right;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Value (dec)</th>
-              <th style="text-align:right;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Value (hex)</th>
-              <th style="text-align:right;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Signed</th>
-            </tr>
-          </thead>
-          <tbody id="chr-tbody"></tbody>
-        </table>
-      </div>
-      <div id="chr-errors-box" style="display:none" class="ctrl-box">
-        <h3>Ranges that did not respond</h3>
-        <div id="chr-errors-body" style="font-size:11px;color:var(--muted);line-height:1.8"></div>
-      </div>
-    </div>
-  </div>
-
   <!-- Control -->
   <div id="panel-control" class="panel">
     <div class="ctrl-status" id="ctrl-status">Not connected — connect to the inverter first.</div>
@@ -765,6 +651,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="modal-hdr-hint">Scroll to zoom &middot; Drag to pan</div>
       </div>
       <div class="modal-actions">
+        <button id="modal-fc-btn" onclick="refreshForecast()" style="font-size:11px;padding:4px 10px;display:none">Refresh forecast</button>
         <button onclick="resetZoom()" style="font-size:11px;padding:4px 10px">Reset zoom</button>
         <button class="modal-close" onclick="closeModal()">&#215;</button>
       </div>
@@ -845,9 +732,8 @@ function dispatch(msg) {
     case 'write_result':   onWriteResult(msg.ok, msg.msg);   break;
     case 'log':            onLogEntry(msg.entry);            break;
     case 'error':          addLog('error', msg.msg);         break;
-    case 'charger_data':   onChargerData(msg.payload);       break;
-    case 'charger_status': onChargerStatus(msg.ok, msg.msg); break;
-    case 'prices':         onPrices(msg.payload);            break;
+    case 'prices':          onPrices(msg.payload);           break;
+    case 'solar_forecast':  onSolarForecast(msg.payload);    break;
   }
 }
 
@@ -982,33 +868,92 @@ function onData(d) {
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
 function openChart(key, label, unit, color) {
-  const hist = historyMap[key] || { ts: [], val: [] };
-  const pts  = hist.val.length;
-  const data = makeChartPoints(hist.ts, hist.val);
+  const hist  = historyMap[key] || { ts: [], val: [] };
+  const pts   = hist.val.length;
+  const data  = makeChartPoints(hist.ts, hist.val);
+  const hasFc = key === 'active_power' && _solcastData.length > 0;
 
   document.getElementById('modal-title').textContent =
-    label + (unit ? ' (' + unit + ')' : '');
+    label + (unit ? ' (' + unit + ')' : '') + (hasFc ? ' + Solcast forecast' : '');
+  document.getElementById('modal-fc-btn').style.display = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-overlay').classList.add('active');
 
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
   _modalKey = key;
 
+  // Main actual-data dataset
+  const datasets = [{
+    label: label + (unit ? ' (' + unit + ')' : ''),
+    data,
+    borderColor: color,
+    backgroundColor: color + '22',
+    borderWidth: 2,
+    pointRadius: pts <= 120 ? 2 : 0,
+    pointHoverRadius: 5,
+    fill: true,
+    tension: 0.3,
+    order: 2,
+  }];
+
+  if (hasFc) {
+    const fcPts  = _solcastData.map(d => ({ x: d.ts_ms, y: d.pv_w  }));
+    const p90Pts = _solcastData.filter(d => d.p90_w != null).map(d => ({ x: d.ts_ms, y: d.p90_w }));
+    const p10Pts = _solcastData.filter(d => d.p10_w != null).map(d => ({ x: d.ts_ms, y: d.p10_w }));
+
+    // P10–P90 confidence band (P90 fills downward to P10)
+    if (p90Pts.length && p10Pts.length) {
+      datasets.push({
+        label: 'P90',
+        data: p90Pts,
+        borderColor: 'transparent',
+        backgroundColor: '#F59E0B1A',
+        borderWidth: 0,
+        pointRadius: 0,
+        fill: '+1',
+        tension: 0.3,
+        order: 3,
+      });
+      datasets.push({
+        label: 'P10',
+        data: p10Pts,
+        borderColor: 'transparent',
+        backgroundColor: 'transparent',
+        borderWidth: 0,
+        pointRadius: 0,
+        fill: false,
+        tension: 0.3,
+        order: 3,
+      });
+    }
+
+    // Mean forecast — dashed line drawn above the band
+    datasets.push({
+      label: 'Forecast',
+      data: fcPts,
+      borderColor: '#F59E0BAA',
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
+      tension: 0.3,
+      order: 1,
+    });
+  }
+
+  // Show date in x-axis ticks when the range spans more than 18 h
+  const allTs = [
+    ...hist.ts,
+    ...(hasFc ? _solcastData.map(d => d.ts_ms) : []),
+  ];
+  const xSpan   = allTs.length >= 2 ? Math.max(...allTs) - Math.min(...allTs) : 0;
+  const showDate = xSpan > 18 * 3600000;
+
   _modalChart = new Chart(
     document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
-    data: {
-      datasets: [{
-        label: label + (unit ? ' (' + unit + ')' : ''),
-        data,
-        borderColor: color,
-        backgroundColor: color + '22',
-        borderWidth: 2,
-        pointRadius: pts <= 120 ? 2 : 0,
-        pointHoverRadius: 5,
-        fill: true,
-        tension: 0.3,
-      }]
-    },
+    data: { datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -1021,7 +966,13 @@ function openChart(key, label, unit, color) {
             color: '#8892AA',
             maxTicksLimit: 8,
             font: { size: 10 },
-            callback: val => new Date(val).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            callback: val => {
+              const d = new Date(val);
+              return showDate
+                ? d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' +
+                  d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            },
           },
           grid: { color: '#2D3555' },
         },
@@ -1032,7 +983,15 @@ function openChart(key, label, unit, color) {
         },
       },
       plugins: {
-        legend: { display: false },
+        legend: {
+          display: hasFc,
+          labels: {
+            color: '#8892AA',
+            font:  { size: 10 },
+            boxWidth: 20,
+            filter: item => item.text !== 'P90' && item.text !== 'P10',
+          },
+        },
         tooltip: {
           backgroundColor: '#1C2032',
           titleColor:  '#8892AA',
@@ -1041,8 +1000,15 @@ function openChart(key, label, unit, color) {
           borderWidth: 1,
           padding: 10,
           callbacks: {
-            title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
-            label: ctx => label + ': ' + ctx.formattedValue + (unit ? ' ' + unit : ''),
+            title: ctx => {
+              const d = new Date(ctx[0].parsed.x);
+              return showDate ? d.toLocaleString([], { month: 'short', day: 'numeric',
+                hour: '2-digit', minute: '2-digit' }) : d.toLocaleTimeString();
+            },
+            label: ctx => {
+              if (ctx.dataset.label === 'P90' || ctx.dataset.label === 'P10') return null;
+              return ctx.dataset.label + ': ' + ctx.formattedValue + (unit ? ' ' + unit : '');
+            },
           }
         },
         zoom: {
@@ -1066,6 +1032,18 @@ function overlayClick(e) {
 
 function resetZoom() {
   if (_modalChart) _modalChart.resetZoom();
+}
+
+async function refreshForecast() {
+  const btn = document.getElementById('modal-fc-btn');
+  btn.disabled = true;
+  btn.textContent = 'Fetching…';
+  try {
+    const r = await fetch('/api/solar-forecast/refresh', { method: 'POST' });
+    if (!r.ok) toast('Forecast refresh failed', 'terr');
+  } catch { toast('Forecast refresh failed', 'terr'); }
+  btn.disabled = false;
+  btn.textContent = 'Refresh forecast';
 }
 
 // ── Control ───────────────────────────────────────────────────────────────────
@@ -1194,255 +1172,14 @@ function toast(msg, cls = 'tok') {
   _toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
 }
 
-// ── FusionSolar charger live data ────────────────────────────────────────────
+// ── Solar forecast (Solcast) ──────────────────────────────────────────────────
+let _solcastData = [];
 
-// Best-effort mapping from known FusionSolar KPI field names → UI card IDs.
-// We don't know exactly what fields the SCharger returns until first poll,
-// so the raw table always shows everything; these just populate the named cards.
-const CHR_FIELD_MAP = {
-  // Power (various firmware naming conventions)
-  charge_power:        { id: 'chr-kpi-power',   scale: 1/1000, dp: 2 },  // W → kW
-  active_power:        { id: 'chr-kpi-power',   scale: 1/1000, dp: 2 },
-  output_power:        { id: 'chr-kpi-power',   scale: 1/1000, dp: 2 },
-  // Phase currents
-  phase_a_current:     { id: 'chr-kpi-ia',      scale: 1,      dp: 1 },
-  phase_b_current:     { id: 'chr-kpi-ib',      scale: 1,      dp: 1 },
-  phase_c_current:     { id: 'chr-kpi-ic',      scale: 1,      dp: 1 },
-  a_phase_current:     { id: 'chr-kpi-ia',      scale: 1,      dp: 1 },
-  b_phase_current:     { id: 'chr-kpi-ib',      scale: 1,      dp: 1 },
-  c_phase_current:     { id: 'chr-kpi-ic',      scale: 1,      dp: 1 },
-  // Session & total energy
-  charge_energy:       { id: 'chr-kpi-session', scale: 1,      dp: 2 },
-  session_cap:         { id: 'chr-kpi-session', scale: 1,      dp: 2 },
-  total_charge_energy: { id: 'chr-kpi-total',   scale: 1,      dp: 1 },
-  charge_cap:          { id: 'chr-kpi-total',   scale: 1,      dp: 1 },
-};
-
-// Human-readable work state labels (Huawei SCharger)
-const CHR_STATES = {
-  0: 'Idle', 1: 'Standby', 2: 'Charging', 3: 'Completing',
-  4: 'Fault', 5: 'Unavailable', 6: 'Reserved',
-};
-
-function onChargerStatus(ok, msg) {
-  const el = document.getElementById('chr-fs-status');
-  el.style.color = ok ? 'var(--success)' : 'var(--warning)';
-  el.textContent = msg;
-}
-
-function onChargerData(d) {
-  // Named KPI cards
-  for (const [field, cfg] of Object.entries(CHR_FIELD_MAP)) {
-    if (field in d) {
-      const el = document.getElementById(cfg.id);
-      if (el) el.textContent = (d[field] * cfg.scale).toFixed(cfg.dp);
-    }
-  }
-
-  // Work state — try several common field names
-  const stateVal = d.work_state ?? d.charger_work_state ?? d.status ?? d.work_mode;
-  if (stateVal !== undefined) {
-    const el = document.getElementById('chr-kpi-status');
-    if (el) el.textContent = CHR_STATES[stateVal] ?? stateVal;
-  }
-
-  // Raw fields table — always show everything
-  const tbody = document.getElementById('chr-raw-tbody');
-  const rows = Object.entries(d).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) =>
-    `<tr style="border-bottom:1px solid var(--border)">
-       <td style="padding:4px 10px;color:var(--muted)">${k}</td>
-       <td style="padding:4px 10px;text-align:right">${v}</td>
-     </tr>`
-  ).join('');
-  tbody.innerHTML = rows || '<tr><td colspan="2" style="padding:8px 10px;color:var(--muted)">No fields returned</td></tr>';
-}
-
-// ── Charger scanner ───────────────────────────────────────────────────────────
-async function runChargerScan() {
-  const btn    = document.getElementById('chr-scan-btn');
-  const status = document.getElementById('chr-scan-status');
-  const resDiv = document.getElementById('chr-results');
-
-  btn.disabled = true;
-  status.style.color = 'var(--muted)';
-  status.textContent = 'Scanning… (may take up to 60 s)';
-  resDiv.style.display = 'none';
-
-  const host  = document.getElementById('chr-host').value.trim();
-  const port  = parseInt(document.getElementById('chr-port').value);
-  const slave = parseInt(document.getElementById('chr-slave').value);
-  const fc    = parseInt(document.getElementById('chr-fc').value);
-
-  try {
-    const r    = await fetch(`/api/charger/scan?host=${encodeURIComponent(host)}&port=${port}&slave_id=${slave}&fc=${fc}`);
-    const data = await r.json();
-
-    // Show open ports
-    if (data.open_ports !== undefined) {
-      document.getElementById('chr-ports-host').textContent = host;
-      document.getElementById('chr-ports-list').textContent =
-        data.open_ports.length ? data.open_ports.join(', ') : 'none found';
-      document.getElementById('chr-ports-row').style.display = '';
-    }
-
-    if (!data.ok) {
-      status.style.color = 'var(--danger)';
-      status.textContent = 'Error: ' + (data.error || 'unknown');
-      return;
-    }
-
-    const regs  = data.registers || {};
-    const addrs = Object.keys(regs).map(Number).sort((a, b) => a - b);
-
-    if (addrs.length === 0) {
-      status.style.color = 'var(--warning)';
-      status.textContent = 'Connected but no non-zero registers found in scanned ranges.';
-    } else {
-      status.style.color = 'var(--success)';
-      status.textContent = `Found ${addrs.length} non-zero register${addrs.length !== 1 ? 's' : ''}.`;
-    }
-
-    const tbody = document.getElementById('chr-tbody');
-    tbody.innerHTML = '';
-    for (const addr of addrs) {
-      const raw  = regs[addr];
-      const sgn  = raw >= 0x8000 ? raw - 0x10000 : raw;
-      const tr   = document.createElement('tr');
-      tr.style.borderBottom = '1px solid var(--border)';
-      tr.innerHTML = `
-        <td style="padding:6px 12px">${addr}</td>
-        <td style="padding:6px 12px;color:var(--muted)">0x${addr.toString(16).toUpperCase().padStart(4,'0')}</td>
-        <td style="padding:6px 12px;text-align:right">${raw}</td>
-        <td style="padding:6px 12px;text-align:right;color:var(--muted)">0x${raw.toString(16).toUpperCase().padStart(4,'0')}</td>
-        <td style="padding:6px 12px;text-align:right;color:${sgn < 0 ? 'var(--warning)' : 'var(--muted)'}">${sgn}</td>
-      `;
-      tbody.appendChild(tr);
-    }
-
-    const errKeys = Object.keys(data.scan_errors || {});
-    const errBox  = document.getElementById('chr-errors-box');
-    const errBody = document.getElementById('chr-errors-body');
-    if (errKeys.length) {
-      errBody.innerHTML = errKeys
-        .map(k => `<div>Base ${k}: ${data.scan_errors[k]}</div>`)
-        .join('');
-      errBox.style.display = '';
-    } else {
-      errBox.style.display = 'none';
-    }
-
-    resDiv.style.display = '';
-  } catch (e) {
-    status.style.color = 'var(--danger)';
-    status.textContent = 'Request failed: ' + e.message;
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function runChargerProbe() {
-  // Order matches the wlcrs/huawei_solar HA integration auto-discovery logic
-  const SLAVE_IDS = [0, 100, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-  const btn    = document.getElementById('chr-probe-btn');
-  const status = document.getElementById('chr-probe-status');
-  const resDiv = document.getElementById('chr-probe-results');
-  const tbody  = document.getElementById('chr-probe-tbody');
-  const host   = document.getElementById('chr-probe-host').value.trim();
-  const port   = parseInt(document.getElementById('chr-probe-port').value);
-
-  btn.disabled = true;
-  tbody.innerHTML = '';
-  resDiv.style.display = '';
-
-  // Pre-populate all rows as waiting
-  for (const sid of SLAVE_IDS) {
-    const tr = document.createElement('tr');
-    tr.style.borderBottom = '1px solid var(--border)';
-    tr.innerHTML = `
-      <td style="text-align:center;padding:6px 10px;font-weight:700;font-size:13px">${sid}</td>
-      <td id="chr-fc43-${sid}" style="padding:6px 10px;color:var(--muted)">… waiting</td>
-      <td id="chr-fc3-${sid}"  style="padding:6px 10px;font-size:11px;color:var(--muted)">… waiting</td>
-    `;
-    tbody.appendChild(tr);
-  }
-
-  let anyFound = false;
-
-  function renderSlaveResult(sid, data) {
-    const fc43El = document.getElementById(`chr-fc43-${sid}`);
-    const fc3El  = document.getElementById(`chr-fc3-${sid}`);
-    const fc43   = data.fc43 || {};
-    const regs   = data.registers || {};
-
-    // FC43 column
-    if (fc43.ok && fc43.devices && fc43.devices.length > 0) {
-      const lines = fc43.devices.map(d =>
-        `<b>${d.model}</b><br><span style="color:var(--muted);font-size:10px">ESN: ${d.esn} | slave_id: ${d.device_id ?? '?'}</span>`
-      ).join('<br>');
-      fc43El.innerHTML = `<span style="color:var(--success)">✓ ${fc43.devices.length} device(s)</span><br>${lines}`;
-    } else if (fc43.ok) {
-      fc43El.innerHTML = `<span style="color:var(--muted)">✓ responded (0 objects)</span>`;
-    } else {
-      fc43El.innerHTML = `<span style="color:var(--muted)">— ${(fc43.error || 'no response').replace(/^Modbus\s*/i,'').slice(0,60)}</span>`;
-    }
-
-    // FC3 column
-    const addrs = Object.keys(regs).map(Number).sort((a, b) => a - b);
-    if (addrs.length > 0) {
-      const shown = addrs.slice(0, 20).map(a => `${a}=<b>${regs[a]}</b>`).join('  ');
-      fc3El.innerHTML = `<span style="color:var(--success)">✓ ${addrs.length} register(s)</span><br>${shown}${addrs.length > 20 ? ' …' : ''}`;
-    } else {
-      fc3El.style.color = 'var(--muted)';
-      fc3El.textContent = '—';
-    }
-
-    if (data.found) anyFound = true;
-  }
-
-  try {
-    status.style.color = 'var(--muted)';
-    status.textContent = 'Pausing inverter worker…';
-    await fetch(`/api/charger/probe/start?host=${encodeURIComponent(host)}&port=${port}`);
-
-    for (let i = 0; i < SLAVE_IDS.length; i++) {
-      const sid   = SLAVE_IDS[i];
-      const fc43El = document.getElementById(`chr-fc43-${sid}`);
-      const fc3El  = document.getElementById(`chr-fc3-${sid}`);
-
-      fc43El.style.color = 'var(--muted)';
-      fc43El.textContent = '⟳ scanning…';
-      fc3El.textContent  = '⟳ scanning…';
-      status.textContent = `Slave ${sid} — FC43 + FC3 sweep (${i + 1}/${SLAVE_IDS.length})`;
-
-      const t0 = Date.now();
-      const ticker = setInterval(() => {
-        const s = Math.floor((Date.now() - t0) / 1000);
-        fc43El.textContent = `⟳ scanning (${s}s)…`;
-      }, 500);
-
-      try {
-        const r    = await fetch(`/api/charger/probe/slave?host=${encodeURIComponent(host)}&port=${port}&slave_id=${sid}`);
-        const data = await r.json();
-        clearInterval(ticker);
-        renderSlaveResult(sid, data);
-      } catch (e) {
-        clearInterval(ticker);
-        fc43El.style.color = 'var(--danger)';
-        fc43El.textContent = 'Request error';
-        fc3El.textContent  = '';
-      }
-    }
-
-    status.style.color = anyFound ? 'var(--success)' : 'var(--warning)';
-    status.textContent = anyFound
-      ? 'Done — check FC43/FC3 columns for results.'
-      : 'Done — nothing responded on any slave ID.';
-  } catch (e) {
-    status.style.color = 'var(--danger)';
-    status.textContent = 'Error: ' + e.message;
-  } finally {
-    await fetch('/api/charger/probe/finish').catch(() => {});
-    btn.disabled = false;
+function onSolarForecast(data) {
+  _solcastData = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
+  // Refresh the PV Power modal if it's open so the overlay appears immediately
+  if (_modalChart && _modalKey === 'active_power') {
+    openChart('active_power', 'PV Power', 'W', '#F59E0B');
   }
 }
 
@@ -1581,7 +1318,7 @@ function renderPriceChart() {
         return _fmtDT(p.ts) + (p.forecast ? '  (forecast)' : '');
       },
       label: ctx => {
-        const p = _pricesData[ctx[0].dataIndex];
+        const p = _pricesData[ctx.dataIndex];
         const lines = [];
         if (mode === 'import') {
           lines.push(`Import:      ${p.import.toFixed(4)} DKK/kWh`);

@@ -32,6 +32,11 @@ def _get_con() -> sqlite3.Connection:
             '(ts_ms INTEGER PRIMARY KEY, import_dkk REAL, export_dkk REAL, '
             ' spot_est REAL, resolution TEXT, forecast INTEGER)'
         )
+        _con.execute(
+            # pv_w/p10_w/p90_w are Watts (converted from Solcast kW); ts_ms = period_end UTC ms
+            'CREATE TABLE IF NOT EXISTS solar_forecast '
+            '(ts_ms INTEGER PRIMARY KEY, pv_w REAL, p10_w REAL, p90_w REAL)'
+        )
         _con.commit()
     return _con
 
@@ -79,6 +84,32 @@ def load_prices(from_ms: int, to_ms: int) -> list[dict]:
             'spot_est': spe, 'resolution': res, 'forecast': bool(fc),
         }
         for ts, imp, exp, spe, res, fc in rows
+    ]
+
+
+def save_solar_forecast(records: list[dict]):
+    """Upsert a batch of solar forecast records from SolcastWorker."""
+    with _lock:
+        con = _get_con()
+        for r in records:
+            con.execute(
+                'INSERT OR REPLACE INTO solar_forecast VALUES (?, ?, ?, ?)',
+                (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w')),
+            )
+        con.commit()
+
+
+def load_solar_forecast(from_ms: int, to_ms: int) -> list[dict]:
+    """Return stored solar forecast records in [from_ms, to_ms] (UTC milliseconds)."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts_ms, pv_w, p10_w, p90_w FROM solar_forecast '
+            'WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms',
+            (from_ms, to_ms),
+        ).fetchall()
+    return [
+        {'ts_ms': ts, 'pv_w': pv, 'p10_w': p10, 'p90_w': p90}
+        for ts, pv, p10, p90 in rows
     ]
 
 
