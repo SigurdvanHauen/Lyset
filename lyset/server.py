@@ -16,10 +16,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
@@ -30,6 +33,7 @@ from pymodbus.client import ModbusTcpClient
 from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
+from .consumption_model import ConsumptionModel
 from . import store
 
 log = logging.getLogger(__name__)
@@ -55,6 +59,15 @@ _solcast_worker: Optional[SolcastWorker] = None
 _last_solar_forecast: list[dict] = []
 _solcast_status: str = 'Not configured'
 _solcast_status_ok: bool = False
+
+_consumption_model: Optional[ConsumptionModel] = None
+_last_consumption_forecast: list[dict] = []
+_MODEL_PATH = Path(__file__).parent.parent / 'lyset_model.json'
+_TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
+
+# Accumulator: collect 10-s Modbus samples within the current 15-min slot
+_slot_samples: list[float] = []   # watts values
+_slot_key: int = -1               # int(ts_utc / 900)
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -123,13 +136,42 @@ class _WebLogHandler(logging.Handler):
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
-    global _last_data
+    global _last_data, _slot_samples, _slot_key
     # Strip private keys and non-JSON-serialisable values
     clean = {k: v for k, v in data.items()
              if not k.startswith('_') and isinstance(v, (int, float, str, bool, type(None)))}
     _last_data = clean
     _push({'type': 'data', 'payload': clean})
-    store.save(data.get('_timestamp', time.time()), clean)
+    ts = data.get('_timestamp', time.time())
+    store.save(ts, clean)
+
+    # Accumulate grid import for the current 15-min slot
+    meter_w = clean.get('meter_active_power')
+    if meter_w is not None and _consumption_model is not None:
+        grid_import_w = max(0.0, -meter_w)   # negative meter = importing from grid
+        key = int(ts / 900)
+        if key != _slot_key:
+            if _slot_samples and _slot_key >= 0:
+                avg_w = sum(_slot_samples) / len(_slot_samples)
+                slot_ts = _slot_key * 900.0
+                _consumption_model.update(slot_ts, avg_w)
+                _save_model_and_regen()
+            _slot_samples = [grid_import_w]
+            _slot_key = key
+        else:
+            _slot_samples.append(grid_import_w)
+
+
+def _save_model_and_regen():
+    global _last_consumption_forecast
+    try:
+        _consumption_model.save(_MODEL_PATH)
+    except Exception as exc:
+        log.warning('ConsumptionModel: save failed — %s', exc)
+    forecast = _consumption_model.predict(time.time())
+    _last_consumption_forecast = forecast
+    store.save_consumption_forecast(forecast)
+    _push({'type': 'consumption_forecast', 'payload': forecast})
 
 
 def _on_connection(ok: bool, msg: str):
@@ -225,6 +267,34 @@ async def lifespan(app: FastAPI):
     if _solcast_worker:
         _solcast_worker.start()
 
+    # Load or create consumption model
+    global _consumption_model, _last_consumption_forecast
+    if _MODEL_PATH.exists():
+        try:
+            _consumption_model = ConsumptionModel.load(_MODEL_PATH)
+            log.info('ConsumptionModel: loaded from %s (%d/%d slots filled)',
+                     _MODEL_PATH.name, _consumption_model.coverage, 672)
+        except Exception as exc:
+            log.warning('ConsumptionModel: load failed (%s) — starting fresh', exc)
+            _consumption_model = ConsumptionModel()
+    else:
+        _consumption_model = ConsumptionModel()
+        excel_path = os.getenv('CONSUMPTION_HISTORY_PATH', '').strip()
+        if excel_path:
+            try:
+                n = _consumption_model.seed_from_excel(excel_path)
+                if n:
+                    _consumption_model.save(_MODEL_PATH)
+                    log.info('ConsumptionModel: seeded from Excel, saved to %s', _MODEL_PATH.name)
+            except Exception as exc:
+                log.error('ConsumptionModel: Excel seed failed — %s', exc)
+        else:
+            log.info('ConsumptionModel: no model file and no CONSUMPTION_HISTORY_PATH set — '
+                     'learning from scratch (set CONSUMPTION_HISTORY_PATH to seed from Excel)')
+
+    if _consumption_model and _consumption_model.coverage > 0:
+        _last_consumption_forecast = _consumption_model.predict(time.time())
+
     yield
 
     if _worker and _worker.is_alive():
@@ -317,6 +387,38 @@ async def api_read(address: int, type: str = 'u16'):
 
 
 
+@app.get('/api/consumption-forecast')
+async def api_consumption_forecast():
+    now_ms = int(time.time() * 1000)
+    loop   = asyncio.get_running_loop()
+    data   = await loop.run_in_executor(
+        None, store.load_consumption_forecast, now_ms, now_ms + 86_400_000
+    )
+    return {
+        'forecast': data if data else _last_consumption_forecast,
+        'coverage': _consumption_model.coverage if _consumption_model else 0,
+    }
+
+
+class ExcelImportRequest(BaseModel):
+    path: str
+
+
+@app.post('/api/consumption/import-excel')
+async def api_consumption_import_excel(body: ExcelImportRequest):
+    if not _consumption_model:
+        raise HTTPException(status_code=503, detail='Consumption model not initialised')
+    loop = asyncio.get_running_loop()
+    def _do_import():
+        n = _consumption_model.seed_from_excel(body.path)
+        if n:
+            _consumption_model.save(_MODEL_PATH)
+            _save_model_and_regen()
+        return n
+    n = await loop.run_in_executor(None, _do_import)
+    return {'ok': True, 'rows_imported': n, 'coverage': _consumption_model.coverage}
+
+
 @app.get('/api/solar-forecast')
 async def api_solar_forecast():
     now_ms = int(time.time() * 1000)
@@ -382,6 +484,8 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps({'type': 'prices', 'payload': _last_prices}))
         if _last_solar_forecast:
             await ws.send_text(json.dumps({'type': 'solar_forecast', 'payload': _last_solar_forecast}))
+        if _last_consumption_forecast:
+            await ws.send_text(json.dumps({'type': 'consumption_forecast', 'payload': _last_consumption_forecast}))
         _ws_clients.add(ws)
         try:
             while True:

@@ -37,6 +37,11 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS solar_forecast '
             '(ts_ms INTEGER PRIMARY KEY, pv_w REAL, p10_w REAL, p90_w REAL)'
         )
+        _con.execute(
+            # w = predicted grid import in Watts; ts_ms = UTC ms of 15-min slot start
+            'CREATE TABLE IF NOT EXISTS consumption_forecast '
+            '(ts_ms INTEGER PRIMARY KEY, w REAL)'
+        )
         _con.commit()
     return _con
 
@@ -111,6 +116,30 @@ def load_solar_forecast(from_ms: int, to_ms: int) -> list[dict]:
         {'ts_ms': ts, 'pv_w': pv, 'p10_w': p10, 'p90_w': p90}
         for ts, pv, p10, p90 in rows
     ]
+
+
+def save_consumption_forecast(records: list[dict]):
+    """Upsert a batch of consumption forecast records."""
+    with _lock:
+        con = _get_con()
+        for r in records:
+            if r.get('w') is not None:
+                con.execute(
+                    'INSERT OR REPLACE INTO consumption_forecast VALUES (?, ?)',
+                    (r['ts_ms'], r['w']),
+                )
+        con.commit()
+
+
+def load_consumption_forecast(from_ms: int, to_ms: int) -> list[dict]:
+    """Return stored consumption forecast records in [from_ms, to_ms]."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts_ms, w FROM consumption_forecast '
+            'WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms',
+            (from_ms, to_ms),
+        ).fetchall()
+    return [{'ts_ms': ts, 'w': w} for ts, w in rows]
 
 
 def load_last_24h() -> list[tuple[float, dict]]:
