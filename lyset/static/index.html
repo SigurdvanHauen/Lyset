@@ -634,6 +634,7 @@ function connectWS() {
 function dispatch(msg) {
   switch (msg.type) {
     case 'data':         onData(msg.payload);           break;
+    case 'history':      onHistory(msg.points);         break;
     case 'connection':   onConn(msg.ok, msg.msg);        break;
     case 'write_result': onWriteResult(msg.ok, msg.msg); break;
     case 'log':          onLogEntry(msg.entry);          break;
@@ -677,6 +678,23 @@ function onConn(ok, msg) {
 
 function setCtrlEnabled(en) {
   document.querySelectorAll('.ctrl-write').forEach(b => b.disabled = !en);
+}
+
+// ── History (server-persisted data loaded on connect) ─────────────────────────
+function onHistory(points) {
+  // Clear and repopulate from the server's authoritative store to avoid duplicates on reconnect.
+  for (const key of Object.keys(historyMap)) delete historyMap[key];
+  const cutoff = Date.now() - 86400000;
+  for (const pt of points) {
+    if (pt.ts < cutoff) continue;
+    for (const [key, val] of Object.entries(pt.data)) {
+      if (typeof val === 'number') {
+        if (!historyMap[key]) historyMap[key] = { ts: [], val: [] };
+        historyMap[key].ts.push(pt.ts);
+        historyMap[key].val.push(val);
+      }
+    }
+  }
 }
 
 // ── Data display ──────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .modbus_client import ModbusWorker
+from . import store
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ def _on_data(data: dict):
              if not k.startswith('_') and isinstance(v, (int, float, str, bool, type(None)))}
     _last_data = clean
     _push({'type': 'data', 'payload': clean})
+    store.save(data.get('_timestamp', time.time()), clean)
 
 
 def _on_connection(ok: bool, msg: str):
@@ -164,6 +166,8 @@ async def lifespan(app: FastAPI):
         logger = logging.getLogger(name)
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
+
+    store.init()
 
     # Auto-connect on startup using the default settings
     defaults = ConnectRequest()
@@ -269,6 +273,13 @@ async def api_state():
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     try:
+        # Send history before registering — large payload, keep it off the broadcaster path.
+        loop = asyncio.get_running_loop()
+        history = await loop.run_in_executor(None, store.load_last_24h)
+        if history:
+            pts = [{'ts': int(ts * 1000), 'data': d} for ts, d in history]
+            await ws.send_text(json.dumps({'type': 'history', 'points': pts}))
+
         # Send current state before registering — avoids a concurrent-send race
         # with _broadcaster which could silently prune this ws from _ws_clients.
         await ws.send_text(json.dumps({
