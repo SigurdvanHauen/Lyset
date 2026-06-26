@@ -2,7 +2,7 @@
 SQLite-backed history store for poll snapshots.
 
 Saves every poll to lyset_history.db at the project root.
-Rows older than 24 h are pruned on each write.
+Data is kept indefinitely until manually deleted.
 Thread-safe: a single shared connection protected by a Lock.
 """
 
@@ -36,14 +36,12 @@ def init():
 
 
 def save(ts: float, data: dict):
-    cutoff = time.time() - 86400
     with _lock:
         con = _get_con()
         con.execute(
             'INSERT OR REPLACE INTO polls VALUES (?, ?)',
             (ts, json.dumps(data, default=str)),
         )
-        con.execute('DELETE FROM polls WHERE ts < ?', (cutoff,))
         con.commit()
 
 
