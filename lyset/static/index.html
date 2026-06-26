@@ -327,6 +327,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <!-- ── Tab bar ── -->
 <div id="tabbar">
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
+  <button class="tab-btn"        onclick="showTab('prices',this)">Prices</button>
   <button class="tab-btn"        onclick="showTab('charger',this)">Charger</button>
   <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
@@ -430,6 +431,65 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div class="card acc">
         <div class="card-top"><div class="card-lbl">Inverter State</div><div class="card-times" id="t-d-istate"></div></div>
         <div class="card-val" style="font-size:12px" id="d-istate">&#8212;</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Prices -->
+  <div id="panel-prices" class="panel">
+
+    <!-- Current hour cards -->
+    <div class="sec">Current Hour</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Import Price</div></div>
+        <div class="card-val" id="pr-cur-import">&#8212;<span class="unit">DKK/kWh</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-cur-import-sub"></div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Export (spot est.)</div></div>
+        <div class="card-val" id="pr-cur-export">&#8212;<span class="unit">DKK/kWh</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Net metering ~spot price</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Next Hour Import</div></div>
+        <div class="card-val" id="pr-next-import">&#8212;<span class="unit">DKK/kWh</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-next-trend"></div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Today's Cheapest</div></div>
+        <div class="card-val" id="pr-day-min">&#8212;<span class="unit">DKK/kWh</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-day-min-time"></div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Today's Most Expensive</div></div>
+        <div class="card-val" id="pr-day-max">&#8212;<span class="unit">DKK/kWh</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-day-max-time"></div>
+      </div>
+    </div>
+
+    <!-- Price forecast chart -->
+    <div class="sec" style="margin-top:16px">
+      Price Forecast
+      <span id="pr-status" style="float:right;font-size:10px;color:var(--muted);text-transform:none;font-weight:normal;letter-spacing:0"></span>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+        <button id="pr-btn-import" class="primary" onclick="setPriceMode('import')" style="font-size:11px;padding:3px 12px">Import (all-in)</button>
+        <button id="pr-btn-export" onclick="setPriceMode('export')" style="font-size:11px;padding:3px 12px">Export (spot est.)</button>
+        <span style="font-size:10px;color:var(--muted);margin-left:auto">
+          &#9632; past &nbsp; &#9632; current &nbsp; &#9632; future &nbsp; &#9632; forecast
+        </span>
+      </div>
+      <div style="position:relative;height:300px">
+        <canvas id="pr-chart"></canvas>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.6">
+        Data: <a href="https://stromligning.dk" target="_blank" style="color:var(--muted)">Strømligning</a>
+        &middot; DK1 zone &middot; Import = spot + DSO tariff + elafgift + 25% VAT
+        &middot; Export &asymp; spot price (excl. elafgift, no VAT)
+        &middot; Solid bars = real data (15 min) &middot; Faded = hourly forecast
       </div>
     </div>
 
@@ -742,6 +802,7 @@ function showTab(name, btn) {
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
   if (name === 'control' && isConnected) refreshCtrl();
+  if (name === 'prices') renderPriceChart();
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -768,6 +829,7 @@ function dispatch(msg) {
     case 'error':          addLog('error', msg.msg);         break;
     case 'charger_data':   onChargerData(msg.payload);       break;
     case 'charger_status': onChargerStatus(msg.ok, msg.msg); break;
+    case 'prices':         onPrices(msg.payload);            break;
   }
 }
 
@@ -1364,6 +1426,192 @@ async function runChargerProbe() {
     await fetch('/api/charger/probe/finish').catch(() => {});
     btn.disabled = false;
   }
+}
+
+// ── Prices ────────────────────────────────────────────────────────────────────
+let _pricesData = [];
+let _priceChart = null;
+let _priceMode  = 'import';
+
+function onPrices(prices) {
+  _pricesData = prices.slice().sort((a, b) => a.ts - b.ts);
+  updatePriceCards();
+  document.getElementById('pr-status').textContent = '';
+  const prPanel = document.getElementById('panel-prices');
+  if (prPanel.classList.contains('active')) renderPriceChart();
+}
+
+function _fmtTime(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+function _fmtDT(ts) {
+  return new Date(ts).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function _todayRange() {
+  const now = new Date();
+  const s   = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return [s, s + 86400000];
+}
+
+function updatePriceCards() {
+  const now     = Date.now();
+  const cur     = _pricesData.find(p => p.ts <= now && p.ts + 3600000 > now)
+                  || _pricesData.find(p => p.ts > now - 900000 && p.ts <= now);
+  const nxt     = _pricesData.find(p => p.ts > now);
+  const [ds, de] = _todayRange();
+  const today   = _pricesData.filter(p => p.ts >= ds && p.ts < de && !p.forecast);
+  const todayImp = today.map(p => p.import);
+  const minP    = todayImp.length ? Math.min(...todayImp) : null;
+  const maxP    = todayImp.length ? Math.max(...todayImp) : null;
+  const minRec  = today.find(p => p.import === minP);
+  const maxRec  = today.find(p => p.import === maxP);
+
+  const el = id => document.getElementById(id);
+  const fmt = v => v != null ? v.toFixed(2) : '—';
+
+  el('pr-cur-import').innerHTML = cur ? `${fmt(cur.import)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
+  el('pr-cur-export').innerHTML = cur ? `${fmt(cur.export)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
+  el('pr-cur-import-sub').textContent = cur ? `spot+tax: ${fmt(cur.spot_est)} DKK/kWh` : '';
+  el('pr-next-import').innerHTML = nxt ? `${fmt(nxt.import)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
+  if (cur && nxt) {
+    const diff = nxt.import - cur.import;
+    el('pr-next-trend').textContent = (diff >= 0 ? '▲ +' : '▼ ') + fmt(diff) + ' DKK/kWh';
+    el('pr-next-trend').style.color = diff >= 0 ? 'var(--warning)' : 'var(--success)';
+  } else {
+    el('pr-next-trend').textContent = '';
+  }
+  el('pr-day-min').innerHTML = minRec ? `${fmt(minP)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
+  el('pr-day-min-time').textContent = minRec ? _fmtTime(minRec.ts) : '';
+  el('pr-day-max').innerHTML = maxRec ? `${fmt(maxP)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
+  el('pr-day-max-time').textContent = maxRec ? _fmtTime(maxRec.ts) : '';
+}
+
+// Color a bar based on its price position within the shown range.
+// past=faded, current=full opacity+white border, forecast=hatched via alpha
+function _barColor(t, isPast, isCurrent, isForecast) {
+  // t = 0 (cheap) → 1 (expensive)
+  let rgb;
+  if      (t < 0.25) rgb = [52,  211, 153];   // green
+  else if (t < 0.5)  rgb = [251, 211, 77 ];   // yellow-green
+  else if (t < 0.75) rgb = [245, 158, 11 ];   // orange
+  else               rgb = [248, 113, 113];   // red
+  const a = isForecast ? 0.45 : (isPast ? 0.35 : (isCurrent ? 1.0 : 0.75));
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+}
+
+function renderPriceChart() {
+  if (!_pricesData.length) return;
+  const now  = Date.now();
+  const mode = _priceMode;
+  const vals = _pricesData.map(p => mode === 'import' ? p.import : p.export);
+  const min  = Math.min(...vals.filter(v => v != null));
+  const max  = Math.max(...vals.filter(v => v != null));
+  const rng  = max - min || 1;
+
+  const labels  = _pricesData.map(p => _fmtTime(p.ts));
+  const bgColors = _pricesData.map((p, i) => {
+    const isPast     = p.ts + (p.resolution === '15m' ? 900000 : 3600000) <= now;
+    const isCurrent  = !isPast && p.ts <= now;
+    const isForecast = !!p.forecast;
+    return _barColor((vals[i] - min) / rng, isPast, isCurrent, isForecast);
+  });
+  const borderColors = _pricesData.map(p => {
+    const dur = p.resolution === '15m' ? 900000 : 3600000;
+    return (p.ts <= now && p.ts + dur > now) ? '#FFFFFF' : 'transparent';
+  });
+  const borderWidths = _pricesData.map(p => {
+    const dur = p.resolution === '15m' ? 900000 : 3600000;
+    return (p.ts <= now && p.ts + dur > now) ? 2 : 0;
+  });
+
+  const chartData = {
+    labels,
+    datasets: [{
+      data: vals,
+      backgroundColor:  bgColors,
+      borderColor:      borderColors,
+      borderWidth:      borderWidths,
+      borderSkipped:    false,
+    }],
+  };
+
+  const yLabel = mode === 'import' ? 'Import DKK/kWh (incl. VAT)' : 'Export DKK/kWh (est. spot)';
+
+  if (_priceChart) {
+    _priceChart.data = chartData;
+    _priceChart.options.scales.y.title.text = yLabel;
+    _priceChart.update('none');
+    return;
+  }
+
+  _priceChart = new Chart(document.getElementById('pr-chart').getContext('2d'), {
+    type: 'bar',
+    data: chartData,
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      animation:           false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032',
+          titleColor:      '#8892AA',
+          bodyColor:       '#E2E8F4',
+          borderColor:     '#2D3555',
+          borderWidth:     1,
+          callbacks: {
+            title: ctx => {
+              const p = _pricesData[ctx[0].dataIndex];
+              return _fmtDT(p.ts) + (p.forecast ? ' (forecast)' : '');
+            },
+            label: ctx => {
+              const p = _pricesData[ctx[0].dataIndex];
+              const lines = [];
+              if (mode === 'import') {
+                lines.push(`Import: ${p.import.toFixed(4)} DKK/kWh`);
+                lines.push(`Spot+tax: ${p.spot_est.toFixed(4)} DKK/kWh`);
+                lines.push(`Export est.: ${p.export.toFixed(4)} DKK/kWh`);
+              } else {
+                lines.push(`Export est.: ${p.export.toFixed(4)} DKK/kWh`);
+                lines.push(`Import: ${p.import.toFixed(4)} DKK/kWh`);
+              }
+              lines.push(`Resolution: ${p.resolution || '1h'}`);
+              return lines;
+            },
+          },
+        },
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color:         '#8892AA',
+            font:          { size: 9 },
+            maxTicksLimit: 24,
+            maxRotation:   45,
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          title: { display: true, text: yLabel, color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 },
+                   callback: v => v.toFixed(2) },
+          grid:  { color: '#2D3555' },
+          min:   0,
+        },
+      },
+    },
+  });
+}
+
+function setPriceMode(mode) {
+  _priceMode = mode;
+  document.getElementById('pr-btn-import').className = mode === 'import' ? 'primary' : '';
+  document.getElementById('pr-btn-export').className = mode === 'export' ? 'primary' : '';
+  renderPriceChart();
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

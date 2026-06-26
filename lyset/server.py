@@ -29,6 +29,7 @@ from pymodbus.client import ModbusTcpClient
 
 from .modbus_client import ModbusWorker
 from .fusionsolar import ChargerWorker, worker_from_env
+from .prices import PriceWorker, worker_from_env as prices_from_env
 from . import store
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,11 @@ _charger_worker: Optional[ChargerWorker] = None
 _charger_status: str = 'Not configured'
 _charger_status_ok: bool = False
 _last_charger_data: dict = {}
+
+_price_worker: Optional[PriceWorker] = None
+_last_prices: list[dict] = []
+_price_status: str = 'Not configured'
+_price_status_ok: bool = False
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -156,6 +162,19 @@ def _on_charger_status(msg: str, ok: bool):
     _push({'type': 'charger_status', 'ok': ok, 'msg': msg})
 
 
+def _on_prices(prices: list[dict]):
+    global _last_prices
+    _last_prices = prices
+    store.save_prices(prices)
+    _push({'type': 'prices', 'payload': prices})
+
+
+def _on_price_status(msg: str, ok: bool):
+    global _price_status, _price_status_ok
+    _price_status = msg
+    _price_status_ok = ok
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 def _start_worker(host: str, port: int, slave_id: int, poll_interval: float):
@@ -202,6 +221,12 @@ async def lifespan(app: FastAPI):
     if _charger_worker:
         _charger_worker.start()
 
+    # Start electricity price worker if API key is configured
+    global _price_worker
+    _price_worker = prices_from_env(on_prices=_on_prices, on_status=_on_price_status)
+    if _price_worker:
+        _price_worker.start()
+
     yield
 
     if _worker and _worker.is_alive():
@@ -210,6 +235,9 @@ async def lifespan(app: FastAPI):
     if _charger_worker and _charger_worker.is_alive():
         _charger_worker.stop()
         _charger_worker.join(timeout=5)
+    if _price_worker and _price_worker.is_alive():
+        _price_worker.stop()
+        _price_worker.join(timeout=5)
 
 
 class ConnectRequest(BaseModel):
@@ -495,6 +523,16 @@ async def charger_probe_finish():
     return {'ok': True}
 
 
+@app.get('/api/prices')
+async def api_prices():
+    now_ms = int(time.time() * 1000)
+    loop   = asyncio.get_running_loop()
+    data   = await loop.run_in_executor(
+        None, store.load_prices, now_ms - 86_400_000, now_ms + 7 * 86_400_000
+    )
+    return {'prices': data if data else _last_prices, 'status': _price_status}
+
+
 @app.get('/api/state')
 async def api_state():
     return {
@@ -505,6 +543,8 @@ async def api_state():
         'charger_status': _charger_status,
         'charger_status_ok': _charger_status_ok,
         'charger_data': _last_charger_data,
+        'price_status': _price_status,
+        'price_status_ok': _price_status_ok,
     }
 
 
@@ -533,6 +573,8 @@ async def websocket_endpoint(ws: WebSocket):
         }))
         if _last_charger_data:
             await ws.send_text(json.dumps({'type': 'charger_data', 'payload': _last_charger_data}))
+        if _last_prices:
+            await ws.send_text(json.dumps({'type': 'prices', 'payload': _last_prices}))
         _ws_clients.add(ws)
         try:
             while True:
