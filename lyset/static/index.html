@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lyset — SUN2000 Monitor</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <style>
@@ -1546,15 +1545,24 @@ function renderPriceChart() {
     return (p.ts <= now && p.ts + dur > now) ? 2 : 0;
   });
 
+  // Category labels — show weekday+date at day boundaries, time-only otherwise
+  const labels = _pricesData.map((p, i) => {
+    const d    = new Date(p.ts);
+    const prev = i > 0 ? new Date(_pricesData[i - 1].ts) : null;
+    const t    = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (!prev || d.toDateString() !== prev.toDateString())
+      return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'numeric' }) + ' ' + t;
+    return t;
+  });
+
   const chartData = {
+    labels,
     datasets: [{
-      data:             _pricesData.map((p, i) => ({ x: p.ts, y: vals[i] })),
+      data:             vals,
       backgroundColor:  bgColors,
       borderColor:      borderColors,
       borderWidth:      borderWidths,
       borderSkipped:    false,
-      barThickness:     'flex',
-      maxBarThickness:  40,
     }],
   };
 
@@ -1589,21 +1597,8 @@ function renderPriceChart() {
     },
   };
 
-  const timeScale = {
-    type: 'time',
-    time: {
-      tooltipFormat: 'EEE d/M HH:mm',
-      displayFormats: { hour: 'HH:mm', day: 'EEE d/M', week: 'EEE d/M' },
-    },
-    ticks: {
-      major:         { enabled: true },
-      color:         ctx => ctx.tick.major ? '#E2E8F4' : '#8892AA',
-      font:          ctx => ({ size: ctx.tick.major ? 10 : 9, weight: ctx.tick.major ? '700' : 'normal' }),
-      maxTicksLimit: 30,
-      maxRotation:   45,
-    },
-    grid: { color: '#2D3555' },
-  };
+  // Day-boundary tick detection: label starts with a non-digit (weekday letter)
+  const _isDayLabel = lbl => lbl && !/^\d/.test(Array.isArray(lbl) ? lbl[0] : lbl);
 
   if (_priceChart) {
     _priceChart.data = chartData;
@@ -1630,7 +1625,15 @@ function renderPriceChart() {
         },
       },
       scales: {
-        x: timeScale,
+        x: {
+          ticks: {
+            color:         ctx => _isDayLabel(ctx.tick.label) ? '#E2E8F4' : '#8892AA',
+            font:          ctx => _isDayLabel(ctx.tick.label) ? { size: 10, weight: '700' } : { size: 9 },
+            maxTicksLimit: 30,
+            maxRotation:   45,
+          },
+          grid: { color: '#2D3555' },
+        },
         y: {
           title: { display: true, text: yLabel, color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(2) },
@@ -1777,17 +1780,20 @@ function renderPriceLineChart() {
       },
       scales: {
         x: {
-          type: 'time',
-          time: {
-            tooltipFormat:  'EEE d/M HH:mm',
-            displayFormats: { hour: 'HH:mm', day: 'EEE d/M', week: 'EEE d/M' },
-          },
+          type: 'linear',
           ticks: {
-            major:         { enabled: true },
-            color:         ctx => ctx.tick.major ? '#E2E8F4' : '#8892AA',
-            font:          ctx => ({ size: ctx.tick.major ? 10 : 9, weight: ctx.tick.major ? '700' : 'normal' }),
-            maxTicksLimit: 30,
+            color:         '#8892AA',
+            font:          { size: 9 },
+            maxTicksLimit: 24,
             maxRotation:   45,
+            callback: (v, index, ticks) => {
+              const d    = new Date(v);
+              const prev = index > 0 ? new Date(ticks[index - 1].value) : null;
+              const t    = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              if (!prev || prev.getDate() !== d.getDate())
+                return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'numeric' }) + ' ' + t;
+              return t;
+            },
           },
           grid: { color: '#2D3555' },
         },
