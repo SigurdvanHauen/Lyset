@@ -354,12 +354,16 @@ async def charger_scan(
 
 
 def _probe_slave_sync(host: str, port: int, slave_id: int) -> dict:
-    """Try a handful of address ranges on one slave_id. Fresh connection per range."""
+    """Try a broad set of address ranges on one slave_id. Fresh connection per range."""
     PROBE_RANGES = [
-        (0, 25), (100, 25),
-        (1000, 25), (1100, 25),
-        (2000, 25), (3000, 25),
-        (40000, 25), (47000, 25),
+        # Low ranges (generic devices)
+        (0, 25), (100, 25), (1000, 25), (2000, 25), (3000, 25),
+        # SUN2000 inverter / PV / grid registers
+        (32000, 25), (32064, 25), (32080, 25), (32100, 25), (32114, 25),
+        # Battery / meter registers
+        (37000, 25), (37060, 25), (37100, 25),
+        # Control registers
+        (40000, 25), (47000, 25), (47060, 25), (47080, 25),
     ]
     registers: dict[int, int] = {}
     for start, count in PROBE_RANGES:
