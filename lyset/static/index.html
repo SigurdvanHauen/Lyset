@@ -437,6 +437,36 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Charger -->
   <div id="panel-charger" class="panel">
+
+    <!-- FusionSolar live data -->
+    <div class="ctrl-box" id="chr-live-box">
+      <h3>EV Charger — Live (FusionSolar)</h3>
+      <div id="chr-fs-status" style="font-size:12px;margin-bottom:12px;color:var(--muted)">Not configured — add credentials to .env and restart.</div>
+
+      <!-- KPI cards -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px" id="chr-kpi-cards">
+        <div class="stat-card"><div class="stat-label">Charge Power</div><div class="stat-value" id="chr-kpi-power">—</div><div class="stat-unit">kW</div></div>
+        <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="chr-kpi-status" style="font-size:16px">—</div><div class="stat-unit"></div></div>
+        <div class="stat-card"><div class="stat-label">Session Energy</div><div class="stat-value" id="chr-kpi-session">—</div><div class="stat-unit">kWh</div></div>
+        <div class="stat-card"><div class="stat-label">Total Energy</div><div class="stat-value" id="chr-kpi-total">—</div><div class="stat-unit">kWh</div></div>
+        <div class="stat-card"><div class="stat-label">Phase A</div><div class="stat-value" id="chr-kpi-ia">—</div><div class="stat-unit">A</div></div>
+        <div class="stat-card"><div class="stat-label">Phase B</div><div class="stat-value" id="chr-kpi-ib">—</div><div class="stat-unit">A</div></div>
+        <div class="stat-card"><div class="stat-label">Phase C</div><div class="stat-value" id="chr-kpi-ic">—</div><div class="stat-unit">A</div></div>
+      </div>
+
+      <!-- Raw fields — shown as a table so we can see whatever the API actually returns -->
+      <details style="margin-top:4px">
+        <summary style="font-size:11px;color:var(--muted);cursor:pointer">All raw fields from API</summary>
+        <table id="chr-raw-table" style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px">
+          <thead><tr style="background:var(--surf2)">
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);border-bottom:1px solid var(--border)">Field</th>
+            <th style="text-align:right;padding:5px 10px;color:var(--muted);border-bottom:1px solid var(--border)">Value</th>
+          </tr></thead>
+          <tbody id="chr-raw-tbody"><tr><td colspan="2" style="padding:8px 10px;color:var(--muted)">No data yet</td></tr></tbody>
+        </table>
+      </details>
+    </div>
+
     <div class="ctrl-box">
       <h3>EV Charger — Register Scanner</h3>
       <p class="hint" style="margin-bottom:12px">Scans the charger's Modbus registers to discover the register map. Each range gets a fresh TCP connection. Also probes common ports (502, 6607, 8080…) so we can see what's actually listening.</p>
@@ -464,25 +494,30 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
     </div>
 
     <div class="ctrl-box" style="margin-top:12px">
-      <h3>Auto-Probe — Scan All Common Slave IDs</h3>
-      <p class="hint" style="margin-bottom:12px">Tries slave IDs 0–10, 20, 50, 100, 101, 200, 201, 247 on the target host. If the host matches the inverter, polling is paused automatically and restarted when done.</p>
+      <h3>Device Discovery — FC43 + FC3 Sweep</h3>
+      <p class="hint" style="margin-bottom:12px">
+        Two-phase scan: <b>FC43</b> (Read Device Identification) lists every device the SDongle knows about,
+        then <b>FC3</b> sweeps register ranges 0–3000, 30000–30524, 32000–47100.
+        Slave ID order matches the Huawei HA integration: 0, 100, then 1–16.
+        If scanning the inverter host, polling is paused and restarted automatically.
+      </p>
       <div class="ctrl-row">
         <label>Host</label>
-        <input type="text" id="chr-probe-host" value="192.168.1.97" style="width:140px">
+        <input type="text" id="chr-probe-host" value="192.168.1.185" style="width:140px">
         <label>Port</label>
         <input type="number" id="chr-probe-port" value="502" style="width:66px">
       </div>
       <div class="ctrl-row">
-        <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Auto-Probe</button>
-        <span id="chr-probe-status" style="font-size:11px;margin-left:4px"></span>
+        <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Start Discovery</button>
+        <span id="chr-probe-status" style="font-size:11px;margin-left:8px"></span>
       </div>
-      <div id="chr-probe-results" style="display:none;margin-top:12px">
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <div id="chr-probe-results" style="display:none;margin-top:14px;overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px">
           <thead>
             <tr style="background:var(--surf2)">
-              <th style="text-align:left;padding:7px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Slave ID</th>
-              <th style="text-align:left;padding:7px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Result</th>
-              <th style="text-align:left;padding:7px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Non-zero registers found</th>
+              <th style="text-align:center;padding:7px 10px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border);width:70px">Slave ID</th>
+              <th style="text-align:left;padding:7px 10px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border);width:220px">FC43 — Device Identification</th>
+              <th style="text-align:left;padding:7px 10px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">FC3 — Non-zero registers</th>
             </tr>
           </thead>
           <tbody id="chr-probe-tbody"></tbody>
@@ -672,6 +707,19 @@ const historyMap = {}; // dataKey → { ts: number[], val: number[] }
 let _modalChart = null;
 let _modalKey   = null;
 
+// Build {x,y} pairs for Chart.js, inserting a null point in any gap > gapMs
+// so the line breaks visually instead of connecting across missing periods.
+function makeChartPoints(ts, val, gapMs = 60000) {
+  const pts = [];
+  for (let i = 0; i < ts.length; i++) {
+    pts.push({ x: ts[i], y: val[i] });
+    if (i + 1 < ts.length && ts[i + 1] - ts[i] > gapMs) {
+      pts.push({ x: (ts[i] + ts[i + 1]) / 2, y: null });
+    }
+  }
+  return pts;
+}
+
 const KEY_MAP = {
   pv:    'active_power',      grid:   'meter_active_power',
   batt:  'batt_power',        load:   'house_load',
@@ -712,12 +760,14 @@ function connectWS() {
 
 function dispatch(msg) {
   switch (msg.type) {
-    case 'data':         onData(msg.payload);           break;
-    case 'history':      onHistory(msg.points);         break;
-    case 'connection':   onConn(msg.ok, msg.msg);        break;
-    case 'write_result': onWriteResult(msg.ok, msg.msg); break;
-    case 'log':          onLogEntry(msg.entry);          break;
-    case 'error':        addLog('error', msg.msg);       break;
+    case 'data':           onData(msg.payload);              break;
+    case 'history':        onHistory(msg.points);            break;
+    case 'connection':     onConn(msg.ok, msg.msg);          break;
+    case 'write_result':   onWriteResult(msg.ok, msg.msg);   break;
+    case 'log':            onLogEntry(msg.entry);            break;
+    case 'error':          addLog('error', msg.msg);         break;
+    case 'charger_data':   onChargerData(msg.payload);       break;
+    case 'charger_status': onChargerStatus(msg.ok, msg.msg); break;
   }
 }
 
@@ -818,8 +868,7 @@ function onData(d) {
 
   if (_modalChart && _modalKey && historyMap[_modalKey]) {
     const h = historyMap[_modalKey];
-    _modalChart.data.labels              = h.ts.map(t => new Date(t).toLocaleTimeString());
-    _modalChart.data.datasets[0].data   = h.val.slice();
+    _modalChart.data.datasets[0].data = makeChartPoints(h.ts, h.val);
     _modalChart.update('none');
   }
 
@@ -853,9 +902,9 @@ function onData(d) {
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
 function openChart(key, label, unit, color) {
-  const hist   = historyMap[key] || { ts: [], val: [] };
-  const labels = hist.ts.map(t => new Date(t).toLocaleTimeString());
-  const pts    = hist.val.length;
+  const hist = historyMap[key] || { ts: [], val: [] };
+  const pts  = hist.val.length;
+  const data = makeChartPoints(hist.ts, hist.val);
 
   document.getElementById('modal-title').textContent =
     label + (unit ? ' (' + unit + ')' : '');
@@ -868,10 +917,9 @@ function openChart(key, label, unit, color) {
     document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
     data: {
-      labels,
       datasets: [{
         label: label + (unit ? ' (' + unit + ')' : ''),
-        data: hist.val.slice(),
+        data,
         borderColor: color,
         backgroundColor: color + '22',
         borderWidth: 2,
@@ -888,8 +936,14 @@ function openChart(key, label, unit, color) {
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: {
-          ticks: { color: '#8892AA', maxTicksLimit: 8, font: { size: 10 } },
-          grid:  { color: '#2D3555' },
+          type: 'linear',
+          ticks: {
+            color: '#8892AA',
+            maxTicksLimit: 8,
+            font: { size: 10 },
+            callback: val => new Date(val).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
         },
         y: {
           grace: '10%',
@@ -907,7 +961,7 @@ function openChart(key, label, unit, color) {
           borderWidth: 1,
           padding: 10,
           callbacks: {
-            title: ctx => ctx[0].label,
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
             label: ctx => label + ': ' + ctx.formattedValue + (unit ? ' ' + unit : ''),
           }
         },
@@ -1060,6 +1114,69 @@ function toast(msg, cls = 'tok') {
   _toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
 }
 
+// ── FusionSolar charger live data ────────────────────────────────────────────
+
+// Best-effort mapping from known FusionSolar KPI field names → UI card IDs.
+// We don't know exactly what fields the SCharger returns until first poll,
+// so the raw table always shows everything; these just populate the named cards.
+const CHR_FIELD_MAP = {
+  // Power (various firmware naming conventions)
+  charge_power:        { id: 'chr-kpi-power',   scale: 1/1000, dp: 2 },  // W → kW
+  active_power:        { id: 'chr-kpi-power',   scale: 1/1000, dp: 2 },
+  output_power:        { id: 'chr-kpi-power',   scale: 1/1000, dp: 2 },
+  // Phase currents
+  phase_a_current:     { id: 'chr-kpi-ia',      scale: 1,      dp: 1 },
+  phase_b_current:     { id: 'chr-kpi-ib',      scale: 1,      dp: 1 },
+  phase_c_current:     { id: 'chr-kpi-ic',      scale: 1,      dp: 1 },
+  a_phase_current:     { id: 'chr-kpi-ia',      scale: 1,      dp: 1 },
+  b_phase_current:     { id: 'chr-kpi-ib',      scale: 1,      dp: 1 },
+  c_phase_current:     { id: 'chr-kpi-ic',      scale: 1,      dp: 1 },
+  // Session & total energy
+  charge_energy:       { id: 'chr-kpi-session', scale: 1,      dp: 2 },
+  session_cap:         { id: 'chr-kpi-session', scale: 1,      dp: 2 },
+  total_charge_energy: { id: 'chr-kpi-total',   scale: 1,      dp: 1 },
+  charge_cap:          { id: 'chr-kpi-total',   scale: 1,      dp: 1 },
+};
+
+// Human-readable work state labels (Huawei SCharger)
+const CHR_STATES = {
+  0: 'Idle', 1: 'Standby', 2: 'Charging', 3: 'Completing',
+  4: 'Fault', 5: 'Unavailable', 6: 'Reserved',
+};
+
+function onChargerStatus(ok, msg) {
+  const el = document.getElementById('chr-fs-status');
+  el.style.color = ok ? 'var(--success)' : 'var(--warning)';
+  el.textContent = msg;
+}
+
+function onChargerData(d) {
+  // Named KPI cards
+  for (const [field, cfg] of Object.entries(CHR_FIELD_MAP)) {
+    if (field in d) {
+      const el = document.getElementById(cfg.id);
+      if (el) el.textContent = (d[field] * cfg.scale).toFixed(cfg.dp);
+    }
+  }
+
+  // Work state — try several common field names
+  const stateVal = d.work_state ?? d.charger_work_state ?? d.status ?? d.work_mode;
+  if (stateVal !== undefined) {
+    const el = document.getElementById('chr-kpi-status');
+    if (el) el.textContent = CHR_STATES[stateVal] ?? stateVal;
+  }
+
+  // Raw fields table — always show everything
+  const tbody = document.getElementById('chr-raw-tbody');
+  const rows = Object.entries(d).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) =>
+    `<tr style="border-bottom:1px solid var(--border)">
+       <td style="padding:4px 10px;color:var(--muted)">${k}</td>
+       <td style="padding:4px 10px;text-align:right">${v}</td>
+     </tr>`
+  ).join('');
+  tbody.innerHTML = rows || '<tr><td colspan="2" style="padding:8px 10px;color:var(--muted)">No fields returned</td></tr>';
+}
+
 // ── Charger scanner ───────────────────────────────────────────────────────────
 async function runChargerScan() {
   const btn    = document.getElementById('chr-scan-btn');
@@ -1144,63 +1261,102 @@ async function runChargerScan() {
 }
 
 async function runChargerProbe() {
-  const SLAVE_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 50, 100, 101, 200, 201, 247];
+  // Order matches the wlcrs/huawei_solar HA integration auto-discovery logic
+  const SLAVE_IDS = [0, 100, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
   const btn    = document.getElementById('chr-probe-btn');
   const status = document.getElementById('chr-probe-status');
   const resDiv = document.getElementById('chr-probe-results');
   const tbody  = document.getElementById('chr-probe-tbody');
-
-  const host = document.getElementById('chr-probe-host').value.trim();
-  const port = parseInt(document.getElementById('chr-probe-port').value);
+  const host   = document.getElementById('chr-probe-host').value.trim();
+  const port   = parseInt(document.getElementById('chr-probe-port').value);
 
   btn.disabled = true;
   tbody.innerHTML = '';
   resDiv.style.display = '';
 
+  // Pre-populate all rows as waiting
   for (const sid of SLAVE_IDS) {
     const tr = document.createElement('tr');
     tr.style.borderBottom = '1px solid var(--border)';
     tr.innerHTML = `
-      <td style="padding:6px 12px;font-weight:700">${sid}</td>
-      <td id="chr-probe-res-${sid}" style="padding:6px 12px;color:var(--muted)">&#8230; waiting</td>
-      <td id="chr-probe-addr-${sid}" style="padding:6px 12px;font-size:11px;color:var(--muted)"></td>
+      <td style="text-align:center;padding:6px 10px;font-weight:700;font-size:13px">${sid}</td>
+      <td id="chr-fc43-${sid}" style="padding:6px 10px;color:var(--muted)">… waiting</td>
+      <td id="chr-fc3-${sid}"  style="padding:6px 10px;font-size:11px;color:var(--muted)">… waiting</td>
     `;
     tbody.appendChild(tr);
   }
 
   let anyFound = false;
 
+  function renderSlaveResult(sid, data) {
+    const fc43El = document.getElementById(`chr-fc43-${sid}`);
+    const fc3El  = document.getElementById(`chr-fc3-${sid}`);
+    const fc43   = data.fc43 || {};
+    const regs   = data.registers || {};
+
+    // FC43 column
+    if (fc43.ok && fc43.devices && fc43.devices.length > 0) {
+      const lines = fc43.devices.map(d =>
+        `<b>${d.model}</b><br><span style="color:var(--muted);font-size:10px">ESN: ${d.esn} | slave_id: ${d.device_id ?? '?'}</span>`
+      ).join('<br>');
+      fc43El.innerHTML = `<span style="color:var(--success)">✓ ${fc43.devices.length} device(s)</span><br>${lines}`;
+    } else if (fc43.ok) {
+      fc43El.innerHTML = `<span style="color:var(--muted)">✓ responded (0 objects)</span>`;
+    } else {
+      fc43El.innerHTML = `<span style="color:var(--muted)">— ${(fc43.error || 'no response').replace(/^Modbus\s*/i,'').slice(0,60)}</span>`;
+    }
+
+    // FC3 column
+    const addrs = Object.keys(regs).map(Number).sort((a, b) => a - b);
+    if (addrs.length > 0) {
+      const shown = addrs.slice(0, 20).map(a => `${a}=<b>${regs[a]}</b>`).join('  ');
+      fc3El.innerHTML = `<span style="color:var(--success)">✓ ${addrs.length} register(s)</span><br>${shown}${addrs.length > 20 ? ' …' : ''}`;
+    } else {
+      fc3El.style.color = 'var(--muted)';
+      fc3El.textContent = '—';
+    }
+
+    if (data.found) anyFound = true;
+  }
+
   try {
     status.style.color = 'var(--muted)';
-    status.textContent = 'Starting…';
+    status.textContent = 'Pausing inverter worker…';
     await fetch(`/api/charger/probe/start?host=${encodeURIComponent(host)}&port=${port}`);
 
     for (let i = 0; i < SLAVE_IDS.length; i++) {
       const sid   = SLAVE_IDS[i];
-      const resEl  = document.getElementById(`chr-probe-res-${sid}`);
-      const addrEl = document.getElementById(`chr-probe-addr-${sid}`);
-      resEl.textContent = '… scanning';
-      status.textContent = `Probing slave ID ${sid}… (${i + 1}/${SLAVE_IDS.length})`;
+      const fc43El = document.getElementById(`chr-fc43-${sid}`);
+      const fc3El  = document.getElementById(`chr-fc3-${sid}`);
+
+      fc43El.style.color = 'var(--muted)';
+      fc43El.textContent = '⟳ scanning…';
+      fc3El.textContent  = '⟳ scanning…';
+      status.textContent = `Slave ${sid} — FC43 + FC3 sweep (${i + 1}/${SLAVE_IDS.length})`;
+
+      const t0 = Date.now();
+      const ticker = setInterval(() => {
+        const s = Math.floor((Date.now() - t0) / 1000);
+        fc43El.textContent = `⟳ scanning (${s}s)…`;
+      }, 500);
 
       try {
         const r    = await fetch(`/api/charger/probe/slave?host=${encodeURIComponent(host)}&port=${port}&slave_id=${sid}`);
         const data = await r.json();
-        const found = data.found;
-        if (found) anyFound = true;
-        const addrs = Object.keys(data.registers || {}).map(Number).sort((a,b)=>a-b);
-        resEl.style.color = found ? 'var(--success)' : 'var(--muted)';
-        resEl.innerHTML   = found ? '&#10003; Responded' : '&#8212; No data';
-        addrEl.textContent = found
-          ? addrs.slice(0, 12).join(', ') + (addrs.length > 12 ? ' …' : '')
-          : '';
+        clearInterval(ticker);
+        renderSlaveResult(sid, data);
       } catch (e) {
-        resEl.style.color = 'var(--danger)';
-        resEl.textContent = 'Error';
+        clearInterval(ticker);
+        fc43El.style.color = 'var(--danger)';
+        fc43El.textContent = 'Request error';
+        fc3El.textContent  = '';
       }
     }
 
     status.style.color = anyFound ? 'var(--success)' : 'var(--warning)';
-    status.textContent = anyFound ? 'Done — found responding slave(s).' : 'Done — no slave IDs responded.';
+    status.textContent = anyFound
+      ? 'Done — check FC43/FC3 columns for results.'
+      : 'Done — nothing responded on any slave ID.';
   } catch (e) {
     status.style.color = 'var(--danger)';
     status.textContent = 'Error: ' + e.message;

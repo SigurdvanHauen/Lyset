@@ -13,3 +13,4 @@ build/
 *.log
 lyset_*.csv
 docs/
+.env

@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from pymodbus.client import ModbusTcpClient
 
 from .modbus_client import ModbusWorker
+from .fusionsolar import ChargerWorker, worker_from_env
 from . import store
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,11 @@ _log_buffer: list[dict] = []
 _ws_clients: set[WebSocket] = set()
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _msg_queue: Optional[asyncio.Queue] = None
+
+_charger_worker: Optional[ChargerWorker] = None
+_charger_status: str = 'Not configured'
+_charger_status_ok: bool = False
+_last_charger_data: dict = {}
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -135,6 +141,21 @@ def _on_error(msg: str):
     _push({'type': 'error', 'msg': msg})
 
 
+def _on_charger_data(data: dict):
+    global _last_charger_data
+    clean = {k: v for k, v in data.items()
+             if isinstance(v, (int, float, str, bool, type(None)))}
+    _last_charger_data = clean
+    _push({'type': 'charger_data', 'payload': clean})
+
+
+def _on_charger_status(msg: str, ok: bool):
+    global _charger_status, _charger_status_ok
+    _charger_status = msg
+    _charger_status_ok = ok
+    _push({'type': 'charger_status', 'ok': ok, 'msg': msg})
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 def _start_worker(host: str, port: int, slave_id: int, poll_interval: float):
@@ -171,15 +192,24 @@ async def lifespan(app: FastAPI):
 
     store.init()
 
-    # Auto-connect on startup using the default settings
+    # Auto-connect inverter worker
     defaults = ConnectRequest()
     _start_worker(defaults.host, defaults.port, defaults.slave_id, defaults.poll_interval)
+
+    # Start FusionSolar charger worker if credentials are configured
+    global _charger_worker
+    _charger_worker = worker_from_env(on_data=_on_charger_data, on_status=_on_charger_status)
+    if _charger_worker:
+        _charger_worker.start()
 
     yield
 
     if _worker and _worker.is_alive():
         _worker.stop()
         _worker.join(timeout=3)
+    if _charger_worker and _charger_worker.is_alive():
+        _charger_worker.stop()
+        _charger_worker.join(timeout=5)
 
 
 class ConnectRequest(BaseModel):
@@ -276,7 +306,7 @@ def _probe_ports(host: str, ports: list[int], timeout: float = 2.0) -> list[int]
 
 
 def _modbus_scan_once(host: str, port: int, slave_id: int,
-                       fc: int, start: int, count: int, timeout: float = 3.0
+                       fc: int, start: int, count: int, timeout: float = 1.5
                        ) -> tuple[dict[int, int], str | None]:
     """Open a fresh connection, read one batch, close. Returns (raw_regs, error_str)."""
     client = ModbusTcpClient(host=host, port=port, timeout=timeout, retries=0)
@@ -353,11 +383,58 @@ async def charger_scan(
     return await loop.run_in_executor(None, _charger_scan_sync, host, port, slave_id, fc)
 
 
+def _fc43_probe_slave(host: str, port: int, slave_id: int) -> dict:
+    """FC43 Read Device Identification — how the HA integration discovers devices on the SDongle."""
+    client = ModbusTcpClient(host=host, port=port, timeout=1.5, retries=0)
+    if not client.connect():
+        return {'ok': False, 'error': 'TCP connect failed'}
+    try:
+        # read_code=3 (specific), object_id=0x87 (Huawei vendor-specific device list)
+        r = client.read_device_information(read_code=3, object_id=0x87, device_id=slave_id)
+        if r.isError():
+            return {'ok': False, 'error': str(r)}
+        info: dict = r.information or {}
+        devices: list[dict] = []
+        for obj_id in sorted(k for k in info if k >= 0x88):
+            raw = info[obj_id]
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode('ascii', errors='replace')
+            fields: dict[int, str] = {}
+            for part in str(raw).split(';'):
+                if '=' in part:
+                    k, v = part.split('=', 1)
+                    try:
+                        fields[int(k)] = v.strip()
+                    except ValueError:
+                        pass
+            if fields:
+                devices.append({
+                    'model':     fields.get(1, '?'),
+                    'version':   fields.get(2, '?'),
+                    'esn':       fields.get(4, '?'),
+                    'device_id': int(fields[5]) if fields.get(5, '').isdigit() else None,
+                })
+        log.debug('FC43 slave %d: %d device(s) — %s',
+                  slave_id, len(devices), [d['model'] for d in devices])
+        return {'ok': True, 'devices': devices, 'n_objects': len(info)}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)}
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def _probe_slave_sync(host: str, port: int, slave_id: int) -> dict:
-    """Try a broad set of address ranges on one slave_id. Fresh connection per range."""
+    """FC43 + FC3 sweep on one slave_id. Fresh connection per request."""
     PROBE_RANGES = [
         # Low ranges (generic devices)
         (0, 25), (100, 25), (1000, 25), (2000, 25), (3000, 25),
+        # SCharger / SDongle device-info registers (30000 range)
+        (30000, 25), (30025, 25), (30050, 25), (30075, 25),
+        # SCharger operational registers (confirmed: 30500–30510)
+        (30500, 25),
         # SUN2000 inverter / PV / grid registers
         (32000, 25), (32064, 25), (32080, 25), (32100, 25), (32114, 25),
         # Battery / meter registers
@@ -365,16 +442,25 @@ def _probe_slave_sync(host: str, port: int, slave_id: int) -> dict:
         # Control registers
         (40000, 25), (47000, 25), (47060, 25), (47080, 25),
     ]
+    fc43 = _fc43_probe_slave(host, port, slave_id)
+
     registers: dict[int, int] = {}
-    for start, count in PROBE_RANGES:
+    for i, (start, count) in enumerate(PROBE_RANGES):
+        log.debug('slave %d: FC3 %d–%d (%d/%d)',
+                  slave_id, start, start + count - 1, i + 1, len(PROBE_RANGES))
         raw, err = _modbus_scan_once(host, port, slave_id, 3, start, count)
         if not err:
             for addr, val in raw.items():
                 if val != 0:
                     registers[addr] = val
-        if registers:
-            break  # found something — no need to keep scanning this slave
-    return {'slave_id': slave_id, 'found': len(registers) > 0, 'registers': registers}
+
+    found = len(registers) > 0 or (fc43.get('ok') and bool(fc43.get('devices')))
+    return {
+        'slave_id': slave_id,
+        'found': found,
+        'fc43': fc43,
+        'registers': registers,
+    }
 
 
 _probe_restart_params: Optional[tuple] = None  # set while worker is paused for a probe
@@ -416,6 +502,9 @@ async def api_state():
         'msg': _connection_msg,
         'data': _last_data,
         'log': _log_buffer[-100:],
+        'charger_status': _charger_status,
+        'charger_status_ok': _charger_status_ok,
+        'charger_data': _last_charger_data,
     }
 
 
@@ -439,6 +528,11 @@ async def websocket_endpoint(ws: WebSocket):
         }))
         if _last_data:
             await ws.send_text(json.dumps({'type': 'data', 'payload': _last_data}, default=str))
+        await ws.send_text(json.dumps({
+            'type': 'charger_status', 'ok': _charger_status_ok, 'msg': _charger_status,
+        }))
+        if _last_charger_data:
+            await ws.send_text(json.dumps({'type': 'charger_data', 'payload': _last_charger_data}))
         _ws_clients.add(ws)
         try:
             while True:
