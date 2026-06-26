@@ -119,13 +119,16 @@ def load_solar_forecast(from_ms: int, to_ms: int) -> list[dict]:
 
 
 def save_consumption_forecast(records: list[dict]):
-    """Upsert a batch of consumption forecast records."""
+    """Insert consumption forecast records, keeping the first prediction per slot.
+    INSERT OR IGNORE preserves the original ~24h-ahead prediction so it can be
+    compared against actual measurements once the slot has passed.
+    """
     with _lock:
         con = _get_con()
         for r in records:
             if r.get('w') is not None:
                 con.execute(
-                    'INSERT OR REPLACE INTO consumption_forecast VALUES (?, ?)',
+                    'INSERT OR IGNORE INTO consumption_forecast VALUES (?, ?)',
                     (r['ts_ms'], r['w']),
                 )
         con.commit()

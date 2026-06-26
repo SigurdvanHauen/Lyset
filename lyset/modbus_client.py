@@ -245,10 +245,16 @@ class ModbusWorker(threading.Thread):
             if 'pv2_voltage' in data and 'pv2_current' in data:
                 data['pv2_power'] = round(data['pv2_voltage'] * data['pv2_current'], 1)
 
+            # Flip meter sign so positive = importing from grid (matches user convention
+            # and D06 Excel data); raw register convention is positive = export.
+            if 'meter_active_power' in data:
+                data['meter_active_power'] = -data['meter_active_power']
+
             if 'active_power' in data and 'meter_active_power' in data:
                 batt = data.get('batt_power', 0.0)
+                # house_load = solar_out + grid_import - battery_charge
                 data['house_load'] = round(
-                    data['active_power'] - data['meter_active_power'] - batt, 1
+                    data['active_power'] + data['meter_active_power'] - batt, 1
                 )
 
             if 'inverter_state' in data:

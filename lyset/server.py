@@ -148,7 +148,7 @@ def _on_data(data: dict):
     # Accumulate grid import for the current 15-min slot
     meter_w = clean.get('meter_active_power')
     if meter_w is not None and _consumption_model is not None:
-        grid_import_w = max(0.0, -meter_w)   # negative meter = importing from grid
+        grid_import_w = max(0.0, meter_w)   # positive meter = importing from grid
         key = int(ts / 900)
         if key != _slot_key:
             if _slot_samples and _slot_key >= 0:
@@ -168,10 +168,15 @@ def _save_model_and_regen():
         _consumption_model.save(_MODEL_PATH)
     except Exception as exc:
         log.warning('ConsumptionModel: save failed — %s', exc)
-    forecast = _consumption_model.predict(time.time())
-    _last_consumption_forecast = forecast
-    store.save_consumption_forecast(forecast)
-    _push({'type': 'consumption_forecast', 'payload': forecast})
+    # Save next-24h predictions (INSERT OR IGNORE keeps the first prediction per slot,
+    # so past predictions are preserved for comparison against actual measurements)
+    future = _consumption_model.predict(time.time())
+    store.save_consumption_forecast(future)
+    # Push the combined window: past 24h of predictions + next 24h
+    now_ms = int(time.time() * 1000)
+    combined = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
+    _last_consumption_forecast = combined or future
+    _push({'type': 'consumption_forecast', 'payload': _last_consumption_forecast})
 
 
 def _on_connection(ok: bool, msg: str):
@@ -293,7 +298,11 @@ async def lifespan(app: FastAPI):
                      'learning from scratch (set CONSUMPTION_HISTORY_PATH to seed from Excel)')
 
     if _consumption_model and _consumption_model.coverage > 0:
-        _last_consumption_forecast = _consumption_model.predict(time.time())
+        future = _consumption_model.predict(time.time())
+        store.save_consumption_forecast(future)
+        now_ms = int(time.time() * 1000)
+        stored = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
+        _last_consumption_forecast = stored or future
 
     yield
 
@@ -392,7 +401,7 @@ async def api_consumption_forecast():
     now_ms = int(time.time() * 1000)
     loop   = asyncio.get_running_loop()
     data   = await loop.run_in_executor(
-        None, store.load_consumption_forecast, now_ms, now_ms + 86_400_000
+        None, store.load_consumption_forecast, now_ms - 86_400_000, now_ms + 86_400_000
     )
     return {
         'forecast': data if data else _last_consumption_forecast,
