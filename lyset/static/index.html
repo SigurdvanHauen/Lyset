@@ -704,6 +704,7 @@ function v(val, dec = 0) {
 }
 
 function setCard(id, val, dec = 0) {
+  if (val === undefined) return; // keep last known value rather than showing —
   const el = document.getElementById(id);
   if (!el) return;
   const unit = el.querySelector('.unit');
@@ -711,6 +712,7 @@ function setCard(id, val, dec = 0) {
 }
 
 function setText(id, val) {
+  if (val === undefined) return;
   const el = document.getElementById(id);
   if (el) el.textContent = val != null ? String(val) : '—';
 }

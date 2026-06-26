@@ -199,20 +199,23 @@ class ModbusWorker(threading.Thread):
 
         raw: dict[int, int] = {}
         for start, length in batches:
-            try:
-                result = self._client.read_holding_registers(
-                    address=start, count=length, device_id=self.slave_id,
-                )
-                if result.isError():
-                    log.warning('Modbus error reading %d+%d: %s', start, length, result)
-                    continue
-                for i, val in enumerate(result.registers):
-                    raw[start + i] = val
-            except Exception as exc:
-                # Any error reading this batch (timeout, no response, bad register) —
-                # skip it and continue with the remaining batches. TCP failures will
-                # be detected on the next cycle when _open_tcp() fails.
-                log.warning('Batch error at %d+%d: %s', start, length, exc)
+            for attempt in range(2):
+                try:
+                    result = self._client.read_holding_registers(
+                        address=start, count=length, device_id=self.slave_id,
+                    )
+                    if result.isError():
+                        log.warning('Modbus error reading %d+%d: %s', start, length, result)
+                        break  # device rejected request — retry won't help
+                    for i, val in enumerate(result.registers):
+                        raw[start + i] = val
+                    break  # success
+                except Exception as exc:
+                    if attempt == 0:
+                        log.debug('Retrying batch %d+%d after error: %s', start, length, exc)
+                    else:
+                        # TCP failures will surface on the next cycle when _open_tcp() fails.
+                        log.warning('Batch error at %d+%d: %s', start, length, exc)
 
         data: dict = {}
         for reg in regs:
