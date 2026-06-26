@@ -25,6 +25,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from pymodbus.client import ModbusTcpClient
+
 from .modbus_client import ModbusWorker
 from . import store
 
@@ -255,6 +257,50 @@ async def api_read(address: int, type: str = 'u16'):
     if val is None:
         raise HTTPException(status_code=500, detail='Read failed or register not supported')
     return {'value': val}
+
+
+def _charger_scan_sync(host: str, port: int, slave_id: int) -> dict:
+    """Blocking Modbus scan — call via run_in_executor."""
+    RANGES = [
+        (0, 100), (100, 100),
+        (1000, 100), (1100, 100), (1200, 100),
+        (2000, 100),
+        (3000, 100),
+        (40000, 100), (47000, 100),
+    ]
+    client = ModbusTcpClient(host=host, port=port, timeout=3, retries=0)
+    if not client.connect():
+        return {'ok': False, 'error': f'TCP connect failed — {host}:{port}',
+                'registers': {}, 'scan_errors': {}}
+    registers: dict[int, int] = {}
+    scan_errors: dict[str, str] = {}
+    try:
+        for start, count in RANGES:
+            try:
+                r = client.read_holding_registers(address=start, count=count, device_id=slave_id)
+                if r.isError():
+                    scan_errors[str(start)] = str(r)
+                else:
+                    for i, val in enumerate(r.registers):
+                        if val != 0:
+                            registers[start + i] = val
+            except Exception as exc:
+                scan_errors[str(start)] = str(exc)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return {
+        'ok': True, 'host': host, 'port': port, 'slave_id': slave_id,
+        'registers': registers, 'scan_errors': scan_errors,
+    }
+
+
+@app.get('/api/charger/scan')
+async def charger_scan(host: str = '192.168.1.97', port: int = 502, slave_id: int = 1):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _charger_scan_sync, host, port, slave_id)
 
 
 @app.get('/api/state')

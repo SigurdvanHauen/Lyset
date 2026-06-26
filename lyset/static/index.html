@@ -327,6 +327,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <!-- ── Tab bar ── -->
 <div id="tabbar">
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
+  <button class="tab-btn"        onclick="showTab('charger',this)">Charger</button>
   <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
 </div>
@@ -432,6 +433,48 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
+  </div>
+
+  <!-- Charger -->
+  <div id="panel-charger" class="panel">
+    <div class="ctrl-box">
+      <h3>EV Charger — Register Scanner</h3>
+      <p class="hint" style="margin-bottom:12px">Scans the charger's Modbus registers to discover the register map. Covers address ranges 0–199, 1000–1299, 2000–2099, 3000–3099, 40000–40099, 47000–47099. Takes ~5–30 seconds depending on how many ranges time out.</p>
+      <div class="ctrl-row">
+        <label>Charger IP</label>
+        <input type="text"   id="chr-host"  value="192.168.1.97" style="width:140px">
+        <label>Port</label>
+        <input type="number" id="chr-port"  value="502" min="1" max="65535" style="width:66px">
+        <label>Slave ID</label>
+        <input type="number" id="chr-slave" value="1"   min="0" max="255"   style="width:52px">
+      </div>
+      <div class="ctrl-row">
+        <button id="chr-scan-btn" class="primary" onclick="runChargerScan()">Scan Registers</button>
+        <span id="chr-scan-status" style="font-size:11px;margin-left:4px"></span>
+      </div>
+    </div>
+
+    <div id="chr-results" style="display:none">
+      <div class="sec">Scan Results</div>
+      <div class="ctrl-box" style="padding:0;overflow:hidden">
+        <table id="chr-table" style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="background:var(--surf2)">
+              <th style="text-align:left;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Address</th>
+              <th style="text-align:left;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Hex</th>
+              <th style="text-align:right;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Value (dec)</th>
+              <th style="text-align:right;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Value (hex)</th>
+              <th style="text-align:right;padding:8px 12px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Signed</th>
+            </tr>
+          </thead>
+          <tbody id="chr-tbody"></tbody>
+        </table>
+      </div>
+      <div id="chr-errors-box" style="display:none" class="ctrl-box">
+        <h3>Ranges that did not respond</h3>
+        <div id="chr-errors-body" style="font-size:11px;color:var(--muted);line-height:1.8"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Control -->
@@ -979,6 +1022,80 @@ function toast(msg, cls = 'tok') {
   el.className   = `show ${cls}`;
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+// ── Charger scanner ───────────────────────────────────────────────────────────
+async function runChargerScan() {
+  const btn    = document.getElementById('chr-scan-btn');
+  const status = document.getElementById('chr-scan-status');
+  const resDiv = document.getElementById('chr-results');
+
+  btn.disabled = true;
+  status.style.color = 'var(--muted)';
+  status.textContent = 'Scanning… (may take up to 30 s)';
+  resDiv.style.display = 'none';
+
+  const host  = document.getElementById('chr-host').value.trim();
+  const port  = parseInt(document.getElementById('chr-port').value);
+  const slave = parseInt(document.getElementById('chr-slave').value);
+
+  try {
+    const r    = await fetch(`/api/charger/scan?host=${encodeURIComponent(host)}&port=${port}&slave_id=${slave}`);
+    const data = await r.json();
+
+    if (!data.ok) {
+      status.style.color = 'var(--danger)';
+      status.textContent = 'Error: ' + (data.error || 'unknown');
+      return;
+    }
+
+    const regs  = data.registers || {};
+    const addrs = Object.keys(regs).map(Number).sort((a, b) => a - b);
+
+    if (addrs.length === 0) {
+      status.style.color = 'var(--warning)';
+      status.textContent = 'Connected but no non-zero registers found in scanned ranges.';
+    } else {
+      status.style.color = 'var(--success)';
+      status.textContent = `Found ${addrs.length} non-zero register${addrs.length !== 1 ? 's' : ''}.`;
+    }
+
+    const tbody = document.getElementById('chr-tbody');
+    tbody.innerHTML = '';
+    for (const addr of addrs) {
+      const raw  = regs[addr];
+      const sgn  = raw >= 0x8000 ? raw - 0x10000 : raw;
+      const tr   = document.createElement('tr');
+      tr.style.borderBottom = '1px solid var(--border)';
+      tr.innerHTML = `
+        <td style="padding:6px 12px">${addr}</td>
+        <td style="padding:6px 12px;color:var(--muted)">0x${addr.toString(16).toUpperCase().padStart(4,'0')}</td>
+        <td style="padding:6px 12px;text-align:right">${raw}</td>
+        <td style="padding:6px 12px;text-align:right;color:var(--muted)">0x${raw.toString(16).toUpperCase().padStart(4,'0')}</td>
+        <td style="padding:6px 12px;text-align:right;color:${sgn < 0 ? 'var(--warning)' : 'var(--muted)'}">${sgn}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    const errKeys = Object.keys(data.scan_errors || {});
+    const errBox  = document.getElementById('chr-errors-box');
+    const errBody = document.getElementById('chr-errors-body');
+    if (errKeys.length) {
+      errBody.innerHTML = errKeys
+        .map(k => `<div>Base ${k}: ${data.scan_errors[k]}</div>`)
+        .join('');
+      errBox.style.display = '';
+    } else {
+      errBox.style.display = 'none';
+    }
+
+    resDiv.style.display = '';
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Request failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
