@@ -382,9 +382,25 @@ def _multi_slave_probe_sync(host: str, port: int, slave_ids: list[int]) -> dict:
 
 @app.get('/api/charger/probe')
 async def charger_probe(host: str = '192.168.1.185', port: int = 502):
+    global _worker
     slave_ids = [1, 2, 3, 6, 10, 100, 101, 200, 201]
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _multi_slave_probe_sync, host, port, slave_ids)
+
+    # If probing the same host as the inverter, stop the worker first —
+    # the SDongle only allows one Modbus TCP client at a time.
+    restart_params = None
+    if _worker and _worker.is_alive() and _worker.host == host and _worker.port == port:
+        restart_params = (_worker.host, _worker.port, _worker.slave_id, _worker.poll_interval)
+        _worker.stop()
+        await loop.run_in_executor(None, lambda: _worker.join(timeout=5))
+
+    try:
+        result = await loop.run_in_executor(None, _multi_slave_probe_sync, host, port, slave_ids)
+    finally:
+        if restart_params:
+            _start_worker(*restart_params)
+
+    return result
 
 
 @app.get('/api/state')

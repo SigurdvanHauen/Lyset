@@ -465,7 +465,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
     <div class="ctrl-box" style="margin-top:12px">
       <h3>Auto-Probe — Inverter SDongle (192.168.1.185)</h3>
-      <p class="hint" style="margin-bottom:12px">Tries slave IDs 1, 2, 3, 6, 10, 100, 101, 200, 201 on the inverter's SDongle to check if the EV charger registers are accessible there. Takes ~30–60 s.</p>
+      <p class="hint" style="margin-bottom:12px">Tries slave IDs 1, 2, 3, 6, 10, 100, 101, 200, 201 on the inverter's SDongle to check if the EV charger registers are accessible there. Takes ~30–60 s. <strong style="color:var(--warning)">Inverter polling is paused automatically during the scan and restarts when done.</strong></p>
       <div class="ctrl-row">
         <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Auto-Probe SDongle</button>
         <span id="chr-probe-status" style="font-size:11px;margin-left:4px"></span>
