@@ -464,10 +464,16 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
     </div>
 
     <div class="ctrl-box" style="margin-top:12px">
-      <h3>Auto-Probe — Inverter SDongle (192.168.1.185)</h3>
-      <p class="hint" style="margin-bottom:12px">Tries slave IDs 1, 2, 3, 6, 10, 100, 101, 200, 201 on the inverter's SDongle to check if the EV charger registers are accessible there. Takes ~30–60 s. <strong style="color:var(--warning)">Inverter polling is paused automatically during the scan and restarts when done.</strong></p>
+      <h3>Auto-Probe — Scan All Common Slave IDs</h3>
+      <p class="hint" style="margin-bottom:12px">Tries slave IDs 0–10, 20, 50, 100, 101, 200, 201, 247 on the target host. If the host matches the inverter, polling is paused automatically and restarted when done.</p>
       <div class="ctrl-row">
-        <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Auto-Probe SDongle</button>
+        <label>Host</label>
+        <input type="text" id="chr-probe-host" value="192.168.1.97" style="width:140px">
+        <label>Port</label>
+        <input type="number" id="chr-probe-port" value="502" style="width:66px">
+      </div>
+      <div class="ctrl-row">
+        <button id="chr-probe-btn" class="primary" onclick="runChargerProbe()">Auto-Probe</button>
         <span id="chr-probe-status" style="font-size:11px;margin-left:4px"></span>
       </div>
       <div id="chr-probe-results" style="display:none;margin-top:12px">
@@ -1138,48 +1144,46 @@ async function runChargerScan() {
 }
 
 async function runChargerProbe() {
-  const SLAVE_IDS = [1, 2, 3, 6, 10, 100, 101, 200, 201];
+  const SLAVE_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 50, 100, 101, 200, 201, 247];
   const btn    = document.getElementById('chr-probe-btn');
   const status = document.getElementById('chr-probe-status');
   const resDiv = document.getElementById('chr-probe-results');
   const tbody  = document.getElementById('chr-probe-tbody');
 
+  const host = document.getElementById('chr-probe-host').value.trim();
+  const port = parseInt(document.getElementById('chr-probe-port').value);
+
   btn.disabled = true;
   tbody.innerHTML = '';
   resDiv.style.display = '';
 
-  // Pre-populate table rows so the user sees them filling in
-  const rows = {};
   for (const sid of SLAVE_IDS) {
     const tr = document.createElement('tr');
     tr.style.borderBottom = '1px solid var(--border)';
     tr.innerHTML = `
       <td style="padding:6px 12px;font-weight:700">${sid}</td>
-      <td id="chr-probe-res-${sid}" style="padding:6px 12px;color:var(--muted)">&#8230; scanning</td>
+      <td id="chr-probe-res-${sid}" style="padding:6px 12px;color:var(--muted)">&#8230; waiting</td>
       <td id="chr-probe-addr-${sid}" style="padding:6px 12px;font-size:11px;color:var(--muted)"></td>
     `;
     tbody.appendChild(tr);
-    rows[sid] = tr;
   }
 
-  const host = '192.168.1.185';
   let anyFound = false;
 
   try {
-    // Pause inverter worker
     status.style.color = 'var(--muted)';
-    status.textContent = 'Pausing inverter polling…';
-    await fetch(`/api/charger/probe/start?host=${host}`);
+    status.textContent = 'Starting…';
+    await fetch(`/api/charger/probe/start?host=${encodeURIComponent(host)}&port=${port}`);
 
-    // Probe each slave ID one at a time — live results
     for (let i = 0; i < SLAVE_IDS.length; i++) {
-      const sid = SLAVE_IDS[i];
-      status.textContent = `Probing slave ID ${sid}… (${i + 1}/${SLAVE_IDS.length})`;
+      const sid   = SLAVE_IDS[i];
       const resEl  = document.getElementById(`chr-probe-res-${sid}`);
       const addrEl = document.getElementById(`chr-probe-addr-${sid}`);
+      resEl.textContent = '… scanning';
+      status.textContent = `Probing slave ID ${sid}… (${i + 1}/${SLAVE_IDS.length})`;
 
       try {
-        const r    = await fetch(`/api/charger/probe/slave?host=${host}&slave_id=${sid}`);
+        const r    = await fetch(`/api/charger/probe/slave?host=${encodeURIComponent(host)}&port=${port}&slave_id=${sid}`);
         const data = await r.json();
         const found = data.found;
         if (found) anyFound = true;
@@ -1191,23 +1195,18 @@ async function runChargerProbe() {
           : '';
       } catch (e) {
         resEl.style.color = 'var(--danger)';
-        resEl.textContent = 'Error: ' + e.message;
+        resEl.textContent = 'Error';
       }
     }
 
     status.style.color = anyFound ? 'var(--success)' : 'var(--warning)';
-    status.textContent = anyFound
-      ? 'Done — found responding slave(s). Inverter polling restarting…'
-      : 'Done — no slave IDs responded. Inverter polling restarting…';
+    status.textContent = anyFound ? 'Done — found responding slave(s).' : 'Done — no slave IDs responded.';
   } catch (e) {
     status.style.color = 'var(--danger)';
     status.textContent = 'Error: ' + e.message;
   } finally {
     await fetch('/api/charger/probe/finish').catch(() => {});
     btn.disabled = false;
-    if (status.textContent.includes('restarting')) {
-      setTimeout(() => { status.textContent = status.textContent.replace(' Inverter polling restarting…', ''); }, 5000);
-    }
   }
 }
 
