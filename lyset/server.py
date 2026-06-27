@@ -9,6 +9,7 @@ Endpoints:
   POST /api/write   → enqueue a register write
   GET  /api/read    → synchronous single-register read (for control panel prefill)
   GET  /api/state   → current connection state + last snapshot + log tail
+  GET  /api/ha/snapshot → flat JSON snapshot for Home Assistant REST sensor
 """
 
 from __future__ import annotations
@@ -664,6 +665,74 @@ async def api_clear_history():
     _push({'type': 'history', 'points': []})
     log.info('History cleared by user request')
     return {'ok': True}
+
+
+@app.get('/api/ha/snapshot')
+async def api_ha_snapshot():
+    """
+    Flat JSON snapshot for Home Assistant REST sensor integration.
+    Returns current inverter measurements + active prices + next-slot forecasts
+    in a single call, suitable for HA json_attributes parsing.
+    Poll every 30 s — Modbus data refreshes every 10 s, prices every 30 min.
+    """
+    now_ms = int(time.time() * 1000)
+
+    # Active price slot: last record whose ts <= now_ms (list is sorted ascending)
+    cur_price = None
+    for p in reversed(_last_prices):
+        if p['ts'] <= now_ms:
+            cur_price = p
+            break
+
+    # Next Solcast period (period_end timestamps, so the first ts_ms strictly > now)
+    next_solar = next((s for s in _last_solar_forecast if s['ts_ms'] > now_ms), None)
+
+    # Next power forecast slot
+    next_power = next((pf for pf in _last_power_forecast if pf['ts_ms'] > now_ms), None)
+
+    # Active 15-min consumption forecast slot (slot_start ts_ms; last one <= now_ms)
+    cur_consumption = None
+    for cf in _last_consumption_forecast:
+        if cf['ts_ms'] <= now_ms:
+            cur_consumption = cf
+        else:
+            break
+
+    pv_w = None
+    if _last_data:
+        pv_w = (_last_data.get('pv1_power') or 0) + (_last_data.get('pv2_power') or 0)
+
+    return {
+        'ts_ms':     now_ms,
+        'connected': _connected,
+
+        # Real-time inverter measurements
+        'pv_w':           pv_w,
+        'grid_w':          _last_data.get('meter_active_power'),  # + import, − export
+        'batt_w':          _last_data.get('batt_power'),           # + charging, − discharging
+        'batt_soc':        _last_data.get('batt_soc'),
+        'house_load_w':    _last_data.get('house_load'),
+        'inverter_state':  _last_data.get('inverter_state'),
+
+        # Active electricity prices (DKK/kWh)
+        'import_price_dkk': cur_price['import'] if cur_price else None,
+        'export_price_dkk': cur_price['export'] if cur_price else None,
+
+        # Next Solcast solar period (mean + P10/P90 confidence)
+        'solar_fc_w':     next_solar['pv_w']   if next_solar else None,
+        'solar_fc_p10_w': next_solar['p10_w']  if next_solar else None,
+        'solar_fc_p90_w': next_solar['p90_w']  if next_solar else None,
+        'solar_fc_ts_ms': next_solar['ts_ms']  if next_solar else None,
+
+        # Next power simulation slot
+        'forecast_soc':    next_power['soc']    if next_power else None,
+        'forecast_batt_w': next_power['batt_w'] if next_power else None,
+        'forecast_grid_w': next_power['grid_w'] if next_power else None,
+        'forecast_ts_ms':  next_power['ts_ms']  if next_power else None,
+
+        # Active consumption forecast slot
+        'consumption_fc_w': cur_consumption['w'] if cur_consumption else None,
+    }
 
 
 @app.get('/api/state')
