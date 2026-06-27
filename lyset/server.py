@@ -145,11 +145,13 @@ def _simulate_soc(
     discharge_eff: float = 0.97,
 ) -> list[dict]:
     """
-    Simulate battery SoC forward using Solcast and consumption forecasts.
+    Simulate battery SoC, battery power, and grid power forward.
 
     solar_fc:  [{ts_ms, pv_w}, ...]  — 30-min period_end UTC ms
     load_fc:   [{ts_ms, w}, ...]     — 15-min slot_start UTC ms
-    Returns:   [{ts_ms, soc}, ...]   — predicted SoC (%) at each solar period boundary
+    Returns:   [{ts_ms, soc, batt_w, grid_w}, ...]
+      batt_w: positive = charging, negative = discharging  (matches batt_power key)
+      grid_w: positive = importing, negative = exporting   (matches meter_active_power key)
     """
     if not solar_fc or capacity_kwh <= 0:
         return []
@@ -159,7 +161,7 @@ def _simulate_soc(
     max_power_kw = capacity_kwh * 0.5  # C/2 — LUNA2000 rated charge rate heuristic
 
     soc = start_soc
-    result = [{'ts_ms': now_ms, 'soc': round(soc, 1)}]
+    result = [{'ts_ms': now_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
     for rec in sorted(solar_fc, key=lambda r: r['ts_ms']):
         ts_ms = rec['ts_ms']
@@ -183,14 +185,30 @@ def _simulate_soc(
         else:
             continue  # no consumption data for this period
 
-        net_kw = max(-max_power_kw, min(max_power_kw, (pv_w - load_w) / 1000.0))
+        # net_kw > 0: surplus (solar > load); < 0: deficit (load > solar)
+        net_kw = (pv_w - load_w) / 1000.0
+
+        # Battery takes surplus / covers deficit, clamped by max rate and SoC limits
         if net_kw >= 0:
-            energy_kwh = net_kw * 0.5 * charge_eff
+            batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
         else:
-            energy_kwh = net_kw * 0.5 / discharge_eff
+            batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
+
+        # Grid makes up the remainder (energy balance: solar + grid = load + batt_charge)
+        grid_kw = batt_kw - net_kw  # positive = import, negative = export
+
+        if batt_kw >= 0:
+            energy_kwh = batt_kw * 0.5 * charge_eff
+        else:
+            energy_kwh = batt_kw * 0.5 / discharge_eff
 
         soc = max(min_soc, min(100.0, soc + energy_kwh / capacity_kwh * 100.0))
-        result.append({'ts_ms': ts_ms, 'soc': round(soc, 1)})
+        result.append({
+            'ts_ms': ts_ms,
+            'soc':    round(soc, 1),
+            'batt_w': round(batt_kw * 1000),
+            'grid_w': round(grid_kw * 1000),
+        })
 
     return result
 
