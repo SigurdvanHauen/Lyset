@@ -69,6 +69,7 @@ _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 # Accumulator: collect 10-s Modbus samples within the current 15-min slot
 _slot_samples: list[float] = []   # watts values
 _slot_key: int = -1               # int(ts_utc / 900)
+_backfill_done: bool = False      # run historical prediction backfill once per process
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -144,10 +145,12 @@ def _simulate_soc(
     min_soc: float = 10.0,
     charge_eff: float = 0.97,
     discharge_eff: float = 0.97,
+    start_ms: int = None,
 ) -> list[dict]:
     """
-    Simulate battery SoC, battery power, and grid power forward.
+    Simulate battery SoC, battery power, and grid power forward from start_ms.
 
+    start_ms:  anchor timestamp (default: now). Pass a past timestamp to backfill.
     solar_fc:  [{ts_ms, pv_w}, ...]  — 30-min period_end UTC ms
     load_fc:   [{ts_ms, w}, ...]     — 15-min slot_start UTC ms
     Returns:   [{ts_ms, soc, batt_w, grid_w}, ...]
@@ -157,16 +160,16 @@ def _simulate_soc(
     if not solar_fc or capacity_kwh <= 0:
         return []
 
-    now_ms = int(time.time() * 1000)
+    cutoff_ms = start_ms if start_ms is not None else int(time.time() * 1000)
     load_by_ts = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
     max_power_kw = capacity_kwh * 0.5  # C/2 — LUNA2000 rated charge rate heuristic
 
     soc = start_soc
-    result = [{'ts_ms': now_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
+    result = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
     for rec in sorted(solar_fc, key=lambda r: r['ts_ms']):
         ts_ms = rec['ts_ms']
-        if ts_ms <= now_ms:
+        if ts_ms <= cutoff_ms:
             continue
 
         pv_w = rec.get('pv_w') or 0.0
@@ -214,7 +217,59 @@ def _simulate_soc(
     return result
 
 
-# ── Power forecast storage helper ────────────────────────────────────────────
+# ── Power forecast helpers ────────────────────────────────────────────────────
+
+def _backfill_power_forecast(cap_val: float):
+    """
+    Seed the power_forecast table with historical predictions so the chart
+    shows a continuous line from the start of today, not just from 'now'.
+
+    Finds the earliest actual SoC reading from today in the polls table,
+    runs the simulation forward from that anchor, and stores results with
+    INSERT OR IGNORE (never overwrites genuine predictions already stored).
+    """
+    global _backfill_done
+    _backfill_done = True
+
+    if not _last_solar_forecast or not _last_consumption_forecast:
+        return
+
+    history = store.load_last_24h()
+    if not history:
+        return
+
+    # Find the earliest SoC reading from the start of today (local time)
+    today_start_ms = int(
+        datetime.now(_TZ_LOCAL).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+    )
+    anchor_soc: Optional[float] = None
+    anchor_ts_ms: int = 0
+    for ts, data in history:
+        ts_ms = int(ts * 1000)
+        soc = data.get('batt_soc')
+        if soc is not None and (anchor_soc is None or ts_ms >= today_start_ms):
+            anchor_soc = soc
+            anchor_ts_ms = ts_ms
+            if ts_ms >= today_start_ms:
+                break  # found today's earliest — stop
+
+    if anchor_soc is None:
+        return
+
+    now_ms = int(time.time() * 1000)
+    fc = _simulate_soc(
+        anchor_soc, cap_val, _last_solar_forecast, _last_consumption_forecast,
+        start_ms=anchor_ts_ms,
+    )
+    if fc:
+        store.save_power_forecast(fc, now_ms)
+        past_n = sum(1 for r in fc if r['ts_ms'] <= now_ms)
+        log.info(
+            'PowerForecast: backfilled %d past slots from SoC %.1f%% at %s',
+            past_n, anchor_soc,
+            datetime.fromtimestamp(anchor_ts_ms / 1000, tz=_TZ_LOCAL).strftime('%H:%M'),
+        )
+
 
 def _push_power_forecast(fc: list[dict]):
     """Save simulation output to DB and push the full stored window to browsers."""
@@ -259,6 +314,8 @@ def _on_data(data: dict):
     cap_val = clean.get('batt_rated_capacity')
     if (soc_val is not None and cap_val and cap_val > 0
             and _last_solar_forecast and _last_consumption_forecast):
+        if not _backfill_done:
+            _backfill_power_forecast(cap_val)
         fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
         if fc:
             _push_power_forecast(fc)

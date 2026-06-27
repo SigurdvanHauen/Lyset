@@ -872,8 +872,8 @@ function onData(d) {
   setCard('d-batt', d.batt_power,         0);
   setCard('d-load', d.house_load,         0);
 
-  setText('d-grid-sub', d.meter_active_power == null ? '' :
-    d.meter_active_power > 0 ? 'Importing' : d.meter_active_power < 0 ? 'Exporting' : '');
+  _lastMeterPower = d.meter_active_power;
+  updateGridSub();
   setText('d-batt-sub', d.batt_power == null ? '' :
     d.batt_power > 0 ? 'Charging' : d.batt_power < 0 ? 'Discharging' : '');
 
@@ -1350,6 +1350,24 @@ function onPowerForecast(data) {
   }
 }
 
+// ── Grid sub-label (direction + current price) ────────────────────────────────
+let _lastMeterPower = null;
+
+function updateGridSub() {
+  const now = Date.now();
+  const cur = _pricesData.find(p => p.ts <= now && p.ts + 3600000 > now)
+              || _pricesData.find(p => p.ts > now - 900000 && p.ts <= now);
+  const p = _lastMeterPower;
+  if (p == null) { setText('d-grid-sub', ''); return; }
+  if (p > 0) {
+    setText('d-grid-sub', cur ? `Importing · ${cur.import.toFixed(2)} kr/kWh` : 'Importing');
+  } else if (p < 0) {
+    setText('d-grid-sub', cur ? `Exporting · ${cur.export.toFixed(2)} kr/kWh` : 'Exporting');
+  } else {
+    setText('d-grid-sub', '');
+  }
+}
+
 // ── Prices ────────────────────────────────────────────────────────────────────
 let _pricesData    = [];
 let _priceChart    = null;
@@ -1359,6 +1377,7 @@ let _priceMode     = 'import';
 function onPrices(prices) {
   _pricesData = prices.slice().sort((a, b) => a.ts - b.ts);
   updatePriceCards();
+  updateGridSub();
   document.getElementById('pr-status').textContent = '';
   const prPanel = document.getElementById('panel-prices');
   if (prPanel.classList.contains('active')) { renderPriceChart(); renderPriceLineChart(); }
