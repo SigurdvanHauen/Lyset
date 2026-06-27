@@ -658,6 +658,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
       <div class="modal-actions">
         <button id="modal-fc-btn" onclick="refreshForecast()" style="font-size:11px;padding:4px 10px;display:none">Refresh forecast</button>
+        <button id="modal-bands-btn" onclick="toggleBands()" style="font-size:11px;padding:4px 10px;display:none">Bands: Off</button>
         <button id="modal-smooth-btn" onclick="toggleSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
         <button onclick="resetZoom()" style="font-size:11px;padding:4px 10px">Reset zoom</button>
         <button class="modal-close" onclick="closeModal()">&#215;</button>
@@ -679,6 +680,7 @@ const historyMap = {}; // dataKey → { ts: number[], val: number[] }
 let _modalChart = null;
 let _modalKey   = null;
 let _smoothEnabled = true;   // default: smoothing on
+let _bandsEnabled  = false;  // default: confidence bands off
 
 // Centered moving average; null points are skipped but their x is preserved.
 function smoothPoints(pts, halfWin) {
@@ -915,7 +917,8 @@ function openChart(key, label, unit, color) {
     label + (unit ? ' (' + unit + ')' : '')
     + (hasFc                         ? ' + Solcast forecast' : '')
     + (hasCons || hasSocFc || hasBattFc || hasGridFc ? ' + predicted' : '');
-  document.getElementById('modal-fc-btn').style.display = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-fc-btn').style.display   = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-bands-btn').style.display = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-overlay').classList.add('active');
 
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
@@ -940,8 +943,8 @@ function openChart(key, label, unit, color) {
     const p90Pts = _solcastData.filter(d => d.p90_w != null).map(d => ({ x: d.ts_ms, y: d.p90_w }));
     const p10Pts = _solcastData.filter(d => d.p10_w != null).map(d => ({ x: d.ts_ms, y: d.p10_w }));
 
-    // P10–P90 confidence band (P90 fills downward to P10)
-    if (p90Pts.length && p10Pts.length) {
+    // P10–P90 confidence band — only rendered when bands are enabled
+    if (_bandsEnabled && p90Pts.length && p10Pts.length) {
       datasets.push({
         label: 'P90',
         data: p90Pts,
@@ -1157,6 +1160,14 @@ function toggleSmooth() {
     _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
     _modalChart.update('none');
   }
+}
+
+function toggleBands() {
+  _bandsEnabled = !_bandsEnabled;
+  const btn = document.getElementById('modal-bands-btn');
+  btn.textContent = 'Bands: ' + (_bandsEnabled ? 'On' : 'Off');
+  btn.style.borderColor = _bandsEnabled ? 'var(--accent)' : 'var(--border)';
+  if (_modalKey === 'active_power') openChart('active_power', 'PV Power', 'W', '#F59E0B');
 }
 
 function resetZoom() {

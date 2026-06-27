@@ -100,14 +100,26 @@ def load_prices(from_ms: int, to_ms: int) -> list[dict]:
 
 
 def save_solar_forecast(records: list[dict]):
-    """Upsert a batch of solar forecast records from SolcastWorker."""
+    """
+    Persist solar forecast records.
+    Past slots use INSERT OR IGNORE — keeps the first (earliest) prediction so
+    historical forecasts remain visible on charts even after later fetches.
+    Future slots use INSERT OR REPLACE — always reflects the latest Solcast data.
+    """
+    now_ms = int(time.time() * 1000)
     with _lock:
         con = _get_con()
         for r in records:
-            con.execute(
-                'INSERT OR REPLACE INTO solar_forecast VALUES (?, ?, ?, ?)',
-                (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w')),
-            )
+            if r['ts_ms'] <= now_ms:
+                con.execute(
+                    'INSERT OR IGNORE INTO solar_forecast VALUES (?, ?, ?, ?)',
+                    (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w')),
+                )
+            else:
+                con.execute(
+                    'INSERT OR REPLACE INTO solar_forecast VALUES (?, ?, ?, ?)',
+                    (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w')),
+                )
         con.commit()
 
 

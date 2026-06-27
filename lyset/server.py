@@ -368,9 +368,13 @@ def _on_price_status(msg: str, ok: bool):
 
 def _on_solar_forecast(records: list[dict]):
     global _last_solar_forecast
-    _last_solar_forecast = records
     store.save_solar_forecast(records)
-    _push({'type': 'solar_forecast', 'payload': records})
+    # Push the full stored window (past 24 h preserved + new future data) so the
+    # chart shows historical forecasts alongside actuals, not just the latest fetch.
+    now_ms = int(time.time() * 1000)
+    full = store.load_solar_forecast(now_ms - 86_400_000, now_ms + 2 * 86_400_000)
+    _last_solar_forecast = full or records
+    _push({'type': 'solar_forecast', 'payload': _last_solar_forecast})
 
 
 def _on_solcast_status(msg: str, ok: bool):
