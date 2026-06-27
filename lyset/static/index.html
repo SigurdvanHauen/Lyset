@@ -186,6 +186,7 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 .card-lbl  { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
 .card-times{ font-size: 9px; color: var(--muted); text-align: right; line-height: 1.55; opacity: 0.6; flex-shrink: 0; margin-left: 6px; }
 .card-val  { font-size: 22px; font-weight: 700; line-height: 1; }
+.card-sub  { font-size: 10px; color: var(--muted); margin-top: 4px; min-height: 13px; }
 .unit      { font-size: 12px; color: var(--muted); margin-left: 2px; }
 
 /* ── Chart modal ── */
@@ -346,10 +347,12 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div class="card grid clickable" onclick="openChart('meter_active_power','Grid Power','W','#4F8EF7')">
         <div class="card-top"><div class="card-lbl">Grid Power</div><div class="card-times" id="t-d-grid"></div></div>
         <div class="card-val" id="d-grid">&#8212;<span class="unit">W</span></div>
+        <div class="card-sub" id="d-grid-sub"></div>
       </div>
       <div class="card batt clickable" onclick="openChart('batt_power','Battery Power','W','#34D399')">
         <div class="card-top"><div class="card-lbl">Battery Power</div><div class="card-times" id="t-d-batt"></div></div>
         <div class="card-val" id="d-batt">&#8212;<span class="unit">W</span></div>
+        <div class="card-sub" id="d-batt-sub"></div>
       </div>
       <div class="card load clickable" onclick="openChart('house_load','House Load','W','#F87171')">
         <div class="card-top"><div class="card-lbl">House Load</div><div class="card-times" id="t-d-load"></div></div>
@@ -867,6 +870,11 @@ function onData(d) {
   setCard('d-grid', d.meter_active_power, 0);
   setCard('d-batt', d.batt_power,         0);
   setCard('d-load', d.house_load,         0);
+
+  setText('d-grid-sub', d.meter_active_power == null ? '' :
+    d.meter_active_power > 0 ? 'Importing' : d.meter_active_power < 0 ? 'Exporting' : '');
+  setText('d-batt-sub', d.batt_power == null ? '' :
+    d.batt_power > 0 ? 'Charging' : d.batt_power < 0 ? 'Discharging' : '');
 
   setCard('d-soc',   d.batt_soc,         1);
   setCard('d-soh',   d.batt_soh,         1);
