@@ -70,6 +70,7 @@ _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 _slot_samples: list[float] = []   # watts values
 _slot_key: int = -1               # int(ts_utc / 900)
 _backfill_done: bool = False      # run historical prediction backfill once per process
+_last_batt_soc: float | None = None  # used to detect single-poll SoC outliers
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -284,7 +285,16 @@ def _push_power_forecast(fc: list[dict]):
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
-    global _last_data, _slot_samples, _slot_key
+    global _last_data, _slot_samples, _slot_key, _last_batt_soc
+    # Drop single-poll SoC glitches — inverter occasionally reports garbage values.
+    # At max C/2 rate the SoC moves <0.1% per 5-second poll; >15% is physically impossible.
+    soc = data.get('batt_soc')
+    if soc is not None:
+        if _last_batt_soc is not None and abs(soc - _last_batt_soc) > 15:
+            log.warning('batt_soc outlier dropped: %.1f%% → %.1f%%', _last_batt_soc, soc)
+            data = {**data, 'batt_soc': _last_batt_soc}
+        else:
+            _last_batt_soc = soc
     # Strip private keys and non-JSON-serialisable values
     clean = {k: v for k, v in data.items()
              if not k.startswith('_') and isinstance(v, (int, float, str, bool, type(None)))}
