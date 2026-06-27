@@ -913,7 +913,7 @@ function openChart(key, label, unit, color) {
         label: 'P90',
         data: p90Pts,
         borderColor: 'transparent',
-        backgroundColor: '#F59E0B1A',
+        backgroundColor: '#FFFFFF1A',
         borderWidth: 0,
         pointRadius: 0,
         fill: '+1',
@@ -937,7 +937,7 @@ function openChart(key, label, unit, color) {
     datasets.push({
       label: 'Forecast',
       data: fcPts,
-      borderColor: '#F59E0BAA',
+      borderColor: '#FFFFFFAA',
       backgroundColor: 'transparent',
       borderWidth: 2,
       borderDash: [6, 4],
@@ -977,6 +977,9 @@ function openChart(key, label, unit, color) {
   const xSpan   = allTs.length >= 2 ? Math.max(...allTs) - Math.min(...allTs) : 0;
   const showDate = xSpan > 18 * 3600000;
 
+  const _dayStart = new Date(); _dayStart.setHours(0, 0, 0, 0);
+  const _dayEnd   = new Date(); _dayEnd.setHours(23, 59, 59, 999);
+
   _modalChart = new Chart(
     document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
@@ -989,6 +992,8 @@ function openChart(key, label, unit, color) {
       scales: {
         x: {
           type: 'linear',
+          min: _dayStart.getTime(),
+          max: _dayEnd.getTime(),
           ticks: {
             color: '#8892AA',
             maxTicksLimit: 8,
