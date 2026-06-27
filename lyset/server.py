@@ -62,6 +62,7 @@ _solcast_status_ok: bool = False
 
 _consumption_model: Optional[ConsumptionModel] = None
 _last_consumption_forecast: list[dict] = []
+_last_power_forecast: list[dict] = []
 _MODEL_PATH = Path(__file__).parent.parent / 'lyset_model.json'
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 
@@ -213,6 +214,18 @@ def _simulate_soc(
     return result
 
 
+# ── Power forecast storage helper ────────────────────────────────────────────
+
+def _push_power_forecast(fc: list[dict]):
+    """Save simulation output to DB and push the full stored window to browsers."""
+    global _last_power_forecast
+    now_ms = int(time.time() * 1000)
+    store.save_power_forecast(fc, now_ms)
+    combined = store.load_power_forecast(now_ms - 86_400_000, now_ms + 48 * 3_600_000)
+    _last_power_forecast = combined or fc
+    _push({'type': 'power_forecast', 'payload': _last_power_forecast})
+
+
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
@@ -241,14 +254,14 @@ def _on_data(data: dict):
         else:
             _slot_samples.append(grid_import_w)
 
-    # Push SoC forecast whenever we have all prerequisites
+    # Save and push power forecast whenever we have all prerequisites
     soc_val = clean.get('batt_soc')
     cap_val = clean.get('batt_rated_capacity')
     if (soc_val is not None and cap_val and cap_val > 0
             and _last_solar_forecast and _last_consumption_forecast):
         fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
         if fc:
-            _push({'type': 'soc_forecast', 'payload': fc})
+            _push_power_forecast(fc)
 
 
 def _save_model_and_regen():
@@ -400,6 +413,13 @@ async def lifespan(app: FastAPI):
         stored = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
         _last_consumption_forecast = stored or future
 
+    # Restore stored power forecast from DB
+    global _last_power_forecast
+    now_ms = int(time.time() * 1000)
+    _last_power_forecast = store.load_power_forecast(now_ms - 86_400_000, now_ms + 48 * 3_600_000)
+    if _last_power_forecast:
+        log.info('PowerForecast: restored %d stored periods from DB', len(_last_power_forecast))
+
     yield
 
     if _worker and _worker.is_alive():
@@ -543,21 +563,15 @@ async def api_solar_forecast_refresh():
     return {'ok': True}
 
 
-@app.get('/api/soc-forecast')
-async def api_soc_forecast():
-    soc_val = _last_data.get('batt_soc')
-    cap_val = _last_data.get('batt_rated_capacity')
-    if soc_val is None or not cap_val or cap_val <= 0:
-        return {'forecast': []}
+@app.get('/api/power-forecast')
+async def api_power_forecast():
+    """Return stored power forecast: past 24 h (predictions vs actuals) + next 48 h."""
     now_ms = int(time.time() * 1000)
     loop = asyncio.get_running_loop()
-    solar = await loop.run_in_executor(None, store.load_solar_forecast, now_ms, now_ms + 48 * 3_600_000)
-    load  = await loop.run_in_executor(None, store.load_consumption_forecast,
-                                       now_ms - 30 * 60 * 1000, now_ms + 48 * 3_600_000)
-    solar = solar or _last_solar_forecast
-    load  = load  or _last_consumption_forecast
-    fc = _simulate_soc(soc_val, cap_val, solar, load)
-    return {'forecast': fc}
+    data = await loop.run_in_executor(
+        None, store.load_power_forecast, now_ms - 86_400_000, now_ms + 48 * 3_600_000
+    )
+    return {'forecast': data or _last_power_forecast}
 
 
 @app.get('/api/prices')
@@ -619,13 +633,8 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps({'type': 'solar_forecast', 'payload': _last_solar_forecast}))
         if _last_consumption_forecast:
             await ws.send_text(json.dumps({'type': 'consumption_forecast', 'payload': _last_consumption_forecast}))
-        soc_val = _last_data.get('batt_soc')
-        cap_val = _last_data.get('batt_rated_capacity')
-        if (soc_val is not None and cap_val and cap_val > 0
-                and _last_solar_forecast and _last_consumption_forecast):
-            fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
-            if fc:
-                await ws.send_text(json.dumps({'type': 'soc_forecast', 'payload': fc}))
+        if _last_power_forecast:
+            await ws.send_text(json.dumps({'type': 'power_forecast', 'payload': _last_power_forecast}))
         _ws_clients.add(ws)
         try:
             while True:

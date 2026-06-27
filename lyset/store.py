@@ -42,6 +42,13 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS consumption_forecast '
             '(ts_ms INTEGER PRIMARY KEY, w REAL)'
         )
+        _con.execute(
+            # Power simulation output per 30-min slot.
+            # Past slots use INSERT OR IGNORE (keep first/earliest prediction for comparison).
+            # Future slots use INSERT OR REPLACE (keep latest prediction as it refines).
+            'CREATE TABLE IF NOT EXISTS power_forecast '
+            '(ts_ms INTEGER PRIMARY KEY, soc REAL, batt_w REAL, grid_w REAL)'
+        )
         _con.commit()
     return _con
 
@@ -143,6 +150,44 @@ def load_consumption_forecast(from_ms: int, to_ms: int) -> list[dict]:
             (from_ms, to_ms),
         ).fetchall()
     return [{'ts_ms': ts, 'w': w} for ts, w in rows]
+
+
+def save_power_forecast(records: list[dict], now_ms: int):
+    """
+    Persist power simulation predictions.
+    Past slots (ts_ms <= now_ms): INSERT OR IGNORE — keeps earliest prediction for later comparison.
+    Future slots (ts_ms > now_ms): INSERT OR REPLACE — keeps latest prediction as it refines.
+    """
+    with _lock:
+        con = _get_con()
+        for r in records:
+            soc  = r.get('soc')
+            bw   = r.get('batt_w')
+            gw   = r.get('grid_w')
+            if soc is None:
+                continue
+            if r['ts_ms'] <= now_ms:
+                con.execute(
+                    'INSERT OR IGNORE INTO power_forecast VALUES (?, ?, ?, ?)',
+                    (r['ts_ms'], soc, bw, gw),
+                )
+            else:
+                con.execute(
+                    'INSERT OR REPLACE INTO power_forecast VALUES (?, ?, ?, ?)',
+                    (r['ts_ms'], soc, bw, gw),
+                )
+        con.commit()
+
+
+def load_power_forecast(from_ms: int, to_ms: int) -> list[dict]:
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts_ms, soc, batt_w, grid_w FROM power_forecast '
+            'WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms',
+            (from_ms, to_ms),
+        ).fetchall()
+    return [{'ts_ms': ts, 'soc': soc, 'batt_w': bw, 'grid_w': gw}
+            for ts, soc, bw, gw in rows]
 
 
 def clear_history():
