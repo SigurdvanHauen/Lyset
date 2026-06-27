@@ -969,17 +969,17 @@ function openChart(key, label, unit, color) {
       });
     }
 
-    // Mean forecast — dashed line; fills the gap to actual data to show curtailed energy
+    // Mean forecast — dashed line drawn above the band
     datasets.push({
       label: 'Forecast',
       data: fcPts,
       borderColor: '#FFFFFFAA',
-      backgroundColor: 'rgba(251,191,36,0.18)',
+      backgroundColor: 'transparent',
       borderWidth: 2,
       borderDash: [6, 4],
       pointRadius: 0,
       pointHoverRadius: 4,
-      fill: { target: 0, above: 'rgba(251,191,36,0.18)', below: 'transparent' },
+      fill: false,
       tension: 0.3,
       order: 1,
     });
@@ -1068,10 +1068,28 @@ function openChart(key, label, unit, color) {
   const _dayStart = new Date(); _dayStart.setHours(0, 0, 0, 0);
   const _dayEnd   = new Date(); _dayEnd.setHours(23, 59, 59, 999);
 
+  const limitedPeriods = key === 'active_power' ? getPowerLimitedPeriods() : [];
+  const limitBandsPlugin = {
+    id: 'limitBands',
+    afterDraw(chart) {
+      if (!limitedPeriods.length) return;
+      const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+      ctx.save();
+      ctx.fillStyle = 'rgba(239,68,68,0.15)';
+      for (const { t0, t1 } of limitedPeriods) {
+        const x0 = x.getPixelForValue(t0);
+        const x1 = x.getPixelForValue(t1);
+        if (x1 > x0) ctx.fillRect(x0, top, x1 - x0, bottom - top);
+      }
+      ctx.restore();
+    }
+  };
+
   _modalChart = new Chart(
     document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
     data: { datasets },
+    plugins: [limitBandsPlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -1172,6 +1190,20 @@ function toggleBands() {
 
 function resetZoom() {
   if (_modalChart) _modalChart.resetZoom();
+}
+
+// Returns [{t0, t1}] pairs (ms) where inverter was in power-limited state (0x0201 = 513)
+function getPowerLimitedPeriods() {
+  const h = historyMap['inverter_state'] || { ts: [], val: [] };
+  const periods = [];
+  let start = null;
+  for (let i = 0; i < h.ts.length; i++) {
+    const limited = (h.val[i] === 513);
+    if (limited && start === null) start = h.ts[i];
+    if (!limited && start !== null) { periods.push({ t0: start, t1: h.ts[i] }); start = null; }
+  }
+  if (start !== null && h.ts.length) periods.push({ t0: start, t1: h.ts[h.ts.length - 1] });
+  return periods;
 }
 
 async function refreshForecast() {
