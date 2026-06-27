@@ -969,17 +969,17 @@ function openChart(key, label, unit, color) {
       });
     }
 
-    // Mean forecast — dashed line drawn above the band
+    // Mean forecast — dashed line; fills the gap to actual data to show curtailed energy
     datasets.push({
       label: 'Forecast',
       data: fcPts,
       borderColor: '#FFFFFFAA',
-      backgroundColor: 'transparent',
+      backgroundColor: 'rgba(251,191,36,0.18)',
       borderWidth: 2,
       borderDash: [6, 4],
       pointRadius: 0,
       pointHoverRadius: 4,
-      fill: false,
+      fill: { target: 0, above: 'rgba(251,191,36,0.18)', below: 'transparent' },
       tension: 0.3,
       order: 1,
     });
