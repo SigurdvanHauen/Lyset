@@ -145,10 +145,10 @@ def _on_data(data: dict):
     ts = data.get('_timestamp', time.time())
     store.save(ts, clean)
 
-    # Accumulate grid import for the current 15-min slot
-    meter_w = clean.get('meter_active_power')
+    # Accumulate house load for the current 15-min slot
+    meter_w = clean.get('house_load')
     if meter_w is not None and _consumption_model is not None:
-        grid_import_w = max(0.0, meter_w)   # positive meter = importing from grid
+        grid_import_w = max(0.0, meter_w)
         key = int(ts / 900)
         if key != _slot_key:
             if _slot_samples and _slot_key >= 0:

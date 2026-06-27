@@ -875,13 +875,13 @@ function openChart(key, label, unit, color) {
   const hist  = historyMap[key] || { ts: [], val: [] };
   const pts   = hist.val.length;
   const data  = makeChartPoints(hist.ts, hist.val);
-  const hasFc   = key === 'active_power'      && _solcastData.length > 0;
-  const hasCons = key === 'meter_active_power' && _consumptionForecast.some(r => r.w != null);
+  const hasFc   = key === 'active_power' && _solcastData.length > 0;
+  const hasCons = key === 'house_load'   && _consumptionForecast.some(r => r.w != null);
 
   document.getElementById('modal-title').textContent =
     label + (unit ? ' (' + unit + ')' : '')
     + (hasFc   ? ' + Solcast forecast' : '')
-    + (hasCons ? ' + predicted import' : '');
+    + (hasCons ? ' + predicted' : '');
   document.getElementById('modal-fc-btn').style.display = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-overlay').classList.add('active');
 
@@ -954,7 +954,7 @@ function openChart(key, label, unit, color) {
       .filter(r => r.w != null)
       .map(r => ({ x: r.ts_ms, y: r.w }));
     datasets.push({
-      label: 'Predicted import',
+      label: 'Predicted consumption',
       data: consPts,
       borderColor: '#818CF8AA',
       backgroundColor: '#818CF810',
@@ -1231,8 +1231,8 @@ let _consumptionForecast = [];
 
 function onConsumptionForecast(data) {
   _consumptionForecast = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
-  if (_modalChart && _modalKey === 'meter_active_power') {
-    openChart('meter_active_power', 'Grid Power', 'W', '#4F8EF7');
+  if (_modalChart && _modalKey === 'house_load') {
+    openChart('house_load', 'House Load', 'W', '#F87171');
   }
 }
 
