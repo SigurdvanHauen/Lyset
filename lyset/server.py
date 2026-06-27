@@ -702,6 +702,22 @@ async def api_ha_snapshot():
     if _last_data:
         pv_w = (_last_data.get('pv1_power') or 0) + (_last_data.get('pv2_power') or 0)
 
+    # Full-day arrays for ApexCharts data_generator (local calendar day)
+    today_start = datetime.now(_TZ_LOCAL).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_ms = int(today_start.timestamp() * 1000)
+    today_end_ms   = today_start_ms + 86_400_000
+
+    solar_forecast_today = [
+        {'ts_ms': s['ts_ms'], 'pv_w': s.get('pv_w'), 'p10_w': s.get('p10_w'), 'p90_w': s.get('p90_w')}
+        for s in _last_solar_forecast
+        if today_start_ms < s['ts_ms'] <= today_end_ms
+    ]
+    prices_today = [
+        {'ts': p['ts'], 'import': p['import'], 'export': p['export'], 'resolution': p.get('resolution', '1h')}
+        for p in _last_prices
+        if today_start_ms <= p['ts'] < today_end_ms
+    ]
+
     return {
         'ts_ms':     now_ms,
         'connected': _connected,
@@ -732,6 +748,10 @@ async def api_ha_snapshot():
 
         # Active consumption forecast slot
         'consumption_fc_w': cur_consumption['w'] if cur_consumption else None,
+
+        # Full-day arrays for ApexCharts cards (ts_ms = period_end for solar, slot_start for prices)
+        'solar_forecast_today': solar_forecast_today,
+        'prices_today':         prices_today,
     }
 
 
