@@ -267,10 +267,17 @@ async def lifespan(app: FastAPI):
         _price_worker.start()
 
     # Start Solcast solar forecast worker if API key is configured
-    global _solcast_worker
+    global _solcast_worker, _last_solar_forecast
     _solcast_worker = solcast_from_env(on_forecast=_on_solar_forecast, on_status=_on_solcast_status)
     if _solcast_worker:
         _solcast_worker.start()
+
+    # Restore last solar forecast from DB so it's available immediately after restart
+    now_ms = int(time.time() * 1000)
+    cached_fc = store.load_solar_forecast(now_ms - 86_400_000, now_ms + 2 * 86_400_000)
+    if cached_fc:
+        _last_solar_forecast = cached_fc
+        log.info('Solcast: restored %d cached forecast periods from DB', len(cached_fc))
 
     # Load or create consumption model
     global _consumption_model, _last_consumption_forecast
