@@ -108,8 +108,10 @@ def _parse_records(records: list[dict]) -> list[dict]:
             continue
 
         # Export ≈ spot price only (net-metering); subtract elafgift from the
-        # electricity component (elafgift is bundled into electricity.value)
-        export_price = round(max(0.0, elec_value - elafgift), 4)
+        # electricity component (elafgift is bundled into electricity.value).
+        # Can be negative during low/negative spot periods — keep the real value
+        # so the UI can show when exporting costs money (IntelliCharge.ai trigger).
+        export_price = round(elec_value - elafgift, 4)
 
         out.append({
             'ts':         ts_ms,
