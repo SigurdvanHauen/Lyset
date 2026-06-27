@@ -22,15 +22,18 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
 log = logging.getLogger(__name__)
 
-_BASE         = 'https://api.solcast.com.au'
-_DEFAULT_POLL = 21600.0  # 6 h — safe for 2 sites on free tier
+_BASE          = 'https://api.solcast.com.au'
+_DEFAULT_POLL  = 21600.0                  # legacy fallback if no fetch hours set
+_DEFAULT_HOURS = (6, 12, 18)             # fetch at 06:00, 12:00, 18:00 local time
+_TZ            = ZoneInfo('Europe/Copenhagen')
 
 
 def _env_float(name: str, default: float) -> float:
@@ -138,26 +141,39 @@ def _combine(site_records: list[list[dict]]) -> list[dict]:
 
 
 class SolcastWorker(threading.Thread):
-    """Background thread: polls Solcast for all configured sites and fires on_forecast."""
+    """Background thread: fetches Solcast forecast at scheduled times of day."""
 
     def __init__(
         self,
-        api_key:       str,
-        resource_ids:  Optional[list[str]] = None,
-        poll_interval: float               = _DEFAULT_POLL,
-        on_forecast:   Optional[Callable[[list[dict]], None]] = None,
-        on_status:     Optional[Callable[[str, bool], None]]  = None,
+        api_key:      str,
+        resource_ids: Optional[list[str]]                     = None,
+        fetch_hours:  tuple[int, ...]                         = _DEFAULT_HOURS,
+        on_forecast:  Optional[Callable[[list[dict]], None]]  = None,
+        on_status:    Optional[Callable[[str, bool], None]]   = None,
     ):
         super().__init__(daemon=True, name='SolcastWorker')
         self._api_key      = api_key
         self._resource_ids = resource_ids or []
-        self.poll_interval = poll_interval
+        self._fetch_hours  = sorted(fetch_hours)
         self._on_forecast  = on_forecast or (lambda d: None)
         self._on_status    = on_status   or (lambda m, ok: None)
         self._running      = False
 
     def stop(self):
         self._running = False
+
+    def _seconds_until_next_fetch(self) -> float:
+        """Seconds until the next scheduled fetch time (local Europe/Copenhagen)."""
+        now = datetime.now(tz=_TZ)
+        for h in self._fetch_hours:
+            candidate = now.replace(hour=h, minute=0, second=0, microsecond=0)
+            if candidate > now:
+                return (candidate - now).total_seconds()
+        # All today's slots passed — next is tomorrow's first hour
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=self._fetch_hours[0], minute=0, second=0, microsecond=0
+        )
+        return (tomorrow - now).total_seconds()
 
     def run(self):
         self._running = True
@@ -170,19 +186,21 @@ class SolcastWorker(threading.Thread):
             self._on_status('Solcast: no sites found — register at toolkit.solcast.com.au', False)
             return
 
-        n = len(self._resource_ids)
-        calls_per_day = (86400 / self.poll_interval) * n
-        if calls_per_day > 9:
-            log.warning(
-                'Solcast: %d site(s) × %.0f polls/day ≈ %.0f API calls/day '
-                '(free tier: 10). Increase SOLCAST_POLL_INTERVAL to ≥ %.0f s.',
-                n, 86400 / self.poll_interval, calls_per_day,
-                86400 / (9 / n),
-            )
+        log.info('Solcast: scheduled fetches at %s local time',
+                 ', '.join(f'{h:02d}:00' for h in self._fetch_hours))
 
         while self._running:
+            wait = self._seconds_until_next_fetch()
+            next_dt = datetime.now(tz=_TZ) + timedelta(seconds=wait)
+            log.info('Solcast: next fetch at %s (in %.0f min)',
+                     next_dt.strftime('%H:%M'), wait / 60)
+            self._on_status(f'Solcast: next fetch at {next_dt.strftime("%H:%M")}', True)
+            self._sleep(wait)
+            if not self._running:
+                break
             extra = self._fetch_once()
-            self._sleep(self.poll_interval + extra)
+            if extra:
+                self._sleep(extra)
 
     def _fetch_once(self) -> float:
         """Fetch and push forecast. Returns extra seconds to sleep on rate-limit, else 0."""
@@ -240,12 +258,20 @@ def worker_from_env(**kwargs) -> Optional[SolcastWorker]:
 
     rid_env      = os.getenv('SOLCAST_RESOURCE_ID', '').strip()
     resource_ids = [r.strip() for r in rid_env.split(',') if r.strip()] if rid_env else []
-    interval     = _env_float('SOLCAST_POLL_INTERVAL', _DEFAULT_POLL)
 
-    log.info('Solcast: configured (%s, interval=%.0fs)',
+    hours_env  = os.getenv('SOLCAST_FETCH_HOURS', '').strip()
+    try:
+        fetch_hours = tuple(int(h.strip()) for h in hours_env.split(',') if h.strip()) \
+                      if hours_env else _DEFAULT_HOURS
+    except ValueError:
+        log.warning('Solcast: invalid SOLCAST_FETCH_HOURS %r — using default %s',
+                    hours_env, _DEFAULT_HOURS)
+        fetch_hours = _DEFAULT_HOURS
+
+    log.info('Solcast: configured (%s, fetching at %s local)',
              f'{len(resource_ids)} site(s) from env' if resource_ids else 'auto-discover',
-             interval)
+             ', '.join(f'{h:02d}:00' for h in fetch_hours))
     return SolcastWorker(
         api_key=api_key, resource_ids=resource_ids,
-        poll_interval=interval, **kwargs,
+        fetch_hours=fetch_hours, **kwargs,
     )
