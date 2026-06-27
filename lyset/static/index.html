@@ -658,7 +658,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
       <div class="modal-actions">
         <button id="modal-fc-btn" onclick="refreshForecast()" style="font-size:11px;padding:4px 10px;display:none">Refresh forecast</button>
-        <button id="modal-bands-btn" onclick="toggleBands()" style="font-size:11px;padding:4px 10px;display:none">Bands: Off</button>
+        <button id="modal-bands-btn" onclick="toggleBands()" style="font-size:11px;padding:4px 10px;display:none;border-color:var(--accent)">Bands: On</button>
         <button id="modal-smooth-btn" onclick="toggleSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
         <button onclick="resetZoom()" style="font-size:11px;padding:4px 10px">Reset zoom</button>
         <button class="modal-close" onclick="closeModal()">&#215;</button>
@@ -680,7 +680,7 @@ const historyMap = {}; // dataKey → { ts: number[], val: number[] }
 let _modalChart = null;
 let _modalKey   = null;
 let _smoothEnabled = true;   // default: smoothing on
-let _bandsEnabled  = false;  // default: confidence bands off
+let _bandsEnabled  = true;   // default: confidence bands on
 
 // Centered moving average; null points are skipped but their x is preserved.
 function smoothPoints(pts, halfWin) {
