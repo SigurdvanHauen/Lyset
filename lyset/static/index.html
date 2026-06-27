@@ -655,6 +655,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
       <div class="modal-actions">
         <button id="modal-fc-btn" onclick="refreshForecast()" style="font-size:11px;padding:4px 10px;display:none">Refresh forecast</button>
+        <button id="modal-smooth-btn" onclick="toggleSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
         <button onclick="resetZoom()" style="font-size:11px;padding:4px 10px">Reset zoom</button>
         <button class="modal-close" onclick="closeModal()">&#215;</button>
       </div>
@@ -674,6 +675,26 @@ let isConnected = false;
 const historyMap = {}; // dataKey → { ts: number[], val: number[] }
 let _modalChart = null;
 let _modalKey   = null;
+let _smoothEnabled = true;   // default: smoothing on
+
+// Centered moving average; null points are skipped but their x is preserved.
+function smoothPoints(pts, halfWin) {
+  if (pts.length < 3 || halfWin < 1) return pts;
+  return pts.map((p, i) => {
+    if (p.y == null) return p;
+    const lo = Math.max(0, i - halfWin);
+    const hi = Math.min(pts.length - 1, i + halfWin);
+    let sum = 0, n = 0;
+    for (let j = lo; j <= hi; j++) {
+      if (pts[j].y != null) { sum += pts[j].y; n++; }
+    }
+    return { x: p.x, y: n > 0 ? Math.round(sum / n) : p.y };
+  });
+}
+
+function applySmooth(pts) {
+  return _smoothEnabled ? smoothPoints(pts, 30) : pts;
+}
 
 // Build {x,y} pairs for Chart.js, inserting a null point in any gap > gapMs
 // so the line breaks visually instead of connecting across missing periods.
@@ -838,7 +859,7 @@ function onData(d) {
 
   if (_modalChart && _modalKey && historyMap[_modalKey]) {
     const h = historyMap[_modalKey];
-    _modalChart.data.datasets[0].data = makeChartPoints(h.ts, h.val);
+    _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
     _modalChart.update('none');
   }
 
@@ -874,7 +895,7 @@ function onData(d) {
 function openChart(key, label, unit, color) {
   const hist  = historyMap[key] || { ts: [], val: [] };
   const pts   = hist.val.length;
-  const data  = makeChartPoints(hist.ts, hist.val);
+  const data  = applySmooth(makeChartPoints(hist.ts, hist.val));
   const hasFc   = key === 'active_power' && _solcastData.length > 0;
   const hasCons = key === 'house_load'   && _consumptionForecast.some(r => r.w != null);
 
@@ -1060,6 +1081,18 @@ function closeModal() {
 
 function overlayClick(e) {
   if (e.target === document.getElementById('modal-overlay')) closeModal();
+}
+
+function toggleSmooth() {
+  _smoothEnabled = !_smoothEnabled;
+  const btn = document.getElementById('modal-smooth-btn');
+  btn.textContent = 'Smooth: ' + (_smoothEnabled ? 'On' : 'Off');
+  btn.style.borderColor = _smoothEnabled ? 'var(--accent)' : 'var(--border)';
+  if (_modalChart && _modalKey) {
+    const h = historyMap[_modalKey] || { ts: [], val: [] };
+    _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
+    _modalChart.update('none');
+  }
 }
 
 function resetZoom() {
