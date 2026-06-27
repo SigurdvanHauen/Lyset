@@ -762,6 +762,7 @@ function dispatch(msg) {
     case 'prices':               onPrices(msg.payload);             break;
     case 'solar_forecast':       onSolarForecast(msg.payload);      break;
     case 'consumption_forecast': onConsumptionForecast(msg.payload); break;
+    case 'soc_forecast':         onSocForecast(msg.payload);        break;
   }
 }
 
@@ -904,13 +905,15 @@ function openChart(key, label, unit, color) {
   const hist  = historyMap[key] || { ts: [], val: [] };
   const pts   = hist.val.length;
   const data  = applySmooth(makeChartPoints(hist.ts, hist.val));
-  const hasFc   = key === 'active_power' && _solcastData.length > 0;
-  const hasCons = key === 'house_load'   && _consumptionForecast.some(r => r.w != null);
+  const hasFc     = key === 'active_power' && _solcastData.length > 0;
+  const hasCons   = key === 'house_load'   && _consumptionForecast.some(r => r.w != null);
+  const hasSocFc  = key === 'batt_soc'    && _socForecast.length > 0;
 
   document.getElementById('modal-title').textContent =
     label + (unit ? ' (' + unit + ')' : '')
-    + (hasFc   ? ' + Solcast forecast' : '')
-    + (hasCons ? ' + predicted' : '');
+    + (hasFc     ? ' + Solcast forecast' : '')
+    + (hasCons   ? ' + predicted' : '')
+    + (hasSocFc  ? ' + predicted' : '');
   document.getElementById('modal-fc-btn').style.display = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-overlay').classList.add('active');
 
@@ -997,11 +1000,29 @@ function openChart(key, label, unit, color) {
     });
   }
 
+  if (hasSocFc) {
+    const socPts = _socForecast.map(r => ({ x: r.ts_ms, y: r.soc }));
+    datasets.push({
+      label: 'Predicted SoC',
+      data: socPts,
+      borderColor: '#34D39988',
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
+      tension: 0.3,
+      order: 1,
+    });
+  }
+
   // Show date in x-axis ticks when the range spans more than 18 h
   const allTs = [
     ...hist.ts,
-    ...(hasFc  ? _solcastData.map(d => d.ts_ms)          : []),
-    ...(hasCons ? _consumptionForecast.map(d => d.ts_ms)  : []),
+    ...(hasFc     ? _solcastData.map(d => d.ts_ms)         : []),
+    ...(hasCons   ? _consumptionForecast.map(d => d.ts_ms) : []),
+    ...(hasSocFc  ? _socForecast.map(d => d.ts_ms)         : []),
   ];
   const xSpan   = allTs.length >= 2 ? Math.max(...allTs) - Math.min(...allTs) : 0;
   const showDate = xSpan > 18 * 3600000;
@@ -1045,7 +1066,7 @@ function openChart(key, label, unit, color) {
       },
       plugins: {
         legend: {
-          display: hasFc || hasCons,
+          display: hasFc || hasCons || hasSocFc,
           labels: {
             color: '#8892AA',
             font:  { size: 10 },
@@ -1279,6 +1300,16 @@ function onConsumptionForecast(data) {
   _consumptionForecast = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
   if (_modalChart && _modalKey === 'house_load') {
     openChart('house_load', 'House Load', 'W', '#F87171');
+  }
+}
+
+// ── SoC forecast ──────────────────────────────────────────────────────────────
+let _socForecast = [];
+
+function onSocForecast(data) {
+  _socForecast = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
+  if (_modalChart && _modalKey === 'batt_soc') {
+    openChart('batt_soc', 'Battery SOC', '%', '#34D399');
   }
 }
 

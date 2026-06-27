@@ -133,6 +133,68 @@ class _WebLogHandler(logging.Handler):
             pass
 
 
+# ── SoC forecast simulation ───────────────────────────────────────────────────
+
+def _simulate_soc(
+    start_soc: float,
+    capacity_kwh: float,
+    solar_fc: list[dict],
+    load_fc: list[dict],
+    min_soc: float = 10.0,
+    charge_eff: float = 0.97,
+    discharge_eff: float = 0.97,
+) -> list[dict]:
+    """
+    Simulate battery SoC forward using Solcast and consumption forecasts.
+
+    solar_fc:  [{ts_ms, pv_w}, ...]  — 30-min period_end UTC ms
+    load_fc:   [{ts_ms, w}, ...]     — 15-min slot_start UTC ms
+    Returns:   [{ts_ms, soc}, ...]   — predicted SoC (%) at each solar period boundary
+    """
+    if not solar_fc or capacity_kwh <= 0:
+        return []
+
+    now_ms = int(time.time() * 1000)
+    load_by_ts = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
+    max_power_kw = capacity_kwh * 0.5  # C/2 — LUNA2000 rated charge rate heuristic
+
+    soc = start_soc
+    result = [{'ts_ms': now_ms, 'soc': round(soc, 1)}]
+
+    for rec in sorted(solar_fc, key=lambda r: r['ts_ms']):
+        ts_ms = rec['ts_ms']
+        if ts_ms <= now_ms:
+            continue
+
+        pv_w = rec.get('pv_w') or 0.0
+
+        # Map Solcast period [ts_ms-30min, ts_ms] to two 15-min consumption slots
+        slot1_ms = ts_ms - 30 * 60 * 1000
+        slot2_ms = ts_ms - 15 * 60 * 1000
+        load1 = load_by_ts.get(slot1_ms)
+        load2 = load_by_ts.get(slot2_ms)
+
+        if load1 is not None and load2 is not None:
+            load_w = (load1 + load2) / 2.0
+        elif load1 is not None:
+            load_w = load1
+        elif load2 is not None:
+            load_w = load2
+        else:
+            continue  # no consumption data for this period
+
+        net_kw = max(-max_power_kw, min(max_power_kw, (pv_w - load_w) / 1000.0))
+        if net_kw >= 0:
+            energy_kwh = net_kw * 0.5 * charge_eff
+        else:
+            energy_kwh = net_kw * 0.5 / discharge_eff
+
+        soc = max(min_soc, min(100.0, soc + energy_kwh / capacity_kwh * 100.0))
+        result.append({'ts_ms': ts_ms, 'soc': round(soc, 1)})
+
+    return result
+
+
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
@@ -160,6 +222,15 @@ def _on_data(data: dict):
             _slot_key = key
         else:
             _slot_samples.append(grid_import_w)
+
+    # Push SoC forecast whenever we have all prerequisites
+    soc_val = clean.get('batt_soc')
+    cap_val = clean.get('batt_rated_capacity')
+    if (soc_val is not None and cap_val and cap_val > 0
+            and _last_solar_forecast and _last_consumption_forecast):
+        fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
+        if fc:
+            _push({'type': 'soc_forecast', 'payload': fc})
 
 
 def _save_model_and_regen():
@@ -454,6 +525,23 @@ async def api_solar_forecast_refresh():
     return {'ok': True}
 
 
+@app.get('/api/soc-forecast')
+async def api_soc_forecast():
+    soc_val = _last_data.get('batt_soc')
+    cap_val = _last_data.get('batt_rated_capacity')
+    if soc_val is None or not cap_val or cap_val <= 0:
+        return {'forecast': []}
+    now_ms = int(time.time() * 1000)
+    loop = asyncio.get_running_loop()
+    solar = await loop.run_in_executor(None, store.load_solar_forecast, now_ms, now_ms + 48 * 3_600_000)
+    load  = await loop.run_in_executor(None, store.load_consumption_forecast,
+                                       now_ms - 30 * 60 * 1000, now_ms + 48 * 3_600_000)
+    solar = solar or _last_solar_forecast
+    load  = load  or _last_consumption_forecast
+    fc = _simulate_soc(soc_val, cap_val, solar, load)
+    return {'forecast': fc}
+
+
 @app.get('/api/prices')
 async def api_prices():
     now_ms = int(time.time() * 1000)
@@ -513,6 +601,13 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps({'type': 'solar_forecast', 'payload': _last_solar_forecast}))
         if _last_consumption_forecast:
             await ws.send_text(json.dumps({'type': 'consumption_forecast', 'payload': _last_consumption_forecast}))
+        soc_val = _last_data.get('batt_soc')
+        cap_val = _last_data.get('batt_rated_capacity')
+        if (soc_val is not None and cap_val and cap_val > 0
+                and _last_solar_forecast and _last_consumption_forecast):
+            fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
+            if fc:
+                await ws.send_text(json.dumps({'type': 'soc_forecast', 'payload': fc}))
         _ws_clients.add(ws)
         try:
             while True:
