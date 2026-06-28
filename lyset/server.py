@@ -395,10 +395,16 @@ def _save_model_and_regen():
     # so past predictions are preserved for comparison against actual measurements)
     future = _consumption_model.predict(time.time())
     store.save_consumption_forecast(future)
-    # Push the combined window: past 24h of predictions + next 24h
+    # Push the combined window: past 24h of predictions + next 24h.
+    # Merge p10/p90 from fresh prediction (DB only stores 'w').
     now_ms = int(time.time() * 1000)
     combined = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
-    _last_consumption_forecast = combined or future
+    pred_by_ts = {r['ts_ms']: r for r in future}
+    _last_consumption_forecast = [
+        {**r, 'p10_w': pred_by_ts.get(r['ts_ms'], {}).get('p10_w'),
+              'p90_w': pred_by_ts.get(r['ts_ms'], {}).get('p90_w')}
+        for r in (combined or future)
+    ]
     _push({'type': 'consumption_forecast', 'payload': _last_consumption_forecast})
 
 
@@ -577,12 +583,31 @@ async def lifespan(app: FastAPI):
             log.info('ConsumptionModel: no model file and no CONSUMPTION_HISTORY_PATH set — '
                      'learning from scratch (set CONSUMPTION_HISTORY_PATH to seed from Excel)')
 
+    # Re-seed model from actual house_load history in DB.
+    # This corrects any D06 (net grid import) Excel seed — house_load is gross
+    # consumption and differs from D06 whenever solar is producing.
+    poll_records = store.load_house_load_history()
+    if poll_records:
+        n_updated = _consumption_model.seed_from_polls(poll_records)
+        try:
+            _consumption_model.save(_MODEL_PATH)
+        except Exception as exc:
+            log.warning('ConsumptionModel: save after DB seed failed — %s', exc)
+        log.info('ConsumptionModel: re-seeded from %d poll records, %d slots updated, coverage %d/672',
+                 len(poll_records), n_updated, _consumption_model.coverage)
+
     if _consumption_model and _consumption_model.coverage > 0:
         future = _consumption_model.predict(time.time())
         store.save_consumption_forecast(future)
         now_ms = int(time.time() * 1000)
         stored = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
-        _last_consumption_forecast = stored or future
+        # Merge p10/p90 from fresh prediction into stored records (DB only keeps 'w')
+        pred_by_ts = {r['ts_ms']: r for r in future}
+        _last_consumption_forecast = [
+            {**r, 'p10_w': pred_by_ts.get(r['ts_ms'], {}).get('p10_w'),
+                  'p90_w': pred_by_ts.get(r['ts_ms'], {}).get('p90_w')}
+            for r in (stored or future)
+        ]
 
     # Restore stored power forecast from DB
     global _last_power_forecast

@@ -1067,9 +1067,35 @@ function openChart(key, label, unit, color) {
   }
 
   if (hasCons) {
-    const consPts = _consumptionForecast
-      .filter(r => r.w != null)
-      .map(r => ({ x: r.ts_ms, y: r.w }));
+    const consPts  = _consumptionForecast.filter(r => r.w     != null).map(r => ({ x: r.ts_ms, y: r.w }));
+    const consp90  = _consumptionForecast.filter(r => r.p90_w != null).map(r => ({ x: r.ts_ms, y: r.p90_w }));
+    const consp10  = _consumptionForecast.filter(r => r.p10_w != null).map(r => ({ x: r.ts_ms, y: r.p10_w }));
+
+    if (_bandsEnabled && consp90.length && consp10.length) {
+      datasets.push({
+        label: 'Cons P90',
+        data: consp90,
+        borderColor: 'transparent',
+        backgroundColor: '#818CF81A',
+        borderWidth: 0,
+        pointRadius: 0,
+        fill: '+1',
+        tension: 0.3,
+        order: 3,
+      });
+      datasets.push({
+        label: 'Cons P10',
+        data: consp10,
+        borderColor: 'transparent',
+        backgroundColor: 'transparent',
+        borderWidth: 0,
+        pointRadius: 0,
+        fill: false,
+        tension: 0.3,
+        order: 3,
+      });
+    }
+
     datasets.push({
       label: 'Predicted consumption',
       data: consPts,
@@ -1079,7 +1105,7 @@ function openChart(key, label, unit, color) {
       borderDash: [6, 4],
       pointRadius: 0,
       pointHoverRadius: 4,
-      fill: true,
+      fill: false,
       tension: 0.3,
       order: 1,
     });

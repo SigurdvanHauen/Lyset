@@ -353,6 +353,18 @@ def clean_forecast_soc() -> int:
         return len(updates)
 
 
+def load_house_load_history(from_ts: float = 0.0) -> list[tuple[float, float]]:
+    """Return (ts_utc, house_load_w) tuples for all poll rows that have house_load."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts, json_extract(data, "$.house_load") FROM polls '
+            'WHERE json_extract(data, "$.house_load") IS NOT NULL '
+            'AND ts >= ? ORDER BY ts',
+            (from_ts,),
+        ).fetchall()
+    return [(ts, w) for ts, w in rows]
+
+
 def clear_history():
     """Delete all inverter poll records."""
     with _lock:
