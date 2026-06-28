@@ -160,14 +160,21 @@ class AutoController:
                       f'(export {export_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
             return _Cmd(mode='export_limited', detail=detail)
 
-        # ── Default: max self-consumption, clear any stale forced command ──────
         worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
+
+        if export_dkk < _NEGATIVE_EXPORT_DKK:
+            # ── Negative export, battery full → idle the battery ──────────────
+            # Force-idle stops any stale discharge command from a third-party
+            # system and prevents the battery from adding to the grid export.
+            worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
+            worker.write_u16(47100, 0, 'AutoCtrl: forced STOP — no discharge')
+            detail = (f'Battery idle (SoC {batt_soc:.0f}% ≥ {_FORCE_CHARGE_SOC_MAX:.0f}%), '
+                      f'solar exporting at loss (export {export_dkk:.3f} DKK) — no room to absorb')
+            return _Cmd(mode='export_limited', detail=detail)
+
+        # ── Default: max self-consumption, clear any stale forced command ──────
         worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
         worker.write_u16(47100, 0, 'AutoCtrl: stop forced mode')
-        if export_dkk < _NEGATIVE_EXPORT_DKK:
-            detail = (f'Battery full (SoC {batt_soc:.0f}% ≥ {_FORCE_CHARGE_SOC_MAX:.0f}%), '
-                      f'cannot absorb more solar (export {export_dkk:.3f} DKK) — exporting at loss')
-        else:
-            detail = (f'Max self-consumption '
-                      f'(export {export_dkk:.3f} DKK, import {import_dkk:.3f} DKK)')
+        detail = (f'Max self-consumption '
+                  f'(export {export_dkk:.3f} DKK, import {import_dkk:.3f} DKK)')
         return _Cmd(mode='export_unlimited', detail=detail)
