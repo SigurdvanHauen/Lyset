@@ -292,17 +292,12 @@ def _push_power_forecast(fc: list[dict]):
 def _on_data(data: dict):
     global _last_data, _slot_samples, _slot_key, _last_batt_soc, _last_batt_soc_ts, _pv_yield_logged
     ts = data.get('_timestamp', time.time())
-    # Drop SoC glitches — the inverter occasionally reports 0% for a single poll.
-    # At C/2 rate the battery moves <0.1%/poll; allow 3% floor + 3% per minute of elapsed
-    # time so legitimate changes across connection gaps are still accepted.
+    # Drop SoC glitches using the same rate-based filter as _clean_history_soc.
     soc = data.get('batt_soc')
     if soc is not None:
         if _last_batt_soc is not None:
             elapsed_s = max(ts - _last_batt_soc_ts, 5.0)
-            # Real max rate is ~0.7 %/min (discharge at full power). Allow 2× margin
-            # → ~1.5 %/min, floored at 2 % to absorb the first sample after a gap.
-            max_change = max(2.0, elapsed_s / 40.0)
-            if abs(soc - _last_batt_soc) > max_change:
+            if abs(soc - _last_batt_soc) > _soc_max_change(elapsed_s):
                 log.warning('batt_soc outlier dropped: %.1f%% → %.1f%%', _last_batt_soc, soc)
                 data = {**data, 'batt_soc': _last_batt_soc}
             else:
@@ -913,6 +908,10 @@ async def api_state():
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
+def _soc_max_change(elapsed_s: float) -> float:
+    return max(2.0, elapsed_s / 40.0)
+
+
 def _clean_history_soc(history: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
     """Apply the same time-weighted SoC outlier filter to historical DB rows."""
     last_soc: float | None = None
@@ -923,8 +922,7 @@ def _clean_history_soc(history: list[tuple[float, dict]]) -> list[tuple[float, d
         if soc is not None:
             if last_soc is not None:
                 elapsed_s = max(ts - last_ts, 5.0)
-                max_change = max(3.0, elapsed_s / 20.0)
-                if abs(soc - last_soc) > max_change:
+                if abs(soc - last_soc) > _soc_max_change(elapsed_s):
                     d = {**d, 'batt_soc': last_soc}
                     soc = last_soc
             last_soc = soc
