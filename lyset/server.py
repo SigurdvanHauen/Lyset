@@ -727,6 +727,20 @@ async def api_ha_snapshot():
         if today_start_ms <= p['ts'] < today_end_ms
     ]
 
+    # kWh produced today — from inverter's own daily counter (resets at midnight)
+    daily_yield_kwh = _last_data.get('daily_yield') if _last_data else None
+
+    # Solcast estimate of total solar production for the full calendar day (sum of 30-min periods)
+    solar_fc_kwh_today = None
+    if _last_solar_forecast:
+        total = sum(
+            s['pv_w'] * 0.5 / 1000
+            for s in _last_solar_forecast
+            if today_start_ms < s['ts_ms'] <= today_end_ms
+            if s.get('pv_w') is not None
+        )
+        solar_fc_kwh_today = round(total, 2)
+
     return {
         'ts_ms':     now_ms,
         'connected': _connected,
@@ -738,6 +752,10 @@ async def api_ha_snapshot():
         'batt_soc':        _last_data.get('batt_soc'),
         'house_load_w':    _last_data.get('house_load'),
         'inverter_state':  _last_data.get('inverter_state'),
+
+        # Daily energy totals
+        'daily_yield_kwh':    daily_yield_kwh,    # actual kWh produced today (inverter counter)
+        'solar_fc_kwh_today': solar_fc_kwh_today, # Solcast estimate of full-day yield
 
         # Active electricity prices (DKK/kWh)
         'import_price_dkk': cur_price['import'] if cur_price else None,
