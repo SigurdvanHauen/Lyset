@@ -952,6 +952,29 @@ function openChart(key, label, unit, color) {
     order: 2,
   }];
 
+  // PV Power: colour restricted segments (inverter limiting output to house load only).
+  // Detected when grid ≈ 0 and battery ≈ 0 while PV is producing — nowhere for surplus to go.
+  if (key === 'active_power') {
+    const mH = historyMap['meter_active_power'] || { ts: [], val: [] };
+    const bH = historyMap['batt_power']          || { ts: [], val: [] };
+    const rMap = new Map();
+    for (let i = 0; i < mH.ts.length; i++) rMap.set(mH.ts[i], { m: mH.val[i] });
+    for (let i = 0; i < bH.ts.length;  i++) {
+      const e = rMap.get(bH.ts[i]) || {};
+      e.b = bH.val[i];
+      rMap.set(bH.ts[i], e);
+    }
+    const isRestricted = (ts, y) => {
+      if (!(y > 200)) return false;
+      const e = rMap.get(ts);
+      return e && Math.abs(e.m ?? 999) < 200 && Math.abs(e.b ?? 999) < 200;
+    };
+    datasets[0].segment = {
+      borderColor:     ctx => isRestricted(ctx.p1.parsed.x, ctx.p1.parsed.y) ? '#60A5FA' : undefined,
+      backgroundColor: ctx => isRestricted(ctx.p1.parsed.x, ctx.p1.parsed.y) ? '#60A5FA22' : undefined,
+    };
+  }
+
   if (hasFc) {
     const fcPts  = _solcastData.map(d => ({ x: d.ts_ms, y: d.pv_w  }));
     const p90Pts = _solcastData.filter(d => d.p90_w != null).map(d => ({ x: d.ts_ms, y: d.p90_w }));
