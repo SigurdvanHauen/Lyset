@@ -45,7 +45,7 @@ MIN_PV_W              = 300     # below this, don't bother writing a PV limit
 CHEAP_IMPORT_DKK      = 0.50    # legacy constant — kept for _simulate_soc in server.py
 GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresis low)
 GRID_CHARGE_SOC_MAX   = 80.0    # stop grid charging above this (hysteresis high)
-GRID_CHARGE_W         = 2000    # W — grid charge rate
+GRID_CHARGE_W         = 2500    # W — grid charge rate
 FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
 MAX_FORCE_CHARGE_W    = 5000    # W — battery charge rate (inverter clamps to rated max)
 
@@ -212,16 +212,19 @@ class AutoController:
             return _Cmd(mode='export_limited', detail=detail)
 
         # ── 2. Grid charge: cheap now vs expensive later ──────────────────────
+        # Uses forced-charge mode (47086=1, 47100=1) rather than mode-4 + grid-charge-enable
+        # (47087=1) because mode 4 still runs self-consumption logic that can discharge the
+        # battery for house loads, counteracting the grid charge at night.
         charge_window = _window(_CHARGE_HORIZON_H)
         if charge_window and batt_soc < gc_threshold:
             future_max_import = max(p['import'] for p in charge_window)
             if import_dkk < future_max_import - _CHARGE_MARGIN_DKK:
                 self._grid_charging = True
                 worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
-                worker.write_u16(47087, 1, 'AutoCtrl: grid charge ON')
-                worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid {_GRID_CHARGE_W} W')
-                worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
-                worker.write_u16(47100, 0, 'AutoCtrl: clear forced mode')
+                worker.write_u16(47087, 0, 'AutoCtrl: grid charge feature OFF')
+                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
+                worker.write_u32(47098, _GRID_CHARGE_W, f'AutoCtrl: charge {_GRID_CHARGE_W} W')
+                worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
                 detail = (f'Grid charging {_GRID_CHARGE_W} W '
                           f'(import {import_dkk:.3f} DKK, future max {future_max_import:.3f} DKK, '
                           f'SoC {batt_soc:.0f}%)')
