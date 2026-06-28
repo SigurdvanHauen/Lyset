@@ -3,21 +3,18 @@ AutoController — periodic optimizer for solar/battery control.
 
 Decision loop (every 60 s while enabled), in priority order:
 
-1. CHEAP IMPORT (registers 47086, 47087, 47079, 47100)
-   • import_price < 0.50 DKK/kWh AND batt_soc < 80 %
-     → mode=max-self-consumption (47086=4), grid charge ON (47087=1, 47079=2000 W)
-     → clear forced mode (47100=0)
+1. NEGATIVE EXPORT PRICE (export_dkk < −0.01 DKK/kWh)
+   a) Limit PV inverter output to household consumption (40525=2, 40527=house_load W)
+      — only written when solar is actually producing (pv_w > 300 W)
+   b) Battery — prevent discharge to grid:
+      SoC < 95 %: force-charge at max rate (47086=1, 47098=5000 W, 47100=1)
+      SoC ≥ 95 %: force-idle, neither charge nor discharge (47086=1, 47100=0)
 
-2. NEGATIVE EXPORT + BATTERY HAS ROOM (registers 47086, 47098, 47100)
-   • export_price < −0.01 DKK/kWh AND pv_power > 300 W AND batt_soc < 95 %
-     → force-charge battery at max rate (47086=1, 47098=5000 W, 47100=1)
-       to absorb excess solar instead of exporting at negative prices
+2. CHEAP IMPORT (import_dkk < 0.50 DKK/kWh AND batt_soc < 80 %)
+   Remove PV limit (40525=0), grid-charge battery (47087=1, 47079=2000 W, 47086=4, 47100=0)
 
-3. DEFAULT — max self-consumption, clear stale forced commands
-   • mode=4 (47086=4), stop forced mode (47100=0), grid charge OFF (47087=0)
-
-Register 40525 (active power curtailment) is written as best-effort in all cases
-where export is negative — some firmware versions silently ignore it.
+3. DEFAULT — max self-consumption
+   Remove PV limit (40525=0), mode=4 (47086=4), clear forced commands (47100=0)
 
 On disable → restore: 40525=0, 47100=0, 47087=0, 47086=4.
 """
@@ -30,15 +27,15 @@ from typing import Callable, Optional
 log = logging.getLogger(__name__)
 
 # ── Thresholds ─────────────────────────────────────────────────────────────────
-_NEGATIVE_EXPORT_DKK   = -0.01   # export price below → try to limit/absorb
-_MIN_PV_W              = 300     # ignore when solar output is negligible
-_CHEAP_IMPORT_DKK      = 0.50    # import price below → allow grid charging
-_GRID_CHARGE_SOC_MAX   = 80.0    # don't grid-charge above this SoC
-_GRID_CHARGE_W         = 2000    # W — grid charge rate
-_FORCE_CHARGE_SOC_MAX  = 95.0    # don't force-charge above this SoC
-_MAX_FORCE_CHARGE_W    = 5000    # W — max battery charge rate (inverter clamps internally)
-_LOAD_HEADROOM_W       = 300     # W — margin above house_load when writing PV curtail limit
-_EVAL_INTERVAL_S       = 60      # how often the loop re-evaluates
+_NEGATIVE_EXPORT_DKK  = -0.01   # export below → limit PV and stop battery discharge
+_MIN_PV_W             = 300     # below this, don't bother writing a PV limit
+_CHEAP_IMPORT_DKK     = 0.50    # import below → allow grid charging
+_GRID_CHARGE_SOC_START = 75.0   # only begin grid charging below this (hysteresis low)
+_GRID_CHARGE_SOC_MAX  = 80.0    # stop grid charging above this (hysteresis high)
+_GRID_CHARGE_W        = 2000    # W — grid charge rate
+_FORCE_CHARGE_SOC_MAX = 95.0    # above this, force-idle instead of force-charge
+_MAX_FORCE_CHARGE_W   = 5000    # W — battery charge rate (inverter clamps to rated max)
+_EVAL_INTERVAL_S      = 60      # how often the loop re-evaluates
 
 
 @dataclass
@@ -58,6 +55,7 @@ class AutoController:
         self.last_action:     str             = '—'
         self.last_action_ts:  Optional[float] = None
         self._on_command:     Optional[Callable[[str, str], None]] = None
+        self._grid_charging:  bool            = False  # hysteresis state
 
     def set_command_callback(self, cb: Callable[[str, str], None]):
         self._on_command = cb
@@ -74,6 +72,7 @@ class AutoController:
 
     def disable(self, worker):
         self.enabled = False
+        self._grid_charging = False
         log.info('AutoCtrl: disabled — restoring defaults')
         if worker and worker.is_alive():
             self._restore_defaults(worker)
@@ -129,17 +128,41 @@ class AutoController:
         house_load = data.get('house_load') or 0
         batt_soc   = data.get('batt_soc')   or 50.0
 
-        # Best-effort PV curtailment (some firmware ignores 40525).
-        # Battery force-charge (priority 2 below) acts as the real fallback.
-        if export_dkk < _NEGATIVE_EXPORT_DKK and pv_w > _MIN_PV_W:
-            limit_w = max(int(house_load) + _LOAD_HEADROOM_W, 500)
-            worker.write_u16(40525, 2, 'AutoCtrl: W-limit mode')
-            worker.write_i32(40527, limit_w, f'AutoCtrl: PV limit {limit_w} W')
-        else:
-            worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
+        # Hysteresis: continue grid charging up to SOC_MAX, only start below SOC_START
+        gc_threshold = _GRID_CHARGE_SOC_MAX if self._grid_charging else _GRID_CHARGE_SOC_START
 
-        # ── Priority 1: Cheap import → charge from grid ───────────────────────
-        if import_dkk < _CHEAP_IMPORT_DKK and batt_soc < _GRID_CHARGE_SOC_MAX:
+        # ── 1. Negative export price ──────────────────────────────────────────
+        if export_dkk < _NEGATIVE_EXPORT_DKK:
+            self._grid_charging = False
+            # Limit inverter output to household consumption
+            if pv_w > _MIN_PV_W:
+                limit_w = max(int(house_load), 100)
+                worker.write_u16(40525, 2, 'AutoCtrl: W-limit mode')
+                worker.write_i32(40527, limit_w, f'AutoCtrl: PV limit {limit_w} W')
+                pv_detail = f'PV limited to {limit_w} W'
+            else:
+                worker.write_u16(40525, 0, 'AutoCtrl: no limit (low solar)')
+                pv_detail = 'Low solar'
+
+            # Stop battery from discharging to grid
+            worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
+            if batt_soc < _FORCE_CHARGE_SOC_MAX:
+                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
+                worker.write_u32(47098, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge {_MAX_FORCE_CHARGE_W} W')
+                worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
+                batt_detail = f', battery force-charging (SoC {batt_soc:.0f}%)'
+            else:
+                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
+                worker.write_u16(47100, 0, 'AutoCtrl: force IDLE')
+                batt_detail = f', battery idle — full (SoC {batt_soc:.0f}%)'
+
+            detail = f'{pv_detail} (export {export_dkk:.3f} DKK){batt_detail}'
+            return _Cmd(mode='export_limited', detail=detail)
+
+        # ── 2. Cheap import: charge battery from grid ─────────────────────────
+        if import_dkk < _CHEAP_IMPORT_DKK and batt_soc < gc_threshold:
+            self._grid_charging = True
+            worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
             worker.write_u16(47087, 1, 'AutoCtrl: grid charge ON')
             worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid {_GRID_CHARGE_W} W')
             worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
@@ -148,31 +171,10 @@ class AutoController:
                       f'(import {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
             return _Cmd(mode='grid_charge', detail=detail)
 
-        # ── Priority 2: Negative export + room in battery → force-charge ──────
-        # Absorbs excess solar that would otherwise be exported at a negative price.
-        # Also stops any stale forced-discharge command from a third-party system.
-        if export_dkk < _NEGATIVE_EXPORT_DKK and pv_w > _MIN_PV_W and batt_soc < _FORCE_CHARGE_SOC_MAX:
-            worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-            worker.write_u16(47086, 1, 'AutoCtrl: mode=forced charge/discharge')
-            worker.write_u32(47098, _MAX_FORCE_CHARGE_W, f'AutoCtrl: force {_MAX_FORCE_CHARGE_W} W')
-            worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
-            detail = (f'Force-charging battery at {_MAX_FORCE_CHARGE_W} W to absorb excess solar '
-                      f'(export {export_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
-            return _Cmd(mode='export_limited', detail=detail)
-
+        # ── 3. Default: max self-consumption ──────────────────────────────────
+        self._grid_charging = False
+        worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
         worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-
-        if export_dkk < _NEGATIVE_EXPORT_DKK:
-            # ── Negative export, battery full → idle the battery ──────────────
-            # Force-idle stops any stale discharge command from a third-party
-            # system and prevents the battery from adding to the grid export.
-            worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
-            worker.write_u16(47100, 0, 'AutoCtrl: forced STOP — no discharge')
-            detail = (f'Battery idle (SoC {batt_soc:.0f}% ≥ {_FORCE_CHARGE_SOC_MAX:.0f}%), '
-                      f'solar exporting at loss (export {export_dkk:.3f} DKK) — no room to absorb')
-            return _Cmd(mode='export_limited', detail=detail)
-
-        # ── Default: max self-consumption, clear any stale forced command ──────
         worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
         worker.write_u16(47100, 0, 'AutoCtrl: stop forced mode')
         detail = (f'Max self-consumption '
