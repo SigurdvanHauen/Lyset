@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -916,22 +917,28 @@ def _soc_max_change(elapsed_s: float) -> float:
 
 
 def _clean_history_soc(history: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
-    """Apply the same time-weighted SoC outlier filter to historical DB rows."""
-    last_soc: float | None = None
-    last_ts: float = 0.0
-    result = []
-    for ts, d in history:
-        soc = d.get('batt_soc')
-        if soc is not None:
-            if last_soc is not None:
-                elapsed_s = max(ts - last_ts, 5.0)
-                if abs(soc - last_soc) > _soc_max_change(elapsed_s):
-                    d = {**d, 'batt_soc': last_soc}
-                    soc = last_soc
-            last_soc = soc
-            last_ts = ts
-        result.append((ts, d))
-    return result
+    """5-point sliding median on batt_soc — removes spikes up to 2 consecutive polls."""
+    HALF = 2
+    # Collect (list-index, soc) for rows that have batt_soc
+    indexed = [(i, d['batt_soc']) for i, (_, d) in enumerate(history)
+               if d.get('batt_soc') is not None]
+    if len(indexed) < 3:
+        return history
+    socs = [s for _, s in indexed]
+    n    = len(socs)
+    replacements: dict[int, float] = {}
+    for j, (orig_i, original) in enumerate(indexed):
+        lo  = max(0, j - HALF)
+        hi  = min(n, j + HALF + 1)
+        med = round(statistics.median(socs[lo:hi]), 1)
+        if abs(med - original) >= 0.5:
+            replacements[orig_i] = med
+    if not replacements:
+        return history
+    return [
+        (ts, {**d, 'batt_soc': replacements[i]} if i in replacements else d)
+        for i, (ts, d) in enumerate(history)
+    ]
 
 
 @app.websocket('/ws')

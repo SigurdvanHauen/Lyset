@@ -8,6 +8,7 @@ Thread-safe: a single shared connection protected by a Lock.
 
 import json
 import sqlite3
+import statistics
 import threading
 import time
 from pathlib import Path
@@ -278,12 +279,15 @@ def purge_power_outliers(threshold_w: float = 10_000) -> int:
 
 
 def clean_soc_history() -> int:
-    """Rewrite batt_soc outliers in-place across all stored polls.
+    """Rewrite batt_soc spikes in-place using a 5-point sliding median.
 
-    Applies the same time-weighted rate filter used in _on_data: a reading is
-    an outlier if it changes by more than max(2%, elapsed_s/40) since the last
-    accepted value.  Returns the number of rows updated.
+    For each row, if the stored SoC differs from the median of the 5 surrounding
+    values by more than 0.5 %, overwrite it with that median.  Unlike the forward
+    rate filter, this handles multi-poll drift because each value is judged against
+    its neighbours rather than against the last accepted value.
+    Returns the number of rows updated.
     """
+    HALF = 2  # 5-point window: 2 before + self + 2 after
     with _lock:
         con = _get_con()
         rows = con.execute(
@@ -292,27 +296,24 @@ def clean_soc_history() -> int:
             'ORDER BY ts'
         ).fetchall()
 
-        if not rows:
+        if len(rows) < 3:
             return 0
 
-        last_soc: float = rows[0][1]
-        last_ts: float = rows[0][0]
-        updates: list[tuple[float, float]] = []  # (corrected_soc, ts)
+        socs = [r[1] for r in rows]
+        n    = len(socs)
+        updates: list[tuple[float, float]] = []
 
-        for ts, soc in rows[1:]:
-            elapsed_s = max(ts - last_ts, 5.0)
-            max_change = max(2.0, elapsed_s / 40.0)
-            if abs(soc - last_soc) > max_change:
-                updates.append((last_soc, ts))
-                # last_soc stays at the last accepted value
-            else:
-                last_soc = soc
-            last_ts = ts  # advance even when the row is filtered
+        for i, (ts, original) in enumerate(rows):
+            lo  = max(0, i - HALF)
+            hi  = min(n, i + HALF + 1)
+            med = round(statistics.median(socs[lo:hi]), 1)
+            if abs(med - original) >= 0.5:
+                updates.append((med, ts))
 
         for corrected, ts in updates:
             con.execute(
                 'UPDATE polls SET data = json_set(data, "$.batt_soc", ?) WHERE ts = ?',
-                (round(corrected, 1), ts),
+                (corrected, ts),
             )
         if updates:
             con.commit()
