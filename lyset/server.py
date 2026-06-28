@@ -483,6 +483,17 @@ async def lifespan(app: FastAPI):
     if cached_fc:
         _last_solar_forecast = cached_fc
         log.info('Solcast: restored %d cached forecast periods from DB', len(cached_fc))
+        # Persist today's Solcast total so /api/daily-solar has it before the next fetch
+        now_local   = datetime.now(_TZ_LOCAL)
+        day_start   = int(now_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        day_end     = day_start + 86_400_000
+        fc_total    = sum(
+            s['pv_w'] * 0.5 / 1000
+            for s in cached_fc
+            if day_start < s['ts_ms'] <= day_end and s.get('pv_w') is not None
+        )
+        if fc_total > 0:
+            store.upsert_daily_solar(now_local.strftime('%Y-%m-%d'), forecast_kwh=round(fc_total, 2))
 
     # Load or create consumption model
     global _consumption_model, _last_consumption_forecast
@@ -670,6 +681,26 @@ async def api_solar_forecast_refresh():
 async def api_daily_solar():
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, store.load_daily_solar, 30)
+
+    # If today's DB row is missing a forecast (e.g. server restarted before next Solcast
+    # fetch), compute it on-the-fly from the in-memory forecast cache.
+    if _last_solar_forecast:
+        today_local = datetime.now(_TZ_LOCAL)
+        today_str   = today_local.strftime('%Y-%m-%d')
+        day_start   = int(today_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        day_end     = day_start + 86_400_000
+        fc_live = round(sum(
+            s['pv_w'] * 0.5 / 1000
+            for s in _last_solar_forecast
+            if day_start < s['ts_ms'] <= day_end and s.get('pv_w') is not None
+        ), 2) or None
+        if fc_live is not None:
+            for d in data:
+                if d['date'] == today_str:
+                    if d['forecast_kwh'] is None:
+                        d['forecast_kwh'] = fc_live
+                    break
+
     return {'days': data}
 
 
