@@ -10,11 +10,21 @@ Decision loop (every 60 s while enabled), in priority order:
       SoC < 95 %: force-charge at max rate (47086=1, 47098=5000 W, 47100=1)
       SoC ≥ 95 %: force-idle, neither charge nor discharge (47086=1, 47100=0)
 
-2. CHEAP IMPORT (import_dkk < 0.50 DKK/kWh AND batt_soc < 80 %)
-   Remove PV limit (40525=0), grid-charge battery (47087=1, 47079=2000 W, 47086=4, 47100=0)
+2. EXPORT ARBITRAGE (export_dkk > cheapest future import + ARBIT_MARGIN AND SoC > MIN_SOC_ARBIT)
+   Force-discharge battery to grid (47086=1, 47100=2); battery energy is sold now
+   and replaced later when import is cheapest within ARBIT_HORIZON_H hours.
 
-3. DEFAULT — max self-consumption
-   Remove PV limit (40525=0), mode=4 (47086=4), clear forced commands (47100=0)
+3. GRID CHARGE (import_dkk < future_max_import − CHARGE_MARGIN AND SoC < threshold)
+   Remove PV limit (40525=0), grid-charge battery (47087=1, 47079=2000 W, 47086=4, 47100=0).
+   Dynamic threshold: justifies charging whenever today/tomorrow has a significantly
+   more expensive slot within CHARGE_HORIZON_H hours.
+
+4. HOLD BATTERY FOR PEAK (upcoming import > import_now + HOLD_DELTA AND import_now < MAX_HOLD_IMPORT)
+   Force-idle battery (47086=1, 47100=0) so the current (cheap) load is covered
+   by grid import rather than draining battery needed for the upcoming expensive period.
+
+5. DEFAULT — max self-consumption
+   Remove PV limit (40525=0), mode=4 (47086=4), clear forced commands (47100=0).
 
 On disable → restore: 40525=0, 47100=0, 47087=0, 47086=4.
 """
@@ -29,28 +39,49 @@ log = logging.getLogger(__name__)
 # ── Thresholds (also imported by server.py for the SoC simulation) ────────────
 NEGATIVE_EXPORT_DKK   = -0.01   # export below → limit PV and stop battery discharge
 MIN_PV_W              = 300     # below this, don't bother writing a PV limit
-CHEAP_IMPORT_DKK      = 0.50    # import below → allow grid charging
+CHEAP_IMPORT_DKK      = 0.50    # legacy constant — kept for _simulate_soc in server.py
 GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresis low)
 GRID_CHARGE_SOC_MAX   = 80.0    # stop grid charging above this (hysteresis high)
 GRID_CHARGE_W         = 2000    # W — grid charge rate
 FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
 MAX_FORCE_CHARGE_W    = 5000    # W — battery charge rate (inverter clamps to rated max)
-_EVAL_INTERVAL_S      = 60      # how often the loop re-evaluates
 
-# Private aliases kept for internal use within this module
+# ── Look-ahead optimisation parameters ───────────────────────────────────────
+ARBIT_MARGIN_DKK    = 0.10   # export must exceed future cheapest import by at least this
+MIN_SOC_ARBIT       = 20.0   # minimum SoC before allowing arbitrage discharge
+ARBIT_HORIZON_H     = 12     # hours ahead to find cheapest import for arbitrage
+CHARGE_MARGIN_DKK   = 0.15   # import must be at least this cheaper than future max to justify charging
+CHARGE_HORIZON_H    = 24     # hours ahead to look for price peaks that justify grid charging
+HOLD_DELTA_DKK      = 0.80   # hold battery if a future slot is at least this much more expensive
+HOLD_HORIZON_H      = 6      # hours ahead to scan for an expensive upcoming slot
+MAX_HOLD_IMPORT_DKK = 1.50   # only hold battery when current import is below this
+MIN_SOC_HOLD        = 20.0   # minimum SoC required to bother holding
+
+_EVAL_INTERVAL_S = 60
+
+# Private aliases for internal use
 _NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
 _MIN_PV_W             = MIN_PV_W
-_CHEAP_IMPORT_DKK     = CHEAP_IMPORT_DKK
 _GRID_CHARGE_SOC_START = GRID_CHARGE_SOC_START
 _GRID_CHARGE_SOC_MAX  = GRID_CHARGE_SOC_MAX
 _GRID_CHARGE_W        = GRID_CHARGE_W
 _FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
 _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
+_ARBIT_MARGIN_DKK     = ARBIT_MARGIN_DKK
+_MIN_SOC_ARBIT        = MIN_SOC_ARBIT
+_ARBIT_HORIZON_H      = ARBIT_HORIZON_H
+_CHARGE_MARGIN_DKK    = CHARGE_MARGIN_DKK
+_CHARGE_HORIZON_H     = CHARGE_HORIZON_H
+_HOLD_DELTA_DKK       = HOLD_DELTA_DKK
+_HOLD_HORIZON_H       = HOLD_HORIZON_H
+_MAX_HOLD_IMPORT_DKK  = MAX_HOLD_IMPORT_DKK
+_MIN_SOC_HOLD         = MIN_SOC_HOLD
 
 
 @dataclass
 class _Cmd:
-    mode:   str   # 'export_unlimited' | 'export_limited' | 'grid_charge'
+    mode:   str   # 'export_unlimited' | 'export_limited' | 'grid_charge' |
+                  # 'arbit_discharge'  | 'hold_battery'
     detail: str   # human-readable summary for the log / UI
 
 
@@ -138,13 +169,22 @@ class AutoController:
         house_load = data.get('house_load') or 0
         batt_soc   = data.get('batt_soc')   or 50.0
 
+        # Future price slots sorted ascending
+        future_prices = sorted(
+            (p for p in prices if p['ts'] > now_ms),
+            key=lambda p: p['ts'],
+        )
+
+        def _window(hours: int) -> list:
+            cutoff = now_ms + hours * 3_600_000
+            return [p for p in future_prices if p['ts'] <= cutoff]
+
         # Hysteresis: continue grid charging up to SOC_MAX, only start below SOC_START
         gc_threshold = _GRID_CHARGE_SOC_MAX if self._grid_charging else _GRID_CHARGE_SOC_START
 
         # ── 1. Negative export price ──────────────────────────────────────────
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
-            # Limit inverter output to household consumption
             if pv_w > _MIN_PV_W:
                 limit_w = max(int(house_load), 100)
                 worker.write_u16(40525, 2, 'AutoCtrl: W-limit mode')
@@ -154,7 +194,6 @@ class AutoController:
                 worker.write_u16(40525, 0, 'AutoCtrl: no limit (low solar)')
                 pv_detail = 'Low solar'
 
-            # Stop battery from discharging to grid
             worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
             if batt_soc < _FORCE_CHARGE_SOC_MAX:
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
@@ -169,19 +208,55 @@ class AutoController:
             detail = f'{pv_detail} (export {export_dkk:.3f} DKK){batt_detail}'
             return _Cmd(mode='export_limited', detail=detail)
 
-        # ── 2. Cheap import: charge battery from grid ─────────────────────────
-        if import_dkk < _CHEAP_IMPORT_DKK and batt_soc < gc_threshold:
-            self._grid_charging = True
-            worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
-            worker.write_u16(47087, 1, 'AutoCtrl: grid charge ON')
-            worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid {_GRID_CHARGE_W} W')
-            worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
-            worker.write_u16(47100, 0, 'AutoCtrl: clear forced mode')
-            detail = (f'Grid charging {_GRID_CHARGE_W} W '
-                      f'(import {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
-            return _Cmd(mode='grid_charge', detail=detail)
+        # ── 2. Export arbitrage ───────────────────────────────────────────────
+        # Sell battery energy now; buy it back later when import is cheapest.
+        arbit_window = _window(_ARBIT_HORIZON_H)
+        if arbit_window and batt_soc > _MIN_SOC_ARBIT:
+            future_min_import = min(p['import'] for p in arbit_window)
+            if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
+                self._grid_charging = False
+                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
+                worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
+                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
+                worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
+                detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
+                          f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
+                return _Cmd(mode='arbit_discharge', detail=detail)
 
-        # ── 3. Default: max self-consumption ──────────────────────────────────
+        # ── 3. Grid charge: cheap now vs expensive later ──────────────────────
+        charge_window = _window(_CHARGE_HORIZON_H)
+        if charge_window and batt_soc < gc_threshold:
+            future_max_import = max(p['import'] for p in charge_window)
+            if import_dkk < future_max_import - _CHARGE_MARGIN_DKK:
+                self._grid_charging = True
+                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
+                worker.write_u16(47087, 1, 'AutoCtrl: grid charge ON')
+                worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid {_GRID_CHARGE_W} W')
+                worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
+                worker.write_u16(47100, 0, 'AutoCtrl: clear forced mode')
+                detail = (f'Grid charging {_GRID_CHARGE_W} W '
+                          f'(import {import_dkk:.3f} DKK, future max {future_max_import:.3f} DKK, '
+                          f'SoC {batt_soc:.0f}%)')
+                return _Cmd(mode='grid_charge', detail=detail)
+
+        # ── 4. Hold battery for upcoming price peak ───────────────────────────
+        # Force-idle to preserve SoC; load is covered by (currently cheaper) grid.
+        hold_window = _window(_HOLD_HORIZON_H)
+        if (hold_window
+                and import_dkk < _MAX_HOLD_IMPORT_DKK
+                and batt_soc > _MIN_SOC_HOLD):
+            max_upcoming = max(p['import'] for p in hold_window)
+            if max_upcoming > import_dkk + _HOLD_DELTA_DKK:
+                self._grid_charging = False
+                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
+                worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
+                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
+                worker.write_u16(47100, 0, 'AutoCtrl: force IDLE')
+                detail = (f'Holding battery: peak {max_upcoming:.3f} DKK in ≤{_HOLD_HORIZON_H}h '
+                          f'(now {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
+                return _Cmd(mode='hold_battery', detail=detail)
+
+        # ── 5. Default: max self-consumption ──────────────────────────────────
         self._grid_charging = False
         worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
         worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
