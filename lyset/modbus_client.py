@@ -250,6 +250,16 @@ class ModbusWorker(threading.Thread):
             if 'meter_active_power' in data:
                 data['meter_active_power'] = -data['meter_active_power']
 
+            # Reject I32 power readings that exceed any realistic residential system.
+            # Modbus word-order corruption can produce values in the millions of watts
+            # for a single poll; guard here so the bad read never reaches the DB.
+            _POWER_LIMIT_W = 20_000
+            for _k in ('active_power', 'meter_active_power', 'batt_power'):
+                _v = data.get(_k)
+                if _v is not None and abs(_v) > _POWER_LIMIT_W:
+                    log.warning('%s outlier %.0f W discarded (Modbus I32 glitch)', _k, _v)
+                    del data[_k]
+
             if 'active_power' in data and 'meter_active_power' in data:
                 batt = data.get('batt_power', 0.0)
                 # house_load = solar_out + grid_import - battery_charge

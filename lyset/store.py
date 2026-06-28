@@ -233,6 +233,27 @@ def load_daily_solar(days: int = 30) -> list[dict]:
     return [{'date': d, 'yield_kwh': y, 'forecast_kwh': f} for d, y, f in reversed(rows)]
 
 
+def purge_power_outliers(threshold_w: float = 20_000) -> int:
+    """Delete poll rows where any power field exceeds threshold_w.
+
+    I32 Modbus reads occasionally return garbage values in the millions of watts
+    (register word-order corruption).  A 20 kW ceiling covers any residential
+    inverter while cleanly rejecting those glitches.  Returns the number of rows
+    deleted.
+    """
+    with _lock:
+        con = _get_con()
+        cur = con.execute(
+            'DELETE FROM polls WHERE '
+            '  ABS(COALESCE(json_extract(data, "$.active_power"),       0)) > ? OR '
+            '  ABS(COALESCE(json_extract(data, "$.meter_active_power"), 0)) > ? OR '
+            '  ABS(COALESCE(json_extract(data, "$.batt_power"),         0)) > ?',
+            (threshold_w, threshold_w, threshold_w),
+        )
+        con.commit()
+        return cur.rowcount
+
+
 def clear_history():
     """Delete all inverter poll records."""
     with _lock:

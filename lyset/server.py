@@ -460,6 +460,9 @@ async def lifespan(app: FastAPI):
         logger.addHandler(handler)
 
     store.init()
+    purged = store.purge_power_outliers()
+    if purged:
+        log.warning('Startup: purged %d poll row(s) with outlier power values', purged)
 
     # Auto-connect inverter worker
     defaults = ConnectRequest()
