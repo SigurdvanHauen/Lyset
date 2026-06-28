@@ -362,11 +362,11 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
     <div class="sec">Energy Today</div>
     <div class="cards">
-      <div class="card pv">
+      <div class="card pv clickable" onclick="openDailyYieldModal()">
         <div class="card-top"><div class="card-lbl">Produced</div></div>
         <div class="card-val" id="d-daily-yield">&#8212;<span class="unit">kWh</span></div>
       </div>
-      <div class="card pv">
+      <div class="card pv clickable" onclick="openDailyYieldModal()">
         <div class="card-top"><div class="card-lbl">Expected (Solcast)</div></div>
         <div class="card-val" id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></div>
       </div>
@@ -930,8 +930,9 @@ function openChart(key, label, unit, color) {
     label + (unit ? ' (' + unit + ')' : '')
     + (hasFc                         ? ' + Solcast forecast' : '')
     + (hasCons || hasSocFc || hasBattFc || hasGridFc ? ' + predicted' : '');
-  document.getElementById('modal-fc-btn').style.display   = (key === 'active_power') ? '' : 'none';
-  document.getElementById('modal-bands-btn').style.display = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-fc-btn').style.display     = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-bands-btn').style.display   = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-smooth-btn').style.display  = '';
   document.getElementById('modal-overlay').classList.add('active');
 
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
@@ -1389,6 +1390,98 @@ function updateSolarFcKwh() {
     el.textContent = kwh.toFixed(2);
     if (unit) el.appendChild(unit);
   }
+}
+
+async function openDailyYieldModal() {
+  document.getElementById('modal-title').textContent = 'Solar Production — Last 30 Days';
+  document.getElementById('modal-fc-btn').style.display    = 'none';
+  document.getElementById('modal-bands-btn').style.display = 'none';
+  document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-overlay').classList.add('active');
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = 'daily_solar';
+
+  let days = [];
+  try {
+    const resp = await fetch('/api/daily-solar');
+    days = (await resp.json()).days || [];
+  } catch (e) { console.error('daily-solar fetch failed', e); return; }
+
+  const today     = new Date().toISOString().slice(0, 10);
+  const labels    = days.map(d => {
+    const dt = new Date(d.date + 'T12:00:00');
+    return dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  });
+  const forecasts = days.map(d => d.forecast_kwh);
+  const yields    = days.map(d => d.yield_kwh);
+
+  const tooltip = {
+    backgroundColor: '#1C2032', titleColor: '#8892AA',
+    bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
+    callbacks: {
+      title: ctx => {
+        const d = days[ctx[0].dataIndex];
+        return d.date + (d.date === today ? ' (today, in progress)' : '');
+      },
+      label: ctx => {
+        const v = ctx.parsed.y;
+        return `${ctx.dataset.label}: ${v != null ? v.toFixed(2) + ' kWh' : '—'}`;
+      },
+    },
+  };
+
+  _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Forecast (Solcast)',
+          data: forecasts,
+          backgroundColor: '#F59E0B33',
+          borderColor: '#F59E0B',
+          borderWidth: 1,
+          borderRadius: 3,
+          order: 1,
+        },
+        {
+          label: 'Produced',
+          data: yields,
+          backgroundColor: days.map(d => d.date === today ? '#F59E0B88' : '#F59E0B'),
+          borderColor: '#F59E0BAA',
+          borderWidth: 1,
+          borderRadius: 3,
+          order: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: '#8892AA', font: { size: 10 }, boxWidth: 12 } },
+        tooltip,
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#8892AA', font: { size: 9 }, maxRotation: 45 },
+          grid:  { color: '#2D3555' },
+        },
+        y: {
+          title: { display: true, text: 'kWh', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(1) },
+          grid:  { color: '#2D3555' },
+          min:   0,
+        },
+      },
+    },
+  });
 }
 
 function onSolarForecast(data) {

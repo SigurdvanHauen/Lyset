@@ -73,6 +73,7 @@ _slot_key: int = -1               # int(ts_utc / 900)
 _backfill_done: bool = False      # run historical prediction backfill once per process
 _last_batt_soc: float | None = None  # used to detect single-poll SoC outliers
 _last_batt_soc_ts: float = 0.0      # unix timestamp of last accepted SoC reading
+_pv_yield_logged: float | None = None  # last daily_yield value written to daily_solar table
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ def _push_power_forecast(fc: list[dict]):
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
-    global _last_data, _slot_samples, _slot_key, _last_batt_soc, _last_batt_soc_ts
+    global _last_data, _slot_samples, _slot_key, _last_batt_soc, _last_batt_soc_ts, _pv_yield_logged
     ts = data.get('_timestamp', time.time())
     # Drop SoC glitches — the inverter occasionally reports 0% for a single poll.
     # At C/2 rate the battery moves <0.1%/poll; allow 3% floor + 3% per minute of elapsed
@@ -312,6 +313,13 @@ def _on_data(data: dict):
     _last_data = clean
     _push({'type': 'data', 'payload': clean})
     store.save(ts, clean)
+
+    # Log daily solar yield whenever the inverter counter changes value
+    yield_val = clean.get('daily_yield')
+    if yield_val is not None and yield_val != _pv_yield_logged:
+        _pv_yield_logged = yield_val
+        today_str = datetime.fromtimestamp(ts, tz=_TZ_LOCAL).strftime('%Y-%m-%d')
+        store.upsert_daily_solar(today_str, yield_kwh=yield_val)
 
     # Accumulate house load for the current 15-min slot
     meter_w = clean.get('house_load')
@@ -395,6 +403,20 @@ def _on_solar_forecast(records: list[dict]):
     full = store.load_solar_forecast(now_ms - 86_400_000, now_ms + 2 * 86_400_000)
     _last_solar_forecast = full or records
     _push({'type': 'solar_forecast', 'payload': _last_solar_forecast})
+
+    # Log today's full-day Solcast total to the daily_solar table
+    now_local = datetime.now(_TZ_LOCAL)
+    today_str = now_local.strftime('%Y-%m-%d')
+    today_start_ms = int(now_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    today_end_ms   = today_start_ms + 86_400_000
+    fc_total = sum(
+        s['pv_w'] * 0.5 / 1000
+        for s in _last_solar_forecast
+        if today_start_ms < s['ts_ms'] <= today_end_ms
+        if s.get('pv_w') is not None
+    )
+    if fc_total > 0:
+        store.upsert_daily_solar(today_str, forecast_kwh=round(fc_total, 2))
 
 
 def _on_solcast_status(msg: str, ok: bool):
@@ -642,6 +664,13 @@ async def api_solar_forecast_refresh():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _solcast_worker._fetch_once)
     return {'ok': True}
+
+
+@app.get('/api/daily-solar')
+async def api_daily_solar():
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, store.load_daily_solar, 30)
+    return {'days': data}
 
 
 @app.get('/api/power-forecast')

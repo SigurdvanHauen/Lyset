@@ -49,6 +49,12 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS power_forecast '
             '(ts_ms INTEGER PRIMARY KEY, soc REAL, batt_w REAL, grid_w REAL)'
         )
+        _con.execute(
+            # One row per local calendar day. yield_kwh = inverter daily counter (register 32114);
+            # forecast_kwh = Solcast full-day sum at the time of last update.
+            'CREATE TABLE IF NOT EXISTS daily_solar '
+            '(date TEXT PRIMARY KEY, yield_kwh REAL, forecast_kwh REAL)'
+        )
         _con.commit()
     return _con
 
@@ -200,6 +206,31 @@ def load_power_forecast(from_ms: int, to_ms: int) -> list[dict]:
         ).fetchall()
     return [{'ts_ms': ts, 'soc': soc, 'batt_w': bw, 'grid_w': gw}
             for ts, soc, bw, gw in rows]
+
+
+def upsert_daily_solar(date: str, yield_kwh: float | None = None, forecast_kwh: float | None = None):
+    """Insert or update a daily solar record.  Only non-None arguments overwrite existing values."""
+    with _lock:
+        con = _get_con()
+        con.execute(
+            'INSERT INTO daily_solar (date, yield_kwh, forecast_kwh) VALUES (?, ?, ?)'
+            ' ON CONFLICT(date) DO UPDATE SET'
+            '  yield_kwh    = COALESCE(excluded.yield_kwh,    yield_kwh),'
+            '  forecast_kwh = COALESCE(excluded.forecast_kwh, forecast_kwh)',
+            (date, yield_kwh, forecast_kwh),
+        )
+        con.commit()
+
+
+def load_daily_solar(days: int = 30) -> list[dict]:
+    """Return the most recent `days` daily solar records, oldest first."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT date, yield_kwh, forecast_kwh FROM daily_solar'
+            ' ORDER BY date DESC LIMIT ?',
+            (days,),
+        ).fetchall()
+    return [{'date': d, 'yield_kwh': y, 'forecast_kwh': f} for d, y, f in reversed(rows)]
 
 
 def clear_history():
