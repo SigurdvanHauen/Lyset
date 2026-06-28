@@ -1598,6 +1598,7 @@ function renderPriceChart() {
   if (_priceChart) {
     _priceChart.data = chartData;
     _priceChart.options.scales.y.title.text = yLabel;
+    _priceChart.options.scales.y.min = undefined;
     _priceChart.options.plugins.tooltip = sharedTooltip;
     _priceChart.update('none');
     return;
@@ -1633,7 +1634,6 @@ function renderPriceChart() {
           title: { display: true, text: yLabel, color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(2) },
           grid:  { color: '#2D3555' },
-          min:   0,
         },
       },
     },
@@ -1724,6 +1724,7 @@ function renderPriceLineChart() {
 
   if (_priceLineChart) {
     _priceLineChart.data = chartData;
+    _priceLineChart.options.scales.y.min = undefined;
     _priceLineChart.update('none');
     return;
   }
@@ -1796,7 +1797,6 @@ function renderPriceLineChart() {
           title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(2) },
           grid:  { color: '#2D3555' },
-          min:   0,
         },
       },
     },
