@@ -1555,7 +1555,7 @@ function openStateChart() {
     data: {
       datasets: [{
         data: pts,
-        borderWidth: 2, pointRadius: 0, fill: true, stepped: 'before', tension: 0,
+        borderWidth: 2, pointRadius: 0, pointHoverRadius: 6, fill: true, stepped: 'before', tension: 0,
         segment: {
           borderColor:     ctx => COMPUTED_STATES[Math.round(ctx.p1.parsed.y)]?.color,
           backgroundColor: ctx => (COMPUTED_STATES[Math.round(ctx.p0.parsed.y)]?.color ?? '#888') + '22',
@@ -1564,6 +1564,7 @@ function openStateChart() {
     },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
         tooltip: {
