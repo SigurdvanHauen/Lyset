@@ -233,13 +233,12 @@ def load_daily_solar(days: int = 30) -> list[dict]:
     return [{'date': d, 'yield_kwh': y, 'forecast_kwh': f} for d, y, f in reversed(rows)]
 
 
-def purge_power_outliers(threshold_w: float = 20_000) -> int:
+def purge_power_outliers(threshold_w: float = 10_000) -> int:
     """Delete poll rows where any power field exceeds threshold_w.
 
     I32 Modbus reads occasionally return garbage values in the millions of watts
-    (register word-order corruption).  A 20 kW ceiling covers any residential
-    inverter while cleanly rejecting those glitches.  Returns the number of rows
-    deleted.
+    (register word-order corruption).  10 kW is well above the 6.9 kWp system
+    peak while cleanly rejecting those glitches.  Returns the number of rows deleted.
     """
     with _lock:
         con = _get_con()

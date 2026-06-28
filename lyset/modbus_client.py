@@ -253,7 +253,7 @@ class ModbusWorker(threading.Thread):
             # Reject I32 power readings that exceed any realistic residential system.
             # Modbus word-order corruption can produce values in the millions of watts
             # for a single poll; guard here so the bad read never reaches the DB.
-            _POWER_LIMIT_W = 20_000
+            _POWER_LIMIT_W = 10_000  # ~6.9 kWp system; 10 kW is well above any real output
             for _k in ('active_power', 'meter_active_power', 'batt_power'):
                 _v = data.get(_k)
                 if _v is not None and abs(_v) > _POWER_LIMIT_W:
