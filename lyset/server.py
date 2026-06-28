@@ -164,27 +164,34 @@ def _simulate_soc(
     Returns:   [{ts_ms, soc, batt_w, grid_w}, ...]
       batt_w: positive = charging, negative = discharging  (matches batt_power key)
       grid_w: positive = importing, negative = exporting   (matches meter_active_power key)
+
+    Iterates over a 30-min time grid (not solar_fc records) so that night periods
+    — which Solcast omits entirely because PV=0 — are still stepped through and the
+    battery correctly discharges overnight.
     """
     if not solar_fc or capacity_kwh <= 0:
         return []
 
+    SLOT_MS = 30 * 60 * 1000  # 30-min steps matching Solcast resolution
     cutoff_ms = start_ms if start_ms is not None else int(time.time() * 1000)
-    load_by_ts = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
+
+    # Index solar by period-end ts; night periods (omitted by Solcast) default to 0 W
+    solar_by_ts = {r['ts_ms']: r.get('pv_w') or 0.0 for r in solar_fc}
+    load_by_ts  = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
     max_power_kw = capacity_kwh * 0.5  # C/2 — LUNA2000 rated charge rate heuristic
+
+    end_ms        = max(r['ts_ms'] for r in solar_fc)
+    first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
 
     soc = start_soc
     result = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
-    for rec in sorted(solar_fc, key=lambda r: r['ts_ms']):
-        ts_ms = rec['ts_ms']
-        if ts_ms <= cutoff_ms:
-            continue
+    for ts_ms in range(first_slot_ms, int(end_ms) + 1, SLOT_MS):
+        pv_w = solar_by_ts.get(ts_ms, 0.0)
 
-        pv_w = rec.get('pv_w') or 0.0
-
-        # Map Solcast period [ts_ms-30min, ts_ms] to two 15-min consumption slots
-        slot1_ms = ts_ms - 30 * 60 * 1000
-        slot2_ms = ts_ms - 15 * 60 * 1000
+        # Map 30-min period [ts_ms-30min, ts_ms] to two 15-min consumption slots
+        slot1_ms = ts_ms - SLOT_MS
+        slot2_ms = ts_ms - SLOT_MS // 2
         load1 = load_by_ts.get(slot1_ms)
         load2 = load_by_ts.get(slot2_ms)
 
@@ -195,7 +202,7 @@ def _simulate_soc(
         elif load2 is not None:
             load_w = load2
         else:
-            continue  # no consumption data for this period
+            continue  # beyond load forecast window — stop stepping
 
         # net_kw > 0: surplus (solar > load); < 0: deficit (load > solar)
         net_kw = (pv_w - load_w) / 1000.0
@@ -380,7 +387,12 @@ def _on_data(data: dict):
             _backfill_power_forecast(cap_val)
         if _last_sim_soc is None or abs(soc_val - _last_sim_soc) >= 1.0:
             _last_sim_soc = soc_val
-            fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
+            # 48h of consumption so the simulation covers the full Solcast window.
+            # Night periods have no solar entry in solar_fc (Solcast omits them),
+            # but the time-grid loop still steps through them with pv_w=0, so the
+            # battery correctly discharges overnight.
+            load_48h = _consumption_model.predict(time.time(), n_slots=192)
+            fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, load_48h)
             if fc:
                 _push_power_forecast(fc)
 
