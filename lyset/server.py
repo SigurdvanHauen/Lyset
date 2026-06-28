@@ -474,6 +474,9 @@ async def lifespan(app: FastAPI):
     purged = store.purge_power_outliers()
     if purged:
         log.warning('Startup: purged %d poll row(s) with outlier power values', purged)
+    cleaned = store.clean_soc_history()
+    if cleaned:
+        log.warning('Startup: cleaned %d poll row(s) with SoC outlier values', cleaned)
 
     # Auto-connect inverter worker
     defaults = ConnectRequest()

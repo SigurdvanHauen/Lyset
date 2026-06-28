@@ -277,6 +277,48 @@ def purge_power_outliers(threshold_w: float = 10_000) -> int:
         return cur.rowcount
 
 
+def clean_soc_history() -> int:
+    """Rewrite batt_soc outliers in-place across all stored polls.
+
+    Applies the same time-weighted rate filter used in _on_data: a reading is
+    an outlier if it changes by more than max(2%, elapsed_s/40) since the last
+    accepted value.  Returns the number of rows updated.
+    """
+    with _lock:
+        con = _get_con()
+        rows = con.execute(
+            'SELECT ts, json_extract(data, "$.batt_soc") FROM polls '
+            'WHERE json_extract(data, "$.batt_soc") IS NOT NULL '
+            'ORDER BY ts'
+        ).fetchall()
+
+        if not rows:
+            return 0
+
+        last_soc: float = rows[0][1]
+        last_ts: float = rows[0][0]
+        updates: list[tuple[float, float]] = []  # (corrected_soc, ts)
+
+        for ts, soc in rows[1:]:
+            elapsed_s = max(ts - last_ts, 5.0)
+            max_change = max(2.0, elapsed_s / 40.0)
+            if abs(soc - last_soc) > max_change:
+                updates.append((last_soc, ts))
+                # last_soc stays at the last accepted value
+            else:
+                last_soc = soc
+            last_ts = ts  # advance even when the row is filtered
+
+        for corrected, ts in updates:
+            con.execute(
+                'UPDATE polls SET data = json_set(data, "$.batt_soc", ?) WHERE ts = ?',
+                (round(corrected, 1), ts),
+            )
+        if updates:
+            con.commit()
+        return len(updates)
+
+
 def clear_history():
     """Delete all inverter poll records."""
     with _lock:
