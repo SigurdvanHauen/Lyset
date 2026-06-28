@@ -10,18 +10,21 @@ Decision loop (every 60 s while enabled), in priority order:
       SoC < 95 %: force-charge at max rate (47086=1, 47098=5000 W, 47100=1)
       SoC ≥ 95 %: force-idle, neither charge nor discharge (47086=1, 47100=0)
 
-2. EXPORT ARBITRAGE (export_dkk > cheapest future import + ARBIT_MARGIN AND SoC > MIN_SOC_ARBIT)
-   Force-discharge battery to grid (47086=1, 47100=2); battery energy is sold now
-   and replaced later when import is cheapest within ARBIT_HORIZON_H hours.
-
-3. GRID CHARGE (import_dkk < future_max_import − CHARGE_MARGIN AND SoC < threshold)
+2. GRID CHARGE (import_dkk < future_max_import − CHARGE_MARGIN AND SoC < threshold)
    Remove PV limit (40525=0), grid-charge battery (47087=1, 47079=2000 W, 47086=4, 47100=0).
    Dynamic threshold: justifies charging whenever today/tomorrow has a significantly
    more expensive slot within CHARGE_HORIZON_H hours.
 
-4. HOLD BATTERY FOR PEAK (upcoming import > import_now + HOLD_DELTA AND import_now < MAX_HOLD_IMPORT)
+3. HOLD BATTERY FOR PEAK (upcoming import > import_now + HOLD_DELTA AND import_now < MAX_HOLD_IMPORT)
    Force-idle battery (47086=1, 47100=0) so the current (cheap) load is covered
    by grid import rather than draining battery needed for the upcoming expensive period.
+
+4. EXPORT ARBITRAGE (export_dkk > cheapest future import + ARBIT_MARGIN AND SoC > MIN_SOC_ARBIT
+                     AND import_dkk < MAX_HOLD_IMPORT)
+   Force-discharge battery to grid (47086=1, 47100=2); battery energy is sold now
+   and replaced later when import is cheapest within ARBIT_HORIZON_H hours.
+   Guard: only fires when import is cheap — during expensive periods self-consumption
+   saves more per kWh than the export round-trip gain.
 
 5. DEFAULT — max self-consumption
    Remove PV limit (40525=0), mode=4 (47086=4), clear forced commands (47100=0).
@@ -208,22 +211,7 @@ class AutoController:
             detail = f'{pv_detail} (export {export_dkk:.3f} DKK){batt_detail}'
             return _Cmd(mode='export_limited', detail=detail)
 
-        # ── 2. Export arbitrage ───────────────────────────────────────────────
-        # Sell battery energy now; buy it back later when import is cheapest.
-        arbit_window = _window(_ARBIT_HORIZON_H)
-        if arbit_window and batt_soc > _MIN_SOC_ARBIT:
-            future_min_import = min(p['import'] for p in arbit_window)
-            if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
-                self._grid_charging = False
-                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
-                worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
-                detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
-                          f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
-                return _Cmd(mode='arbit_discharge', detail=detail)
-
-        # ── 3. Grid charge: cheap now vs expensive later ──────────────────────
+        # ── 2. Grid charge: cheap now vs expensive later ──────────────────────
         charge_window = _window(_CHARGE_HORIZON_H)
         if charge_window and batt_soc < gc_threshold:
             future_max_import = max(p['import'] for p in charge_window)
@@ -239,7 +227,7 @@ class AutoController:
                           f'SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='grid_charge', detail=detail)
 
-        # ── 4. Hold battery for upcoming price peak ───────────────────────────
+        # ── 3. Hold battery for upcoming price peak ───────────────────────────
         # Force-idle to preserve SoC; load is covered by (currently cheaper) grid.
         hold_window = _window(_HOLD_HORIZON_H)
         if (hold_window
@@ -255,6 +243,24 @@ class AutoController:
                 detail = (f'Holding battery: peak {max_upcoming:.3f} DKK in ≤{_HOLD_HORIZON_H}h '
                           f'(now {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='hold_battery', detail=detail)
+
+        # ── 4. Export arbitrage ───────────────────────────────────────────────
+        # Only when import is cheap — during expensive periods self-consumption
+        # saves more than the export round-trip gain, so arbitrage is not worthwhile.
+        arbit_window = _window(_ARBIT_HORIZON_H)
+        if (arbit_window
+                and batt_soc > _MIN_SOC_ARBIT
+                and import_dkk < _MAX_HOLD_IMPORT_DKK):
+            future_min_import = min(p['import'] for p in arbit_window)
+            if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
+                self._grid_charging = False
+                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
+                worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
+                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
+                worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
+                detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
+                          f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
+                return _Cmd(mode='arbit_discharge', detail=detail)
 
         # ── 5. Default: max self-consumption ──────────────────────────────────
         self._grid_charging = False

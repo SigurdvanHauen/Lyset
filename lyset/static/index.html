@@ -706,11 +706,13 @@ let _modalKey   = null;
 // ── Auto mode ─────────────────────────────────────────────────────────────────
 let _autoCommands = []; // [{ts, mode, detail}, ...]
 const AUTO_MODES = [
-  { label: 'PV Unrestricted', color: '#34D399' },  // 0: export_unlimited
-  { label: 'PV Limited',      color: '#F59E0B' },  // 1: export_limited
-  { label: 'Grid Charging',   color: '#4F8EF7' },  // 2: grid_charge
+  { label: 'PV Unrestricted',  color: '#34D399' },  // 0: export_unlimited
+  { label: 'PV Limited',       color: '#F59E0B' },  // 1: export_limited
+  { label: 'Grid Charging',    color: '#4F8EF7' },  // 2: grid_charge
+  { label: 'Hold Battery',     color: '#A78BFA' },  // 3: hold_battery
+  { label: 'Arb. Discharge',   color: '#F87171' },  // 4: arbit_discharge
 ];
-const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2 };
+const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4 };
 let _smoothEnabled = true;   // default: smoothing on
 let _bandsEnabled  = true;   // default: confidence bands on
 
