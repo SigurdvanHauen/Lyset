@@ -442,7 +442,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-top"><div class="card-lbl">Internal Temp</div><div class="card-times" id="t-d-itemp"></div></div>
         <div class="card-val" id="d-itemp">&#8212;<span class="unit">&#176;C</span></div>
       </div>
-      <div class="card acc">
+      <div class="card acc clickable" onclick="openStateChart()">
         <div class="card-top"><div class="card-lbl">Inverter State</div><div class="card-times" id="t-d-istate"></div></div>
         <div class="card-val" style="font-size:12px" id="d-istate">&#8212;</div>
       </div>
@@ -875,7 +875,7 @@ function onData(d) {
     }
   }
 
-  if (_modalChart && _modalKey && historyMap[_modalKey]) {
+  if (_modalChart && _modalKey && _modalKey !== 'inverter_state' && historyMap[_modalKey]) {
     const h = historyMap[_modalKey];
     _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
     _modalChart.update('none');
@@ -1495,6 +1495,114 @@ async function openDailyYieldModal() {
           ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(1) },
           grid:  { color: '#2D3555' },
           min:   0,
+        },
+      },
+    },
+  });
+}
+
+function openStateChart() {
+  const hist = historyMap['inverter_state'] || { ts: [], val: [] };
+
+  const STATE_NAMES = {
+    0:    'Standby: init',           1:    'Standby: insulation',
+    2:    'Standby: irradiation',    3:    'Standby: grid detect',
+    256:  'Starting',
+    512:  'On-grid',                 513:  'Power-limited',
+    514:  'Self-derating',
+    768:  'Fault shutdown',          769:  'Cmd shutdown',
+    770:  'OVGR shutdown',           771:  'Comms disconnected',
+    772:  'Power-lim shutdown',      773:  'Manual start req.',
+    774:  'DC switch off',
+    1025: 'Grid sched: cosφ-P',     1026: 'Grid sched: Q-U',
+    1027: 'Grid sched: PF-U',       1028: 'Grid sched: dry-contact',
+    1029: 'Grid sched: Q-P',
+    1280: 'Spot-check ready',       1281: 'Spot-checking',
+    1536: 'Inspecting',             1792: 'AFCI self check',
+    2048: 'I-V scanning',           2304: 'DC input detect',
+    2560: 'Off-grid charging',      4096: 'Standby: no irrad.',
+  };
+  const stateLabel = code => STATE_NAMES[code] || ('State 0x' + code.toString(16).toUpperCase());
+  const stateColor = code => {
+    if (code === 512) return '#34D399';
+    if (code === 513) return '#60A5FA';
+    if (code === 514) return '#F59E0B';
+    if (code >= 768 && code < 1024) return '#F87171';
+    if (code === 256) return '#FBBF24';
+    return '#8892AA';
+  };
+
+  // Map raw state codes → sequential Y indices so the axis has even spacing
+  const uniqueCodes = [...new Set(hist.val.filter(v => v != null))].sort((a, b) => a - b);
+  const codeToIdx = new Map(uniqueCodes.map((c, i) => [c, i]));
+  const n = uniqueCodes.length;
+
+  const pts = [];
+  for (let i = 0; i < hist.ts.length; i++) {
+    const v = hist.val[i];
+    if (v != null) pts.push({ x: hist.ts[i], y: codeToIdx.get(v) });
+  }
+
+  document.getElementById('modal-title').textContent = 'Inverter State — Last 24 h';
+  document.getElementById('modal-fc-btn').style.display    = 'none';
+  document.getElementById('modal-bands-btn').style.display = 'none';
+  document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-overlay').classList.add('active');
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = 'inverter_state';
+
+  _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+    type: 'line',
+    data: {
+      datasets: [{
+        data: pts,
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        stepped: 'before',
+        tension: 0,
+        segment: {
+          borderColor:     ctx => stateColor(uniqueCodes[Math.round(ctx.p1.parsed.y)]),
+          backgroundColor: ctx => stateColor(uniqueCodes[Math.round(ctx.p0.parsed.y)]) + '22',
+        },
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA',
+          bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          callbacks: {
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
+            label: ctx => stateLabel(uniqueCodes[Math.round(ctx.parsed.y)]),
+          },
+        },
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 8,
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          min: -0.5,
+          max: n > 0 ? n - 0.5 : 0.5,
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, stepSize: 1,
+            callback: v => Number.isInteger(v) && v >= 0 && v < n ? stateLabel(uniqueCodes[v]) : '',
+          },
+          grid: { color: '#2D3555' },
         },
       },
     },
