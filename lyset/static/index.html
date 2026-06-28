@@ -360,6 +360,18 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
+    <div class="sec">Energy Today</div>
+    <div class="cards">
+      <div class="card pv">
+        <div class="card-top"><div class="card-lbl">Produced</div></div>
+        <div class="card-val" id="d-daily-yield">&#8212;<span class="unit">kWh</span></div>
+      </div>
+      <div class="card pv">
+        <div class="card-top"><div class="card-lbl">Expected (Solcast)</div></div>
+        <div class="card-val" id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></div>
+      </div>
+    </div>
+
     <div class="sec">Battery</div>
     <div class="cards">
       <div class="card batt clickable" onclick="openChart('batt_soc','Battery SOC','%','#34D399')">
@@ -869,10 +881,11 @@ function onData(d) {
     _modalChart.update('none');
   }
 
-  setCard('d-pv',   d.active_power,       0);
-  setCard('d-grid', d.meter_active_power, 0);
-  setCard('d-batt', d.batt_power,         0);
-  setCard('d-load', d.house_load,         0);
+  setCard('d-pv',          d.active_power,       0);
+  setCard('d-grid',        d.meter_active_power, 0);
+  setCard('d-batt',        d.batt_power,         0);
+  setCard('d-load',        d.house_load,         0);
+  setCard('d-daily-yield', d.daily_yield,         2);
 
   _lastMeterPower = d.meter_active_power;
   updateGridSub();
@@ -1363,8 +1376,24 @@ function toast(msg, cls = 'tok') {
 // ── Solar forecast (Solcast) ──────────────────────────────────────────────────
 let _solcastData = [];
 
+function updateSolarFcKwh() {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const todayEnd   = todayStart + 86_400_000;
+  const kwh = _solcastData
+    .filter(s => s.ts_ms > todayStart && s.ts_ms <= todayEnd && s.pv_w != null)
+    .reduce((sum, s) => sum + s.pv_w * 0.5 / 1000, 0);
+  const el = document.getElementById('d-solar-fc-kwh');
+  if (el) {
+    const unit = el.querySelector('.unit');
+    el.textContent = kwh.toFixed(2);
+    if (unit) el.appendChild(unit);
+  }
+}
+
 function onSolarForecast(data) {
   _solcastData = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
+  updateSolarFcKwh();
   // Refresh the PV Power modal if it's open so the overlay appears immediately
   if (_modalChart && _modalKey === 'active_power') {
     openChart('active_power', 'PV Power', 'W', '#F59E0B');
