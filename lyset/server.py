@@ -304,7 +304,7 @@ def _push_power_forecast(fc: list[dict]):
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
-    global _last_data, _slot_samples, _slot_key, _last_batt_soc, _last_batt_soc_ts, _pv_yield_logged
+    global _last_data, _slot_samples, _slot_key, _last_batt_soc, _last_batt_soc_ts, _pv_yield_logged, _last_sim_soc
     ts = data.get('_timestamp', time.time())
     # Drop SoC glitches using the same rate-based filter as _clean_history_soc.
     soc = data.get('batt_soc')
@@ -360,7 +360,6 @@ def _on_data(data: dict):
         if not _backfill_done:
             _backfill_power_forecast(cap_val)
         if _last_sim_soc is None or abs(soc_val - _last_sim_soc) >= 1.0:
-            global _last_sim_soc
             _last_sim_soc = soc_val
             fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
             if fc:
