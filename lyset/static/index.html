@@ -464,7 +464,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div class="card acc">
         <div class="card-top"><div class="card-lbl">Export (spot est.)</div></div>
         <div class="card-val" id="pr-cur-export">&#8212;<span class="unit">DKK/kWh</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">Net metering ~spot price</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-cur-export-sub">Net metering ~spot price</div>
       </div>
       <div class="card acc">
         <div class="card-top"><div class="card-lbl">Next Hour Import</div></div>
@@ -1643,10 +1643,15 @@ function onPowerForecast(data) {
 // ── Grid sub-label (direction + current price) ────────────────────────────────
 let _lastMeterPower = null;
 
-function updateGridSub() {
+function _curSlot() {
   const now = Date.now();
-  const cur = _pricesData.find(p => p.ts <= now && p.ts + 3600000 > now)
-              || _pricesData.find(p => p.ts > now - 900000 && p.ts <= now);
+  const dur = p => (p.resolution === '15m' ? 900000 : 3600000);
+  return _pricesData.findLast(p => p.ts <= now && p.ts + dur(p) > now)
+      || _pricesData.findLast(p => p.ts > now - 900000 && p.ts <= now);
+}
+
+function updateGridSub() {
+  const cur = _curSlot();
   const p = _lastMeterPower;
   if (p == null) { setText('d-grid-sub', ''); return; }
   if (p > 0) {
@@ -1689,17 +1694,18 @@ function _todayRange() {
 }
 
 function updatePriceCards() {
-  const now     = Date.now();
-  const cur     = _pricesData.find(p => p.ts <= now && p.ts + 3600000 > now)
-                  || _pricesData.find(p => p.ts > now - 900000 && p.ts <= now);
-  const nxt     = _pricesData.find(p => p.ts > now);
+  const cur     = _curSlot();
+  const nxt     = _pricesData.find(p => p.ts > Date.now());
   const [ds, de] = _todayRange();
   const today   = _pricesData.filter(p => p.ts >= ds && p.ts < de && !p.forecast);
   const todayImp = today.map(p => p.import);
+  const todayExp = today.map(p => p.export);
   const minP    = todayImp.length ? Math.min(...todayImp) : null;
   const maxP    = todayImp.length ? Math.max(...todayImp) : null;
   const minRec  = today.find(p => p.import === minP);
   const maxRec  = today.find(p => p.import === maxP);
+  const minExp  = todayExp.length ? Math.min(...todayExp) : null;
+  const maxExp  = todayExp.length ? Math.max(...todayExp) : null;
 
   const el = id => document.getElementById(id);
   const fmt = v => v != null ? v.toFixed(2) : '—';
@@ -1707,6 +1713,9 @@ function updatePriceCards() {
   el('pr-cur-import').innerHTML = cur ? `${fmt(cur.import)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
   el('pr-cur-export').innerHTML = cur ? `${fmt(cur.export)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
   el('pr-cur-import-sub').textContent = cur ? `spot+tax: ${fmt(cur.spot_est)} DKK/kWh` : '';
+  el('pr-cur-export-sub').textContent = (minExp != null && maxExp != null)
+    ? `Today: ${fmt(minExp)} → ${fmt(maxExp)} DKK/kWh`
+    : 'Net metering ~spot price';
   el('pr-next-import').innerHTML = nxt ? `${fmt(nxt.import)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
   if (cur && nxt) {
     const diff = nxt.import - cur.import;
