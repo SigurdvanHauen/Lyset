@@ -72,6 +72,7 @@ _slot_samples: list[float] = []   # watts values
 _slot_key: int = -1               # int(ts_utc / 900)
 _backfill_done: bool = False      # run historical prediction backfill once per process
 _last_batt_soc: float | None = None  # used to detect single-poll SoC outliers
+_last_batt_soc_ts: float = 0.0      # unix timestamp of last accepted SoC reading
 
 
 # ── WebSocket broadcast ───────────────────────────────────────────────────────
@@ -286,22 +287,30 @@ def _push_power_forecast(fc: list[dict]):
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
-    global _last_data, _slot_samples, _slot_key, _last_batt_soc
-    # Drop single-poll SoC glitches — inverter occasionally reports garbage values.
-    # At max C/2 rate the SoC moves <0.1% per 5-second poll; >15% is physically impossible.
+    global _last_data, _slot_samples, _slot_key, _last_batt_soc, _last_batt_soc_ts
+    ts = data.get('_timestamp', time.time())
+    # Drop SoC glitches — the inverter occasionally reports 0% for a single poll.
+    # At C/2 rate the battery moves <0.1%/poll; allow 3% floor + 3% per minute of elapsed
+    # time so legitimate changes across connection gaps are still accepted.
     soc = data.get('batt_soc')
     if soc is not None:
-        if _last_batt_soc is not None and abs(soc - _last_batt_soc) > 15:
-            log.warning('batt_soc outlier dropped: %.1f%% → %.1f%%', _last_batt_soc, soc)
-            data = {**data, 'batt_soc': _last_batt_soc}
+        if _last_batt_soc is not None:
+            elapsed_s = max(ts - _last_batt_soc_ts, 5.0)
+            max_change = max(3.0, elapsed_s / 20.0)
+            if abs(soc - _last_batt_soc) > max_change:
+                log.warning('batt_soc outlier dropped: %.1f%% → %.1f%%', _last_batt_soc, soc)
+                data = {**data, 'batt_soc': _last_batt_soc}
+            else:
+                _last_batt_soc = soc
+                _last_batt_soc_ts = ts
         else:
             _last_batt_soc = soc
+            _last_batt_soc_ts = ts
     # Strip private keys and non-JSON-serialisable values
     clean = {k: v for k, v in data.items()
              if not k.startswith('_') and isinstance(v, (int, float, str, bool, type(None)))}
     _last_data = clean
     _push({'type': 'data', 'payload': clean})
-    ts = data.get('_timestamp', time.time())
     store.save(ts, clean)
 
     # Accumulate house load for the current 15-min slot
@@ -769,6 +778,26 @@ async def api_state():
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
+def _clean_history_soc(history: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
+    """Apply the same time-weighted SoC outlier filter to historical DB rows."""
+    last_soc: float | None = None
+    last_ts: float = 0.0
+    result = []
+    for ts, d in history:
+        soc = d.get('batt_soc')
+        if soc is not None:
+            if last_soc is not None:
+                elapsed_s = max(ts - last_ts, 5.0)
+                max_change = max(3.0, elapsed_s / 20.0)
+                if abs(soc - last_soc) > max_change:
+                    d = {**d, 'batt_soc': last_soc}
+                    soc = last_soc
+            last_soc = soc
+            last_ts = ts
+        result.append((ts, d))
+    return result
+
+
 @app.websocket('/ws')
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -777,6 +806,7 @@ async def websocket_endpoint(ws: WebSocket):
         loop = asyncio.get_running_loop()
         history = await loop.run_in_executor(None, store.load_last_24h)
         if history:
+            history = _clean_history_soc(history)
             pts = [{'ts': int(ts * 1000), 'data': d} for ts, d in history]
             await ws.send_text(json.dumps({'type': 'history', 'points': pts}))
 
