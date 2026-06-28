@@ -952,26 +952,16 @@ function openChart(key, label, unit, color) {
     order: 2,
   }];
 
-  // PV Power: colour restricted segments (inverter limiting output to house load only).
-  // Detected when grid ≈ 0 and battery ≈ 0 while PV is producing — nowhere for surplus to go.
+  // PV Power: colour restricted segments using the inverter's own state register.
+  // 0x0201 (513) = "On-grid: power-limited" — inverter is curtailing output.
   if (key === 'active_power') {
-    const mH = historyMap['meter_active_power'] || { ts: [], val: [] };
-    const bH = historyMap['batt_power']          || { ts: [], val: [] };
+    const sH   = historyMap['inverter_state'] || { ts: [], val: [] };
     const rMap = new Map();
-    for (let i = 0; i < mH.ts.length; i++) rMap.set(mH.ts[i], { m: mH.val[i] });
-    for (let i = 0; i < bH.ts.length;  i++) {
-      const e = rMap.get(bH.ts[i]) || {};
-      e.b = bH.val[i];
-      rMap.set(bH.ts[i], e);
-    }
-    const isRestricted = (ts, y) => {
-      if (!(y > 200)) return false;
-      const e = rMap.get(ts);
-      return e && Math.abs(e.m ?? 999) < 200 && Math.abs(e.b ?? 999) < 200;
-    };
+    for (let i = 0; i < sH.ts.length; i++) rMap.set(sH.ts[i], sH.val[i]);
+    const isRestricted = ts => rMap.get(ts) === 513;  // 0x0201
     datasets[0].segment = {
-      borderColor:     ctx => isRestricted(ctx.p1.parsed.x, ctx.p1.parsed.y) ? '#60A5FA' : undefined,
-      backgroundColor: ctx => isRestricted(ctx.p1.parsed.x, ctx.p1.parsed.y) ? '#60A5FA22' : undefined,
+      borderColor:     ctx => isRestricted(ctx.p1.parsed.x) ? '#60A5FA' : undefined,
+      backgroundColor: ctx => isRestricted(ctx.p1.parsed.x) ? '#60A5FA22' : undefined,
     };
   }
 
