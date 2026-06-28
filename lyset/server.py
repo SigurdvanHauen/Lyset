@@ -66,6 +66,7 @@ _solcast_status_ok: bool = False
 _consumption_model: Optional[ConsumptionModel] = None
 _last_consumption_forecast: list[dict] = []
 _last_power_forecast: list[dict] = []
+_last_sim_soc: float | None = None  # SoC anchor used for the last simulation run
 _auto_controller: AutoController = AutoController()
 _MODEL_PATH = Path(__file__).parent.parent / 'lyset_model.json'
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
@@ -221,6 +222,18 @@ def _simulate_soc(
             'grid_w': round(grid_kw * 1000),
         })
 
+    # Smooth the SoC column with a 3-point median to remove load-forecast noise
+    # that Chart.js bezier interpolation would otherwise amplify into visible spikes.
+    socs = [r['soc'] for r in result]
+    n = len(socs)
+    if n >= 3:
+        smoothed = [
+            round(statistics.median(socs[max(0, i-1):min(n, i+2)]), 1)
+            for i in range(n)
+        ]
+        for r, s in zip(result, smoothed):
+            r['soc'] = s
+
     return result
 
 
@@ -337,16 +350,21 @@ def _on_data(data: dict):
         else:
             _slot_samples.append(grid_import_w)
 
-    # Save and push power forecast whenever we have all prerequisites
+    # Save and push power forecast whenever we have all prerequisites.
+    # Re-simulate only when the anchor SoC shifts by ≥ 1 % to avoid pushing
+    # a jittery prediction line on every 10-s poll.
     soc_val = clean.get('batt_soc')
     cap_val = clean.get('batt_rated_capacity')
     if (soc_val is not None and cap_val and cap_val > 0
             and _last_solar_forecast and _last_consumption_forecast):
         if not _backfill_done:
             _backfill_power_forecast(cap_val)
-        fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
-        if fc:
-            _push_power_forecast(fc)
+        if _last_sim_soc is None or abs(soc_val - _last_sim_soc) >= 1.0:
+            global _last_sim_soc
+            _last_sim_soc = soc_val
+            fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, _last_consumption_forecast)
+            if fc:
+                _push_power_forecast(fc)
 
 
 def _save_model_and_regen():
