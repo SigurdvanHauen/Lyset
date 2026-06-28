@@ -211,23 +211,30 @@ class AutoController:
             detail = f'{pv_detail} (export {export_dkk:.3f} DKK){batt_detail}'
             return _Cmd(mode='export_limited', detail=detail)
 
-        # ── 2. Grid charge: cheap now vs expensive later ──────────────────────
-        # Uses forced-charge mode (47086=1, 47100=1) rather than mode-4 + grid-charge-enable
-        # (47087=1) because mode 4 still runs self-consumption logic that can discharge the
-        # battery for house loads, counteracting the grid charge at night.
+        # ── 2. Grid charge: charge when this IS the cheapest upcoming window ─────
+        # Condition: current price ≤ cheapest future slot + margin (we are at/near
+        # the floor) AND there is a significantly more expensive period ahead that
+        # makes storing energy worthwhile.
+        # Uses forced-charge mode so self-consumption logic cannot discharge the
+        # battery against the charge at night. Both 47079 (grid-charge power cap)
+        # and 47098 (forced-charge power) are written to avoid a stale 47079 cap
+        # limiting the actual charge rate.
         charge_window = _window(_CHARGE_HORIZON_H)
         if charge_window and batt_soc < gc_threshold:
+            future_min_import = min(p['import'] for p in charge_window)
             future_max_import = max(p['import'] for p in charge_window)
-            if import_dkk < future_max_import - _CHARGE_MARGIN_DKK:
+            if (import_dkk <= future_min_import + _CHARGE_MARGIN_DKK
+                    and future_max_import > import_dkk + _CHARGE_MARGIN_DKK):
                 self._grid_charging = True
                 worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge feature OFF')
+                worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid cap {_GRID_CHARGE_W} W')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
                 worker.write_u32(47098, _GRID_CHARGE_W, f'AutoCtrl: charge {_GRID_CHARGE_W} W')
                 worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
                 detail = (f'Grid charging {_GRID_CHARGE_W} W '
-                          f'(import {import_dkk:.3f} DKK, future max {future_max_import:.3f} DKK, '
-                          f'SoC {batt_soc:.0f}%)')
+                          f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
+                          f'max {future_max_import:.3f} DKK, SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='grid_charge', detail=detail)
 
         # ── 3. Hold battery for upcoming price peak ───────────────────────────

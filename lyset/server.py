@@ -41,6 +41,8 @@ from .auto_controller import (
     NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_SOC_START, GRID_CHARGE_SOC_MAX, GRID_CHARGE_W,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
+    CHARGE_MARGIN_DKK, CHARGE_HORIZON_H,
+    HOLD_DELTA_DKK, HOLD_HORIZON_H, MAX_HOLD_IMPORT_DKK, MIN_SOC_HOLD,
 )
 from . import store
 
@@ -246,28 +248,53 @@ def _simulate_soc(
                 grid_kw     = load_w / 1000.0 + batt_kw - pv_w / 1000.0
                 energy_kwh  = batt_kw * 0.5 * charge_eff
 
-            elif import_dkk < CHEAP_IMPORT_DKK and soc < (
-                GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
-            ):
-                # Cheap import: self-consumption + 2 kW grid charge on top
-                gc_active = True
-                if soc >= 100.0:
-                    batt_kw = 0.0
-                else:
-                    batt_kw = min(net_kw + GRID_CHARGE_W / 1000.0, max_power_kw)
-                    batt_kw = max(0.0, batt_kw)  # never discharge in this mode
-                grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * 0.5 * charge_eff
-
             else:
-                # Default: max self-consumption
-                gc_active = False
-                if net_kw >= 0:
-                    batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
+                # Look-ahead prices available after the current slot
+                future_from_here = prices_sorted[price_ptr + 1:]
+                gc_soc_limit = GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
+
+                # Grid charge: at/near the cheapest upcoming window AND SoC below threshold?
+                charge_end = ts_ms + CHARGE_HORIZON_H * 3_600_000
+                c_win = [p for p in future_from_here if p['ts'] <= charge_end]
+                do_gc = False
+                if c_win and soc < gc_soc_limit:
+                    c_min = min(p['import'] for p in c_win)
+                    c_max = max(p['import'] for p in c_win)
+                    do_gc = (import_dkk <= c_min + CHARGE_MARGIN_DKK
+                             and c_max > import_dkk + CHARGE_MARGIN_DKK)
+
+                # Hold battery: a significantly more expensive slot is coming soon?
+                hold_end = ts_ms + HOLD_HORIZON_H * 3_600_000
+                h_win = [p for p in future_from_here if p['ts'] <= hold_end]
+                do_hold = (
+                    not do_gc
+                    and h_win
+                    and import_dkk < MAX_HOLD_IMPORT_DKK
+                    and soc > MIN_SOC_HOLD
+                    and max(p['import'] for p in h_win) > import_dkk + HOLD_DELTA_DKK
+                )
+
+                if do_gc:
+                    gc_active  = True
+                    batt_kw    = min(GRID_CHARGE_W / 1000.0, max_power_kw)
+                    grid_kw    = batt_kw - net_kw
+                    energy_kwh = batt_kw * 0.5 * charge_eff
+
+                elif do_hold:
+                    gc_active  = False
+                    batt_kw    = 0.0
+                    grid_kw    = -net_kw
+                    energy_kwh = 0.0
+
                 else:
-                    batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
-                grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+                    # Default: max self-consumption
+                    gc_active = False
+                    if net_kw >= 0:
+                        batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
+                    else:
+                        batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
+                    grid_kw    = batt_kw - net_kw
+                    energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
 
         else:
             # No price data — pure self-consumption
