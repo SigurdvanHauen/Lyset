@@ -26,16 +26,26 @@ from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
-# ── Thresholds ─────────────────────────────────────────────────────────────────
-_NEGATIVE_EXPORT_DKK  = -0.01   # export below → limit PV and stop battery discharge
-_MIN_PV_W             = 300     # below this, don't bother writing a PV limit
-_CHEAP_IMPORT_DKK     = 0.50    # import below → allow grid charging
-_GRID_CHARGE_SOC_START = 75.0   # only begin grid charging below this (hysteresis low)
-_GRID_CHARGE_SOC_MAX  = 80.0    # stop grid charging above this (hysteresis high)
-_GRID_CHARGE_W        = 2000    # W — grid charge rate
-_FORCE_CHARGE_SOC_MAX = 95.0    # above this, force-idle instead of force-charge
-_MAX_FORCE_CHARGE_W   = 5000    # W — battery charge rate (inverter clamps to rated max)
+# ── Thresholds (also imported by server.py for the SoC simulation) ────────────
+NEGATIVE_EXPORT_DKK   = -0.01   # export below → limit PV and stop battery discharge
+MIN_PV_W              = 300     # below this, don't bother writing a PV limit
+CHEAP_IMPORT_DKK      = 0.50    # import below → allow grid charging
+GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresis low)
+GRID_CHARGE_SOC_MAX   = 80.0    # stop grid charging above this (hysteresis high)
+GRID_CHARGE_W         = 2000    # W — grid charge rate
+FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
+MAX_FORCE_CHARGE_W    = 5000    # W — battery charge rate (inverter clamps to rated max)
 _EVAL_INTERVAL_S      = 60      # how often the loop re-evaluates
+
+# Private aliases kept for internal use within this module
+_NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
+_MIN_PV_W             = MIN_PV_W
+_CHEAP_IMPORT_DKK     = CHEAP_IMPORT_DKK
+_GRID_CHARGE_SOC_START = GRID_CHARGE_SOC_START
+_GRID_CHARGE_SOC_MAX  = GRID_CHARGE_SOC_MAX
+_GRID_CHARGE_W        = GRID_CHARGE_W
+_FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
+_MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
 
 
 @dataclass

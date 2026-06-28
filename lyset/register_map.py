@@ -82,13 +82,21 @@ REGISTERS: list[Register] = [
     Register(37119,  2, 'U32',  100,  'kWh', 'Grid exported energy',     'Meter',   'meter_export_energy'),
     Register(37121,  2, 'U32',  100,  'kWh', 'Grid imported energy',     'Meter',   'meter_import_energy'),
     Register(37118,  1, 'U16',  100,  'Hz',  'Meter frequency',          'Meter',   'meter_frequency'),
+
+    # ── Battery control state (written by auto-controller; polled to reflect live state) ──
+    # 47086: 1=forced charge/discharge, 4=max self-consumption
+    # 47087: 0=grid charge disabled, 1=grid charge enabled
+    # 47100: 0=none, 1=force-charge, 2=force-discharge
+    Register(47086,  1, 'U16',  1,    '',    'Battery working mode',     'Control', 'batt_working_mode'),
+    Register(47087,  1, 'U16',  1,    '',    'Grid charge enable',       'Control', 'grid_charge_enable'),
+    Register(47100,  1, 'U16',  1,    '',    'Forced charge/discharge',  'Control', 'batt_forced_mode'),
 ]
 
 # Quick lookup by key
 REGISTER_BY_KEY: dict[str, Register] = {r.key: r for r in REGISTERS}
 
 # Groups used for organizing the UI
-GROUPS: list[str] = ['PV', 'Output', 'Grid', 'Battery', 'Meter', 'Energy', 'Device']
+GROUPS: list[str] = ['PV', 'Output', 'Grid', 'Battery', 'Meter', 'Energy', 'Control', 'Device']
 
 
 # ── Inverter state codes ──────────────────────────────────────────────────────

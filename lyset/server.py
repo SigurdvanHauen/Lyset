@@ -36,7 +36,12 @@ from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
-from .auto_controller import AutoController
+from .auto_controller import (
+    AutoController,
+    NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
+    GRID_CHARGE_SOC_START, GRID_CHARGE_SOC_MAX, GRID_CHARGE_W,
+    FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
+)
 from . import store
 
 log = logging.getLogger(__name__)
@@ -150,6 +155,8 @@ def _simulate_soc(
     capacity_kwh: float,
     solar_fc: list[dict],
     load_fc: list[dict],
+    prices: list[dict] | None = None,
+    gc_state: bool = False,
     min_soc: float = 10.0,
     charge_eff: float = 0.97,
     discharge_eff: float = 0.97,
@@ -161,6 +168,11 @@ def _simulate_soc(
     start_ms:  anchor timestamp (default: now). Pass a past timestamp to backfill.
     solar_fc:  [{ts_ms, pv_w}, ...]  — 30-min period_end UTC ms
     load_fc:   [{ts_ms, w}, ...]     — 15-min slot_start UTC ms
+    prices:    [{ts, import, export}, ...] — when provided, mirrors auto-controller
+               decision logic (force-charge on negative export, grid-charge on
+               cheap import) per slot.  None → pure self-consumption model.
+    gc_state:  current grid-charge hysteresis state (True = currently charging)
+
     Returns:   [{ts_ms, soc, batt_w, grid_w}, ...]
       batt_w: positive = charging, negative = discharging  (matches batt_power key)
       grid_w: positive = importing, negative = exporting   (matches meter_active_power key)
@@ -176,15 +188,20 @@ def _simulate_soc(
     cutoff_ms = start_ms if start_ms is not None else int(time.time() * 1000)
 
     # Index solar by period-end ts; night periods (omitted by Solcast) default to 0 W
-    solar_by_ts = {r['ts_ms']: r.get('pv_w') or 0.0 for r in solar_fc}
-    load_by_ts  = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
+    solar_by_ts  = {r['ts_ms']: r.get('pv_w') or 0.0 for r in solar_fc}
+    load_by_ts   = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
     max_power_kw = capacity_kwh * 0.5  # C/2 — LUNA2000 rated charge rate heuristic
+
+    # Price lookup: sorted ascending so we can walk a pointer forward
+    prices_sorted = sorted(prices, key=lambda p: p['ts']) if prices else []
+    price_ptr     = 0
 
     end_ms        = max(r['ts_ms'] for r in solar_fc)
     first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
 
-    soc = start_soc
-    result = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
+    soc       = start_soc
+    gc_active = gc_state  # grid-charge hysteresis state across steps
+    result    = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
     for ts_ms in range(first_slot_ms, int(end_ms) + 1, SLOT_MS):
         pv_w = solar_by_ts.get(ts_ms, 0.0)
@@ -204,22 +221,62 @@ def _simulate_soc(
         else:
             continue  # beyond load forecast window — stop stepping
 
-        # net_kw > 0: surplus (solar > load); < 0: deficit (load > solar)
         net_kw = (pv_w - load_w) / 1000.0
 
-        # Battery takes surplus / covers deficit, clamped by max rate and SoC limits
-        if net_kw >= 0:
-            batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
-        else:
-            batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
+        # Advance price pointer to the most recent price at or before this slot
+        while (price_ptr + 1 < len(prices_sorted)
+               and prices_sorted[price_ptr + 1]['ts'] <= ts_ms):
+            price_ptr += 1
+        cur_price = (prices_sorted[price_ptr]
+                     if price_ptr < len(prices_sorted)
+                     and prices_sorted[price_ptr]['ts'] <= ts_ms
+                     else None)
 
-        # Grid makes up the remainder (energy balance: solar + grid = load + batt_charge)
-        grid_kw = batt_kw - net_kw  # positive = import, negative = export
+        if cur_price and prices_sorted:
+            export_dkk = cur_price.get('export') or 0.0
+            import_dkk = cur_price.get('import') or 0.5
 
-        if batt_kw >= 0:
-            energy_kwh = batt_kw * 0.5 * charge_eff
+            if export_dkk < NEGATIVE_EXPORT_DKK:
+                # Negative export: battery force-charges (or idles if nearly full)
+                gc_active = False
+                if soc < FORCE_CHARGE_SOC_MAX:
+                    batt_kw = min(MAX_FORCE_CHARGE_W / 1000.0, max_power_kw)
+                else:
+                    batt_kw = 0.0
+                grid_kw     = load_w / 1000.0 + batt_kw - pv_w / 1000.0
+                energy_kwh  = batt_kw * 0.5 * charge_eff
+
+            elif import_dkk < CHEAP_IMPORT_DKK and soc < (
+                GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
+            ):
+                # Cheap import: self-consumption + 2 kW grid charge on top
+                gc_active = True
+                if soc >= 100.0:
+                    batt_kw = 0.0
+                else:
+                    batt_kw = min(net_kw + GRID_CHARGE_W / 1000.0, max_power_kw)
+                    batt_kw = max(0.0, batt_kw)  # never discharge in this mode
+                grid_kw    = batt_kw - net_kw
+                energy_kwh = batt_kw * 0.5 * charge_eff
+
+            else:
+                # Default: max self-consumption
+                gc_active = False
+                if net_kw >= 0:
+                    batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
+                else:
+                    batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
+                grid_kw    = batt_kw - net_kw
+                energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+
         else:
-            energy_kwh = batt_kw * 0.5 / discharge_eff
+            # No price data — pure self-consumption
+            if net_kw >= 0:
+                batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
+            else:
+                batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
+            grid_kw    = batt_kw - net_kw
+            energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
 
         soc = max(min_soc, min(100.0, soc + energy_kwh / capacity_kwh * 100.0))
         result.append({
@@ -387,12 +444,12 @@ def _on_data(data: dict):
             _backfill_power_forecast(cap_val)
         if _last_sim_soc is None or abs(soc_val - _last_sim_soc) >= 1.0:
             _last_sim_soc = soc_val
-            # 48h of consumption so the simulation covers the full Solcast window.
-            # Night periods have no solar entry in solar_fc (Solcast omits them),
-            # but the time-grid loop still steps through them with pv_w=0, so the
-            # battery correctly discharges overnight.
             load_48h = _consumption_model.predict(time.time(), n_slots=192)
-            fc = _simulate_soc(soc_val, cap_val, _last_solar_forecast, load_48h)
+            fc = _simulate_soc(
+                soc_val, cap_val, _last_solar_forecast, load_48h,
+                prices=_last_prices if _auto_controller.enabled else None,
+                gc_state=_auto_controller._grid_charging,
+            )
             if fc:
                 _push_power_forecast(fc)
 
