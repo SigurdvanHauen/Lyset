@@ -443,7 +443,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-val" id="d-itemp">&#8212;<span class="unit">&#176;C</span></div>
       </div>
       <div class="card acc clickable" onclick="openStateChart()">
-        <div class="card-top"><div class="card-lbl">Inverter State</div><div class="card-times" id="t-d-istate"></div></div>
+        <div class="card-top"><div class="card-lbl">System State</div><div class="card-times" id="t-d-istate"></div></div>
         <div class="card-val" style="font-size:12px" id="d-istate">&#8212;</div>
       </div>
     </div>
@@ -736,10 +736,38 @@ const KEY_MAP = {
   pv2v:  'pv2_voltage',       pv2a:   'pv2_current',
   pv2w:  'pv2_power',         freq:   'meter_frequency',
   va:    'grid_voltage_a',    pf:     'power_factor',
-  itemp: 'internal_temp',     istate: 'inverter_state_label',
+  itemp: 'internal_temp',     istate: '_cstate_idx',
 };
 let lastRead = null;
 const lastChanged = {};
+
+// ── Computed system state ─────────────────────────────────────────────────────
+const COMPUTED_STATES = [
+  { code: 'off',       label: 'Offline',               color: '#4B5563' },
+  { code: 'standby',   label: 'Standby',               color: '#6B7280' },
+  { code: 'limited',   label: 'Power limited',         color: '#60A5FA' },
+  { code: 'exporting', label: 'Solar: exporting',      color: '#34D399' },
+  { code: 'self',      label: 'Solar: self-consuming', color: '#F59E0B' },
+  { code: 'batt_chg',  label: 'Battery: charging',     color: '#FBBF24' },
+  { code: 'batt_dis',  label: 'Battery: discharging',  color: '#F87171' },
+];
+
+function computeState(d) {
+  const pv   = (d.pv1_power  ?? 0) + (d.pv2_power ?? 0);
+  const inv  = d.active_power       ?? 0;
+  const grid = d.meter_active_power ?? 0;  // + = importing, - = exporting
+  const batt = d.batt_power         ?? 0;  // + = charging, - = discharging
+  // DC power the inverter isn't converting (not in AC output or battery)
+  const curtailed = pv - inv - Math.max(batt, 0);
+
+  if (inv < 50  && pv < 50)    return 0;  // Offline
+  if (pv < 150  && batt < -100) return 6; // Battery: discharging
+  if (pv < 150)                return 1;  // Standby / low irradiation
+  if (curtailed > 300)         return 2;  // Power limited
+  if (grid < -100)             return 3;  // Solar: exporting
+  if (batt > 100)              return 5;  // Solar: charging battery
+  return 4;                               // Solar: self-consuming
+}
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function showTab(name, btn) {
@@ -832,6 +860,9 @@ function onHistory(points) {
         historyMap[key].val.push(val);
       }
     }
+    if (!historyMap['_cstate_idx']) historyMap['_cstate_idx'] = { ts: [], val: [] };
+    historyMap['_cstate_idx'].ts.push(pt.ts);
+    historyMap['_cstate_idx'].val.push(computeState(pt.data));
   }
 }
 
@@ -860,6 +891,8 @@ function onData(d) {
   lastRead = now;
   const cutoff = now - 86400000; // 24 h rolling window
 
+  d._cstate_idx = computeState(d);
+
   for (const [sfx, key] of Object.entries(KEY_MAP)) {
     const val = d[key];
     if (val !== undefined) {
@@ -875,7 +908,7 @@ function onData(d) {
     }
   }
 
-  if (_modalChart && _modalKey && _modalKey !== 'inverter_state' && historyMap[_modalKey]) {
+  if (_modalChart && _modalKey && _modalKey !== '_cstate_idx' && historyMap[_modalKey]) {
     const h = historyMap[_modalKey];
     _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
     _modalChart.update('none');
@@ -909,7 +942,7 @@ function onData(d) {
   setCard('d-va',    d.grid_voltage_a, 1);
   setCard('d-pf',    d.power_factor,   3);
   setCard('d-itemp', d.internal_temp,  1);
-  setText('d-istate', d.inverter_state_label);
+  setText('d-istate', COMPUTED_STATES[d._cstate_idx]?.label ?? '—');
 
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
@@ -952,16 +985,15 @@ function openChart(key, label, unit, color) {
     order: 2,
   }];
 
-  // PV Power: colour restricted segments using the inverter's own state register.
-  // 0x0201 (513) = "On-grid: power-limited" — inverter is curtailing output.
+  // PV Power: highlight power-limited segments using the computed system state.
   if (key === 'active_power') {
-    const sH   = historyMap['inverter_state'] || { ts: [], val: [] };
+    const sH   = historyMap['_cstate_idx'] || { ts: [], val: [] };
     const rMap = new Map();
     for (let i = 0; i < sH.ts.length; i++) rMap.set(sH.ts[i], sH.val[i]);
-    const isRestricted = ts => rMap.get(ts) === 513;  // 0x0201
+    const isLimited = ts => rMap.get(ts) === 2;  // idx 2 = 'Power limited'
     datasets[0].segment = {
-      borderColor:     ctx => isRestricted(ctx.p1.parsed.x) ? '#60A5FA' : undefined,
-      backgroundColor: ctx => isRestricted(ctx.p1.parsed.x) ? '#60A5FA22' : undefined,
+      borderColor:     ctx => isLimited(ctx.p1.parsed.x) ? '#60A5FA' : undefined,
+      backgroundColor: ctx => isLimited(ctx.p1.parsed.x) ? '#60A5FA22' : undefined,
     };
   }
 
@@ -1219,13 +1251,13 @@ function resetZoom() {
   if (_modalChart) _modalChart.resetZoom();
 }
 
-// Returns [{t0, t1}] pairs (ms) where inverter was in power-limited state (0x0201 = 513)
+// Returns [{t0, t1}] pairs (ms) where the system was in power-limited state (idx 2)
 function getPowerLimitedPeriods() {
-  const h = historyMap['inverter_state'] || { ts: [], val: [] };
+  const h = historyMap['_cstate_idx'] || { ts: [], val: [] };
   const periods = [];
   let start = null;
   for (let i = 0; i < h.ts.length; i++) {
-    const limited = (h.val[i] === 513);
+    const limited = (h.val[i] === 2);
     if (limited && start === null) start = h.ts[i];
     if (!limited && start !== null) { periods.push({ t0: start, t1: h.ts[i] }); start = null; }
   }
@@ -1502,75 +1534,36 @@ async function openDailyYieldModal() {
 }
 
 function openStateChart() {
-  const hist = historyMap['inverter_state'] || { ts: [], val: [] };
-
-  const STATE_NAMES = {
-    0:    'Standby: init',           1:    'Standby: insulation',
-    2:    'Standby: irradiation',    3:    'Standby: grid detect',
-    256:  'Starting',
-    512:  'On-grid',                 513:  'Power-limited',
-    514:  'Self-derating',
-    768:  'Fault shutdown',          769:  'Cmd shutdown',
-    770:  'OVGR shutdown',           771:  'Comms disconnected',
-    772:  'Power-lim shutdown',      773:  'Manual start req.',
-    774:  'DC switch off',
-    1025: 'Grid sched: cosφ-P',     1026: 'Grid sched: Q-U',
-    1027: 'Grid sched: PF-U',       1028: 'Grid sched: dry-contact',
-    1029: 'Grid sched: Q-P',
-    1280: 'Spot-check ready',       1281: 'Spot-checking',
-    1536: 'Inspecting',             1792: 'AFCI self check',
-    2048: 'I-V scanning',           2304: 'DC input detect',
-    2560: 'Off-grid charging',      4096: 'Standby: no irrad.',
-  };
-  const stateLabel = code => STATE_NAMES[code] || ('State 0x' + code.toString(16).toUpperCase());
-  const stateColor = code => {
-    if (code === 512) return '#34D399';
-    if (code === 513) return '#60A5FA';
-    if (code === 514) return '#F59E0B';
-    if (code >= 768 && code < 1024) return '#F87171';
-    if (code === 256) return '#FBBF24';
-    return '#8892AA';
-  };
-
-  // Map raw state codes → sequential Y indices so the axis has even spacing
-  const uniqueCodes = [...new Set(hist.val.filter(v => v != null))].sort((a, b) => a - b);
-  const codeToIdx = new Map(uniqueCodes.map((c, i) => [c, i]));
-  const n = uniqueCodes.length;
+  const hist = historyMap['_cstate_idx'] || { ts: [], val: [] };
+  const n    = COMPUTED_STATES.length;
 
   const pts = [];
   for (let i = 0; i < hist.ts.length; i++) {
-    const v = hist.val[i];
-    if (v != null) pts.push({ x: hist.ts[i], y: codeToIdx.get(v) });
+    if (hist.val[i] != null) pts.push({ x: hist.ts[i], y: hist.val[i] });
   }
 
-  document.getElementById('modal-title').textContent = 'Inverter State — Last 24 h';
+  document.getElementById('modal-title').textContent = 'System State — Last 24 h';
   document.getElementById('modal-fc-btn').style.display    = 'none';
   document.getElementById('modal-bands-btn').style.display = 'none';
   document.getElementById('modal-smooth-btn').style.display = 'none';
   document.getElementById('modal-overlay').classList.add('active');
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
-  _modalKey = 'inverter_state';
+  _modalKey = '_cstate_idx';
 
   _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
     data: {
       datasets: [{
         data: pts,
-        borderWidth: 2,
-        pointRadius: 0,
-        fill: true,
-        stepped: 'before',
-        tension: 0,
+        borderWidth: 2, pointRadius: 0, fill: true, stepped: 'before', tension: 0,
         segment: {
-          borderColor:     ctx => stateColor(uniqueCodes[Math.round(ctx.p1.parsed.y)]),
-          backgroundColor: ctx => stateColor(uniqueCodes[Math.round(ctx.p0.parsed.y)]) + '22',
+          borderColor:     ctx => COMPUTED_STATES[Math.round(ctx.p1.parsed.y)]?.color,
+          backgroundColor: ctx => (COMPUTED_STATES[Math.round(ctx.p0.parsed.y)]?.color ?? '#888') + '22',
         },
       }],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
+      responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -1578,7 +1571,7 @@ function openStateChart() {
           bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
           callbacks: {
             title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
-            label: ctx => stateLabel(uniqueCodes[Math.round(ctx.parsed.y)]),
+            label: ctx => COMPUTED_STATES[Math.round(ctx.parsed.y)]?.label ?? '—',
           },
         },
         zoom: {
@@ -1597,10 +1590,13 @@ function openStateChart() {
         },
         y: {
           min: 0,
-          max: n > 1 ? n - 1 + 0.5 : 0.5,
+          max: n - 0.5,
           ticks: {
             color: '#8892AA', font: { size: 10 }, stepSize: 1,
-            callback: v => Number.isInteger(v) && v >= 0 && v < n ? stateLabel(uniqueCodes[v]) : '',
+            callback: v => {
+              const i = Math.round(v);
+              return (Number.isInteger(v) && i >= 0 && i < n) ? COMPUTED_STATES[i].label : '';
+            },
           },
           grid: { color: '#2D3555' },
         },
