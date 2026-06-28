@@ -320,6 +320,39 @@ def clean_soc_history() -> int:
         return len(updates)
 
 
+def clean_forecast_soc() -> int:
+    """Rewrite power_forecast soc spikes in-place using a 5-point sliding median.
+
+    Returns the number of rows updated.
+    """
+    HALF = 2
+    with _lock:
+        con = _get_con()
+        rows = con.execute(
+            'SELECT ts_ms, soc FROM power_forecast WHERE soc IS NOT NULL ORDER BY ts_ms'
+        ).fetchall()
+
+        if len(rows) < 3:
+            return 0
+
+        socs = [r[1] for r in rows]
+        n    = len(socs)
+        updates: list[tuple[float, int]] = []
+
+        for i, (ts_ms, original) in enumerate(rows):
+            lo  = max(0, i - HALF)
+            hi  = min(n, i + HALF + 1)
+            med = round(statistics.median(socs[lo:hi]), 1)
+            if abs(med - original) >= 0.5:
+                updates.append((med, ts_ms))
+
+        for corrected, ts_ms in updates:
+            con.execute('UPDATE power_forecast SET soc = ? WHERE ts_ms = ?', (corrected, ts_ms))
+        if updates:
+            con.commit()
+        return len(updates)
+
+
 def clear_history():
     """Delete all inverter poll records."""
     with _lock:

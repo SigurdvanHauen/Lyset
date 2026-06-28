@@ -291,13 +291,32 @@ def _backfill_power_forecast(cap_val: float):
         )
 
 
+def _smooth_forecast_soc(records: list[dict]) -> list[dict]:
+    """Apply 5-point sliding median to the soc field of a forecast list."""
+    HALF = 2
+    socs = [r['soc'] for r in records if r.get('soc') is not None]
+    if len(socs) < 3:
+        return records
+    n = len(socs)
+    smoothed = [round(statistics.median(socs[max(0, i-HALF):min(n, i+HALF+1)]), 1) for i in range(n)]
+    j = 0
+    result = []
+    for r in records:
+        if r.get('soc') is not None:
+            result.append({**r, 'soc': smoothed[j]})
+            j += 1
+        else:
+            result.append(r)
+    return result
+
+
 def _push_power_forecast(fc: list[dict]):
     """Save simulation output to DB and push the full stored window to browsers."""
     global _last_power_forecast
     now_ms = int(time.time() * 1000)
     store.save_power_forecast(fc, now_ms)
     combined = store.load_power_forecast(now_ms - 86_400_000, now_ms + 48 * 3_600_000)
-    _last_power_forecast = combined or fc
+    _last_power_forecast = _smooth_forecast_soc(combined or fc)
     _push({'type': 'power_forecast', 'payload': _last_power_forecast})
 
 
@@ -495,6 +514,9 @@ async def lifespan(app: FastAPI):
     cleaned = store.clean_soc_history()
     if cleaned:
         log.warning('Startup: cleaned %d poll row(s) with SoC outlier values', cleaned)
+    cleaned_fc = store.clean_forecast_soc()
+    if cleaned_fc:
+        log.warning('Startup: cleaned %d forecast row(s) with SoC outlier values', cleaned_fc)
 
     # Auto-connect inverter worker
     defaults = ConnectRequest()
@@ -565,7 +587,9 @@ async def lifespan(app: FastAPI):
     # Restore stored power forecast from DB
     global _last_power_forecast
     now_ms = int(time.time() * 1000)
-    _last_power_forecast = store.load_power_forecast(now_ms - 86_400_000, now_ms + 48 * 3_600_000)
+    _last_power_forecast = _smooth_forecast_soc(
+        store.load_power_forecast(now_ms - 86_400_000, now_ms + 48 * 3_600_000)
+    )
     if _last_power_forecast:
         log.info('PowerForecast: restored %d stored periods from DB', len(_last_power_forecast))
 
