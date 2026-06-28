@@ -35,6 +35,7 @@ from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
+from .auto_controller import AutoController
 from . import store
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ _solcast_status_ok: bool = False
 _consumption_model: Optional[ConsumptionModel] = None
 _last_consumption_forecast: list[dict] = []
 _last_power_forecast: list[dict] = []
+_auto_controller: AutoController = AutoController()
 _MODEL_PATH = Path(__file__).parent.parent / 'lyset_model.json'
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 
@@ -425,6 +427,18 @@ def _on_solcast_status(msg: str, ok: bool):
     _solcast_status_ok = ok
 
 
+def _on_auto_command(mode: str, detail: str):
+    ts = time.time()
+    store.save_auto_command(ts, mode, detail)
+    _push({
+        'type': 'auto_mode',
+        'enabled': _auto_controller.enabled,
+        'last_action': detail,
+        'last_action_ts': ts,
+        'cmd': {'ts': ts, 'mode': mode, 'detail': detail},
+    })
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 def _start_worker(host: str, port: int, slave_id: int, poll_interval: float):
@@ -536,6 +550,13 @@ async def lifespan(app: FastAPI):
     _last_power_forecast = store.load_power_forecast(now_ms - 86_400_000, now_ms + 48 * 3_600_000)
     if _last_power_forecast:
         log.info('PowerForecast: restored %d stored periods from DB', len(_last_power_forecast))
+
+    # Start auto controller — disabled by default, user enables via UI
+    _auto_controller.set_command_callback(_on_auto_command)
+    asyncio.create_task(_auto_controller.run(
+        lambda: _worker, lambda: _last_prices, lambda: _last_data,
+    ))
+    log.info('AutoCtrl: task started (disabled by default — enable via UI)')
 
     yield
 
@@ -716,6 +737,37 @@ async def api_power_forecast():
         None, store.load_power_forecast, now_ms - 86_400_000, now_ms + 48 * 3_600_000
     )
     return {'forecast': data or _last_power_forecast}
+
+
+class AutoModeRequest(BaseModel):
+    enabled: bool
+
+
+@app.get('/api/automode')
+async def api_automode_get():
+    loop = asyncio.get_running_loop()
+    cmds = await loop.run_in_executor(None, store.load_auto_commands, time.time() - 86_400)
+    return {
+        'enabled':        _auto_controller.enabled,
+        'last_action':    _auto_controller.last_action,
+        'last_action_ts': _auto_controller.last_action_ts,
+        'commands':       cmds,
+    }
+
+
+@app.post('/api/automode')
+async def api_automode_set(body: AutoModeRequest):
+    if body.enabled:
+        _auto_controller.enable(_worker, _last_prices, _last_data)
+    else:
+        _auto_controller.disable(_worker)
+    _push({
+        'type':           'auto_mode',
+        'enabled':        _auto_controller.enabled,
+        'last_action':    _auto_controller.last_action,
+        'last_action_ts': _auto_controller.last_action_ts,
+    })
+    return {'ok': True, 'enabled': _auto_controller.enabled}
 
 
 @app.get('/api/prices')
@@ -906,6 +958,16 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps({'type': 'consumption_forecast', 'payload': _last_consumption_forecast}))
         if _last_power_forecast:
             await ws.send_text(json.dumps({'type': 'power_forecast', 'payload': _last_power_forecast}))
+        # Send auto-mode state and command history
+        auto_cmds = await loop.run_in_executor(None, store.load_auto_commands, time.time() - 86_400)
+        if auto_cmds:
+            await ws.send_text(json.dumps({'type': 'auto_history', 'commands': auto_cmds}))
+        await ws.send_text(json.dumps({
+            'type':           'auto_mode',
+            'enabled':        _auto_controller.enabled,
+            'last_action':    _auto_controller.last_action,
+            'last_action_ts': _auto_controller.last_action_ts,
+        }))
         _ws_clients.add(ws)
         try:
             while True:

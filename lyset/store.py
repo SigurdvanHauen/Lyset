@@ -55,6 +55,12 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS daily_solar '
             '(date TEXT PRIMARY KEY, yield_kwh REAL, forecast_kwh REAL)'
         )
+        _con.execute(
+            # Auto-controller command log. mode is one of:
+            # 'export_unlimited' | 'export_limited' | 'grid_charge'
+            'CREATE TABLE IF NOT EXISTS auto_commands '
+            '(ts REAL, mode TEXT, detail TEXT)'
+        )
         _con.commit()
     return _con
 
@@ -231,6 +237,24 @@ def load_daily_solar(days: int = 30) -> list[dict]:
             (days,),
         ).fetchall()
     return [{'date': d, 'yield_kwh': y, 'forecast_kwh': f} for d, y, f in reversed(rows)]
+
+
+def save_auto_command(ts: float, mode: str, detail: str):
+    """Append one auto-controller decision to the command log."""
+    with _lock:
+        con = _get_con()
+        con.execute('INSERT INTO auto_commands VALUES (?, ?, ?)', (ts, mode, detail))
+        con.commit()
+
+
+def load_auto_commands(from_ts: float) -> list[dict]:
+    """Return auto-controller commands since from_ts (Unix seconds), oldest first."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts, mode, detail FROM auto_commands WHERE ts >= ? ORDER BY ts',
+            (from_ts,),
+        ).fetchall()
+    return [{'ts': ts, 'mode': mode, 'detail': detail} for ts, mode, detail in rows]
 
 
 def purge_power_outliers(threshold_w: float = 10_000) -> int:

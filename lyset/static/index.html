@@ -110,6 +110,9 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 
 #last-update { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; }
 
+#auto-btn { white-space: nowrap; }
+#auto-btn.on { background: #0d2e1a; border-color: var(--success); color: var(--success); font-weight: 700; }
+
 /* ── Tab bar ── */
 #tabbar {
   background: #161924;
@@ -322,6 +325,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <input type="number" id="c-poll"  value="10"   min="1" max="60"    style="width:54px">
   <button id="conn-btn" class="primary" onclick="toggleConnect()">Connect</button>
   <span id="status-badge">Disconnected</span>
+  <button id="auto-btn" onclick="toggleAutoMode()" title="Auto mode: let Lyset control export limits and battery charging based on prices">&#9881; Auto: OFF</button>
   <span id="last-update"></span>
 </div>
 
@@ -445,6 +449,13 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div class="card acc clickable" onclick="openStateChart()">
         <div class="card-top"><div class="card-lbl">System State</div><div class="card-times" id="t-d-istate"></div></div>
         <div class="card-val" style="font-size:12px" id="d-istate">&#8212;</div>
+      </div>
+      <div class="card acc clickable" onclick="openAutoChart()">
+        <div class="card-top">
+          <div class="card-lbl">Auto Mode</div>
+          <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
+        </div>
+        <div id="d-auto-action" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5;word-break:break-word">No commands yet</div>
       </div>
     </div>
 
@@ -691,6 +702,15 @@ let isConnected = false;
 const historyMap = {}; // dataKey → { ts: number[], val: number[] }
 let _modalChart = null;
 let _modalKey   = null;
+
+// ── Auto mode ─────────────────────────────────────────────────────────────────
+let _autoCommands = []; // [{ts, mode, detail}, ...]
+const AUTO_MODES = [
+  { label: 'PV Unrestricted', color: '#34D399' },  // 0: export_unlimited
+  { label: 'PV Limited',      color: '#F59E0B' },  // 1: export_limited
+  { label: 'Grid Charging',   color: '#4F8EF7' },  // 2: grid_charge
+];
+const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2 };
 let _smoothEnabled = true;   // default: smoothing on
 let _bandsEnabled  = true;   // default: confidence bands on
 
@@ -805,6 +825,8 @@ function dispatch(msg) {
     case 'solar_forecast':       onSolarForecast(msg.payload);      break;
     case 'consumption_forecast': onConsumptionForecast(msg.payload); break;
     case 'power_forecast':        onPowerForecast(msg.payload);      break;
+    case 'auto_mode':             onAutoMode(msg);                   break;
+    case 'auto_history':          onAutoHistory(msg.commands);        break;
   }
 }
 
@@ -1598,6 +1620,163 @@ function openStateChart() {
               const i = Math.round(v);
               return (Number.isInteger(v) && i >= 0 && i < n) ? COMPUTED_STATES[i].label : '';
             },
+          },
+          grid: { color: '#2D3555' },
+        },
+      },
+    },
+  });
+}
+
+// ── Auto mode ─────────────────────────────────────────────────────────────────
+
+function onAutoHistory(commands) {
+  _autoCommands = commands || [];
+}
+
+function onAutoMode(msg) {
+  const btn   = document.getElementById('auto-btn');
+  const badge = document.getElementById('d-auto-badge');
+  const action = document.getElementById('d-auto-action');
+
+  btn.textContent = msg.enabled ? '⚙ Auto: ON' : '⚙ Auto: OFF';
+  btn.className   = msg.enabled ? 'on' : '';
+
+  if (msg.enabled) {
+    badge.textContent = 'ON';
+    badge.style.color = 'var(--success)';
+    badge.style.borderColor = 'var(--success)';
+    badge.style.background = '#0d2e1a';
+  } else {
+    badge.textContent = 'OFF';
+    badge.style.color = 'var(--muted)';
+    badge.style.borderColor = 'var(--border)';
+    badge.style.background = 'var(--surf2)';
+  }
+
+  if (msg.last_action && msg.last_action !== '—') {
+    action.textContent = msg.last_action;
+    action.style.color = 'var(--text)';
+  }
+
+  // Append new command to local history if this message carries one
+  if (msg.cmd) {
+    _autoCommands.push(msg.cmd);
+    // Refresh chart if it's open
+    if (_modalChart && _modalKey === '_auto_mode') openAutoChart();
+  }
+}
+
+async function toggleAutoMode() {
+  const newState = document.getElementById('auto-btn').className !== 'on';
+  const r = await fetch('/api/automode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: newState }),
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    toast('Auto mode error: ' + (j.detail || r.status), 'terr');
+  }
+}
+
+function openAutoChart() {
+  const n = AUTO_MODES.length;
+
+  // Build stepped line: each command is the start of an interval
+  const pts = [];
+  for (const c of _autoCommands) {
+    pts.push({ x: c.ts * 1000, y: AUTO_MODE_IDX[c.mode] ?? 0, detail: c.detail });
+  }
+  // Extend the last segment to now
+  if (pts.length > 0) {
+    pts.push({ x: Date.now(), y: pts[pts.length - 1].y, detail: '(current)' });
+  }
+
+  document.getElementById('modal-title').textContent = 'Auto Mode — Command History';
+  document.getElementById('modal-fc-btn').style.display    = 'none';
+  document.getElementById('modal-bands-btn').style.display = 'none';
+  document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-overlay').classList.add('active');
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = '_auto_mode';
+
+  const tooltip = {
+    backgroundColor: '#1C2032', titleColor: '#8892AA',
+    bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
+    callbacks: {
+      title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+      label: ctx => {
+        const p = pts[ctx.dataIndex];
+        const modeLabel = AUTO_MODES[Math.round(ctx.parsed.y)]?.label ?? '—';
+        return p ? `${modeLabel}: ${p.detail}` : modeLabel;
+      },
+    },
+  };
+
+  if (pts.length === 0) {
+    // No commands yet — show empty chart with a message
+    _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+      type: 'line',
+      data: { datasets: [{ data: [], borderColor: '#34D399', borderWidth: 2 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: false },
+        },
+        scales: {
+          x: { type: 'linear', ticks: { color: '#8892AA' }, grid: { color: '#2D3555' } },
+          y: { min: 0, max: n - 0.5, ticks: { color: '#8892AA', stepSize: 1, callback: v => Number.isInteger(v) && v < n ? AUTO_MODES[v]?.label : '' }, grid: { color: '#2D3555' } },
+        },
+      },
+    });
+    return;
+  }
+
+  _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+    type: 'line',
+    data: {
+      datasets: [{
+        data: pts,
+        borderWidth: 2,
+        pointRadius: pts.map((_, i) => i === pts.length - 1 ? 0 : 4),
+        pointHoverRadius: 8,
+        fill: true,
+        stepped: 'before',
+        tension: 0,
+        segment: {
+          borderColor:     ctx => AUTO_MODES[Math.round(ctx.p1.parsed.y)]?.color,
+          backgroundColor: ctx => (AUTO_MODES[Math.round(ctx.p0.parsed.y)]?.color ?? '#888') + '22',
+        },
+        pointBackgroundColor: pts.map(p => AUTO_MODES[p.y]?.color ?? '#888'),
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip,
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 8,
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          min: 0, max: n - 0.5,
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, stepSize: 1,
+            callback: v => (Number.isInteger(v) && v >= 0 && v < n) ? AUTO_MODES[v].label : '',
           },
           grid: { color: '#2D3555' },
         },
