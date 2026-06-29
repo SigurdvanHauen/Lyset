@@ -5,11 +5,11 @@ Decision loop (every 15 s while enabled), in priority order:
 
 1. NEGATIVE EXPORT PRICE (export_dkk < −0.01 DKK/kWh)
    Battery force-charge to soak up PV instead of exporting at a negative price:
-      SoC < 95 %: force-charge at max rate (47086=1, 47079=5000 W, 47100=1)
+      SoC < 95 %: force-charge at max rate (47086=1, 47075/47247=5000 W, 47100=1)
       SoC ≥ 95 %: force-idle, neither charge nor discharge (47086=1, 47100=0)
 
 2. GRID CHARGE (import_dkk < future_max_import − CHARGE_MARGIN AND SoC < threshold)
-   Force-charge battery (47086=1, 47079=2500 W, 47100=1).
+   Force-charge battery (47086=1, 47075/47247=2500 W, 47100=1).
    Dynamic threshold: justifies charging whenever today/tomorrow has a significantly
    more expensive slot within CHARGE_HORIZON_H hours.
 
@@ -34,9 +34,16 @@ In steady state this means zero Modbus writes per tick.  Rewriting every registe
 every tick floods the SDongle (single TCP client), desyncs the Modbus transaction
 IDs, and triggers cascading "device busy" (exception 6) failures on reads too.
 
-Registers 40525/40527 (PV output limit) and 47075 (max charge power) are NOT
-writable through this SDongle firmware — they return Illegal Data Address — so the
-controller never writes them.  Charge rate is set via 47079 only.
+Registers 40525/40527 (PV output limit) are NOT writable through this SDongle
+firmware (Illegal Data Address) so the controller never writes them.
+
+Charge/discharge POWER is set through U32 registers — they MUST be written as
+two 16-bit words (write_u32), not one (write_u16 → Illegal Data Address):
+  • 47075 — maximum charge power (W)
+  • 47077 — maximum discharge power (W)
+  • 47247 — forcible charge/discharge power (W), the setpoint used when 47100
+            forces a charge or discharge. A low default here is what pins the
+            battery to ~200 W in forced mode regardless of the max-power caps.
 
 On disable → restore: 47100=0, 47087=0, 47086=4.
 """
@@ -244,7 +251,8 @@ class AutoController:
                 self._apply(worker, [
                     (16, 47087, 0,                   'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1,                   'AutoCtrl: mode=forced'),
-                    (32, 47079, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge cap {_MAX_FORCE_CHARGE_W} W'),
+                    (32, 47075, _MAX_FORCE_CHARGE_W, f'AutoCtrl: max charge power {_MAX_FORCE_CHARGE_W} W'),
+                    (32, 47247, _MAX_FORCE_CHARGE_W, f'AutoCtrl: forced charge power {_MAX_FORCE_CHARGE_W} W'),
                     (16, 47100, 1,                   'AutoCtrl: force CHARGE'),
                 ])
                 batt_detail = f'battery force-charging (SoC {batt_soc:.0f}%)'
@@ -272,10 +280,11 @@ class AutoController:
                     and future_max_import > import_dkk + _CHARGE_MARGIN_DKK):
                 self._grid_charging = True
                 self._apply(worker, [
-                    (16, 47087, 0,             'AutoCtrl: grid charge feature OFF'),
-                    (16, 47086, 1,             'AutoCtrl: mode=forced'),
-                    (32, 47079, _GRID_CHARGE_W, f'AutoCtrl: charge cap {_GRID_CHARGE_W} W'),
-                    (16, 47100, 1,             'AutoCtrl: force CHARGE'),
+                    (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
+                    (16, 47086, 1,              'AutoCtrl: mode=forced'),
+                    (32, 47075, _GRID_CHARGE_W, f'AutoCtrl: max charge power {_GRID_CHARGE_W} W'),
+                    (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
+                    (16, 47100, 1,              'AutoCtrl: force CHARGE'),
                 ])
                 detail = (f'Grid charging {_GRID_CHARGE_W} W '
                           f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
@@ -311,9 +320,11 @@ class AutoController:
             if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
                 self._grid_charging = False
                 self._apply(worker, [
-                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
-                    (16, 47086, 1, 'AutoCtrl: mode=forced'),
-                    (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
+                    (16, 47087, 0,              'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1,              'AutoCtrl: mode=forced'),
+                    (32, 47077, _GRID_CHARGE_W, f'AutoCtrl: max discharge power {_GRID_CHARGE_W} W'),
+                    (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced discharge power {_GRID_CHARGE_W} W'),
+                    (16, 47100, 2,              'AutoCtrl: force DISCHARGE'),
                 ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
@@ -328,10 +339,11 @@ class AutoController:
 
         if solar_surplus > 50 and pv_w > _MIN_PV_W:
             self._apply(worker, [
-                (16, 47087, 0,             'AutoCtrl: grid charge OFF'),
-                (16, 47086, 1,             'AutoCtrl: mode=forced'),
-                (32, 47079, _GRID_CHARGE_W, f'AutoCtrl: charge cap {_GRID_CHARGE_W} W'),
-                (16, 47100, 1,             'AutoCtrl: force CHARGE (SC)'),
+                (16, 47087, 0,              'AutoCtrl: grid charge OFF'),
+                (16, 47086, 1,              'AutoCtrl: mode=forced'),
+                (32, 47075, _GRID_CHARGE_W, f'AutoCtrl: max charge power {_GRID_CHARGE_W} W'),
+                (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
+                (16, 47100, 1,              'AutoCtrl: force CHARGE (SC)'),
             ])
             detail = (f'SC charging (PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {solar_surplus:.0f} W, SoC {batt_soc:.1f}%)')
