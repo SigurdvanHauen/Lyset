@@ -84,15 +84,11 @@ REGISTERS: list[Register] = [
     Register(37118,  1, 'U16',  100,  'Hz',  'Meter frequency',          'Meter',   'meter_frequency'),
 
     # ── Battery control state (written by auto-controller; polled to reflect live state) ──
-    # 47075: global max charge power cap (W) — overrides all other charge limits
-    # 47076: global max discharge power cap (W)
-    # 47079: grid-to-battery charge power limit (W) — only applies when 47087=1
     # 47086: 1=forced charge/discharge, 4=max self-consumption
     # 47087: 0=grid charge disabled, 1=grid charge enabled
     # 47100: 0=none, 1=force-charge, 2=force-discharge
-    Register(47075,  1, 'U16',  1,    'W',   'Max charge power',         'Control', 'batt_max_charge_w'),
-    Register(47076,  1, 'U16',  1,    'W',   'Max discharge power',      'Control', 'batt_max_discharge_w'),
-    Register(47079,  1, 'U16',  1,    'W',   'Grid charge power',        'Control', 'batt_grid_charge_w'),
+    # Note: 47075/47076 (max charge/discharge power) and 47098 (forced power) are
+    # NOT accessible via this SDongle firmware — they return Illegal Data Address.
     Register(47086,  1, 'U16',  1,    '',    'Battery working mode',     'Control', 'batt_working_mode'),
     Register(47087,  1, 'U16',  1,    '',    'Grid charge enable',       'Control', 'grid_charge_enable'),
     Register(47100,  1, 'U16',  1,    '',    'Forced charge/discharge',  'Control', 'batt_forced_mode'),

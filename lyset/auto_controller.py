@@ -4,14 +4,12 @@ AutoController — periodic optimizer for solar/battery control.
 Decision loop (every 15 s while enabled), in priority order:
 
 1. NEGATIVE EXPORT PRICE (export_dkk < −0.01 DKK/kWh)
-   a) Limit PV inverter output to household consumption (40525=2, 40527=house_load W)
-      — only written when solar is actually producing (pv_w > 300 W)
-   b) Battery — prevent discharge to grid:
+   Battery force-charge to soak up PV instead of exporting at a negative price:
       SoC < 95 %: force-charge at max rate (47086=1, 47079=5000 W, 47100=1)
       SoC ≥ 95 %: force-idle, neither charge nor discharge (47086=1, 47100=0)
 
 2. GRID CHARGE (import_dkk < future_max_import − CHARGE_MARGIN AND SoC < threshold)
-   Remove PV limit (40525=0), grid-charge battery (47087=1, 47079=2000 W, 47086=4, 47100=0).
+   Force-charge battery (47086=1, 47079=2500 W, 47100=1).
    Dynamic threshold: justifies charging whenever today/tomorrow has a significantly
    more expensive slot within CHARGE_HORIZON_H hours.
 
@@ -27,11 +25,20 @@ Decision loop (every 15 s while enabled), in priority order:
    saves more per kWh than the export round-trip gain.
 
 5. DEFAULT — max self-consumption
-   Solar surplus (pv > load + 50 W): forced charge at battery-rated max rate; grid
-   charge disabled (47087=0) so the inverter draws only from solar surplus.
+   Solar surplus (pv > load + 50 W): forced charge at battery-rated max rate.
    No surplus / no solar: mode 4 lets the inverter cover load from battery then grid.
 
-On disable → restore: 40525=0, 47100=0, 47087=0, 47086=4.
+Writes are STATE-GATED: each tick computes the desired register set and only the
+registers whose value differs from the last applied value are actually written.
+In steady state this means zero Modbus writes per tick.  Rewriting every register
+every tick floods the SDongle (single TCP client), desyncs the Modbus transaction
+IDs, and triggers cascading "device busy" (exception 6) failures on reads too.
+
+Registers 40525/40527 (PV output limit) and 47075 (max charge power) are NOT
+writable through this SDongle firmware — they return Illegal Data Address — so the
+controller never writes them.  Charge rate is set via 47079 only.
+
+On disable → restore: 47100=0, 47087=0, 47086=4.
 """
 import asyncio
 import logging
@@ -96,20 +103,47 @@ class AutoController:
     Disabled by default — call enable() to start controlling the system.
     """
 
+    # Force a full re-apply of all registers every Nth tick, so the controller
+    # recovers if the inverter state drifts (e.g. manual change, reconnect).
+    _RESYNC_EVERY = 20  # ticks (20 × 15 s = 5 min)
+
     def __init__(self):
         self.enabled:         bool            = False
         self.last_action:     str             = '—'
         self.last_action_ts:  Optional[float] = None
         self._on_command:     Optional[Callable[[str, str], None]] = None
         self._grid_charging:  bool            = False  # hysteresis state
+        self._applied:        dict[int, int]  = {}     # addr → last value written
+        self._tick:           int             = 0
 
     def set_command_callback(self, cb: Callable[[str, str], None]):
         self._on_command = cb
+
+    # ── State-gated register writes ───────────────────────────────────────────
+
+    def _apply(self, worker, regs: list[tuple]):
+        """
+        Write only the registers whose value changed since the last applied state.
+
+        `regs` is an ordered list of (width, address, value, description) tuples
+        (width is 16 or 32).  Order is preserved for changed registers so that
+        sequencing constraints (e.g. set forced mode before issuing the forced
+        command, clear the command before leaving forced mode) still hold.
+        """
+        for width, addr, val, desc in regs:
+            if self._applied.get(addr) == val:
+                continue
+            if width == 32:
+                worker.write_u32(addr, val, desc)
+            else:
+                worker.write_u16(addr, val, desc)
+            self._applied[addr] = val
 
     # ── Public control ────────────────────────────────────────────────────────
 
     def enable(self, worker, prices: list, last_data: dict):
         self.enabled = True
+        self._applied.clear()  # force a full re-apply on the first decision
         log.info('AutoCtrl: enabled')
         if worker and worker.is_alive() and prices and last_data:
             cmd = self._decide(worker, prices, last_data)
@@ -119,6 +153,7 @@ class AutoController:
     def disable(self, worker):
         self.enabled = False
         self._grid_charging = False
+        self._applied.clear()
         log.info('AutoCtrl: disabled — restoring defaults')
         if worker and worker.is_alive():
             self._restore_defaults(worker)
@@ -180,6 +215,12 @@ class AutoController:
             import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w,
         )
 
+        # Periodically clear the applied-state cache so the next _apply() re-asserts
+        # every register, recovering from any external drift in the inverter state.
+        self._tick += 1
+        if self._tick % self._RESYNC_EVERY == 0:
+            self._applied.clear()
+
         # Future price slots sorted ascending
         future_prices = sorted(
             (p for p in prices if p['ts'] > now_ms),
@@ -194,39 +235,35 @@ class AutoController:
         gc_threshold = _GRID_CHARGE_SOC_MAX if self._grid_charging else _GRID_CHARGE_SOC_START
 
         # ── 1. Negative export price ──────────────────────────────────────────
+        # Force-charge to soak up PV rather than export at a negative price.  The PV
+        # output limit (40525/40527) is not writable via this SDongle, so we cannot
+        # curtail PV — any surplus the battery can't absorb still exports.
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
-            if pv_w > _MIN_PV_W:
-                limit_w = max(int(house_load), 100)
-                worker.write_u16(40525, 2, 'AutoCtrl: W-limit mode')
-                worker.write_i32(40527, limit_w, f'AutoCtrl: PV limit {limit_w} W')
-                pv_detail = f'PV limited to {limit_w} W'
-            else:
-                pv_detail = 'Low solar'
-
-            worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
             if batt_soc < _FORCE_CHARGE_SOC_MAX:
-                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u16(47075, _MAX_FORCE_CHARGE_W, f'AutoCtrl: max charge {_MAX_FORCE_CHARGE_W} W')
-                worker.write_u32(47079, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge cap {_MAX_FORCE_CHARGE_W} W')
-                worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
-                batt_detail = f', battery force-charging (SoC {batt_soc:.0f}%)'
+                self._apply(worker, [
+                    (16, 47087, 0,                   'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1,                   'AutoCtrl: mode=forced'),
+                    (32, 47079, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge cap {_MAX_FORCE_CHARGE_W} W'),
+                    (16, 47100, 1,                   'AutoCtrl: force CHARGE'),
+                ])
+                batt_detail = f'battery force-charging (SoC {batt_soc:.0f}%)'
             else:
-                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
-                worker.write_u16(47100, 0, 'AutoCtrl: force IDLE')
-                batt_detail = f', battery idle — full (SoC {batt_soc:.0f}%)'
+                self._apply(worker, [
+                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                    (16, 47100, 0, 'AutoCtrl: force IDLE'),
+                    (16, 47086, 1, 'AutoCtrl: mode=forced (idle)'),
+                ])
+                batt_detail = f'battery idle — full (SoC {batt_soc:.0f}%)'
 
-            detail = f'{pv_detail} (export {export_dkk:.3f} DKK){batt_detail}'
+            detail = f'Negative export {export_dkk:.3f} DKK — {batt_detail}'
             return _Cmd(mode='export_limited', detail=detail)
 
         # ── 2. Grid charge: charge when this IS the cheapest upcoming window ─────
         # Condition: current price ≤ cheapest future slot + margin (we are at/near
         # the floor) AND there is a significantly more expensive period ahead that
-        # makes storing energy worthwhile.
-        # Uses forced-charge mode so self-consumption logic cannot discharge the
-        # battery against the charge at night. Both 47079 (grid-charge power cap)
-        # Register 47098 (forced-charge/discharge power) returns Illegal Data Address
-        # via the SDongle and is ignored. Only 47079 actually controls the charge cap.
+        # makes storing energy worthwhile.  Uses forced-charge mode so self-
+        # consumption logic cannot discharge the battery against the charge at night.
         charge_window = _window(_CHARGE_HORIZON_H)
         if charge_window and batt_soc < gc_threshold:
             future_min_import = min(p['import'] for p in charge_window)
@@ -234,11 +271,12 @@ class AutoController:
             if (import_dkk <= future_min_import + _CHARGE_MARGIN_DKK
                     and future_max_import > import_dkk + _CHARGE_MARGIN_DKK):
                 self._grid_charging = True
-                worker.write_u16(47087, 0, 'AutoCtrl: grid charge feature OFF')
-                worker.write_u16(47075, _GRID_CHARGE_W, f'AutoCtrl: max charge {_GRID_CHARGE_W} W')
-                worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid cap {_GRID_CHARGE_W} W')
-                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
+                self._apply(worker, [
+                    (16, 47087, 0,             'AutoCtrl: grid charge feature OFF'),
+                    (16, 47086, 1,             'AutoCtrl: mode=forced'),
+                    (32, 47079, _GRID_CHARGE_W, f'AutoCtrl: charge cap {_GRID_CHARGE_W} W'),
+                    (16, 47100, 1,             'AutoCtrl: force CHARGE'),
+                ])
                 detail = (f'Grid charging {_GRID_CHARGE_W} W '
                           f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
                           f'max {future_max_import:.3f} DKK, SoC {batt_soc:.0f}%)')
@@ -253,9 +291,11 @@ class AutoController:
             max_upcoming = max(p['import'] for p in hold_window)
             if max_upcoming > import_dkk + _HOLD_DELTA_DKK:
                 self._grid_charging = False
-                worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
-                worker.write_u16(47100, 0, 'AutoCtrl: force IDLE')
+                self._apply(worker, [
+                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                    (16, 47100, 0, 'AutoCtrl: force IDLE'),
+                    (16, 47086, 1, 'AutoCtrl: mode=forced (idle)'),
+                ])
                 detail = (f'Holding battery: peak {max_upcoming:.3f} DKK in ≤{_HOLD_HORIZON_H}h '
                           f'(now {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='hold_battery', detail=detail)
@@ -270,34 +310,39 @@ class AutoController:
             future_min_import = min(p['import'] for p in arbit_window)
             if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
                 self._grid_charging = False
-                worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-                worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
+                self._apply(worker, [
+                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1, 'AutoCtrl: mode=forced'),
+                    (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
+                ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='arbit_discharge', detail=detail)
 
         # ── 5. Default: max self-consumption ─────────────────────────────────
-        # Charge: forced at full battery rate; grid charge OFF means the inverter
-        # draws only from whatever solar surplus is available — no manual computation
-        # of surplus needed, the power balance caps it naturally.
-        # No surplus / no solar: mode 4 covers load from battery then grid.
+        # Solar surplus: force-charge at full rate; the power balance caps the
+        # actual charge to whatever surplus is available.  No surplus / no solar:
+        # mode 4 lets the inverter cover load from battery then grid natively.
         self._grid_charging = False
-        worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-
         solar_surplus = pv_w - house_load
 
         if solar_surplus > 50 and pv_w > _MIN_PV_W:
-            worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-            worker.write_u16(47075, _GRID_CHARGE_W, f'AutoCtrl: max charge {_GRID_CHARGE_W} W')
-            worker.write_u32(47079, _GRID_CHARGE_W, 'AutoCtrl: SC charge cap')
-            worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE (SC)')
+            self._apply(worker, [
+                (16, 47087, 0,             'AutoCtrl: grid charge OFF'),
+                (16, 47086, 1,             'AutoCtrl: mode=forced'),
+                (32, 47079, _GRID_CHARGE_W, f'AutoCtrl: charge cap {_GRID_CHARGE_W} W'),
+                (16, 47100, 1,             'AutoCtrl: force CHARGE (SC)'),
+            ])
             detail = (f'SC charging (PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {solar_surplus:.0f} W, SoC {batt_soc:.1f}%)')
             return _Cmd(mode='export_unlimited', detail=detail)
 
         # No solar surplus — mode 4 handles discharge to cover load and idle.
-        worker.write_u16(47100, 0, 'AutoCtrl: stop forced')
-        worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
+        # Clear the forced command before leaving forced mode (47100 then 47086).
+        self._apply(worker, [
+            (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+            (16, 47100, 0, 'AutoCtrl: stop forced'),
+            (16, 47086, 4, 'AutoCtrl: mode=max self-consumption'),
+        ])
         detail = (f'SC (PV {pv_w:.0f} W, load {house_load:.0f} W, SoC {batt_soc:.1f}%)')
         return _Cmd(mode='battery_idle', detail=detail)
