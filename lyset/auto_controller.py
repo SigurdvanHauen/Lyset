@@ -173,6 +173,13 @@ class AutoController:
         pv_w       = (data.get('pv1_power') or 0) + (data.get('pv2_power') or 0)
         house_load = data.get('house_load') or 0
         batt_soc   = data.get('batt_soc')   or 50.0
+        grid_w     = data.get('meter_active_power') or 0.0  # +import / -export
+        batt_w     = data.get('batt_power') or 0.0           # +charge / -discharge
+
+        log.info(
+            'AutoCtrl: import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW',
+            import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w,
+        )
 
         # Future price slots sorted ascending
         future_prices = sorted(
