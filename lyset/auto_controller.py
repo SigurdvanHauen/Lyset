@@ -40,10 +40,12 @@ Runs every 15 s while enabled and picks ONE action per tick, in priority order:
    near-full battery to grid during a surplus on this firmware, so a forced charge
    is used instead; excess PV exports (cap lifted) or is curtailed at a negative
    price. DEFICIT (PV ≤ load): true max self-consumption — mode 4 covers the load
-   natively (no fixed setpoint), grid charge held OFF (47087=0, read-back driven so
-   a dropped write can't leave it grid-charging), and the export cap (mode 6,
-   feed 0) blocks any grid export so mode 4 can't dump the battery. No grid in
-   either direction; the battery follows the house load.
+   natively (no fixed setpoint), targeting grid ≈ 0, with grid charge held OFF
+   (47087=0) and any forced command cleared (47100=0), both read-back driven so a
+   dropped write can't leave it grid-charging or stuck force-discharging to grid.
+   The export cap is NOT used here: it makes the firmware under-discharge and leave
+   a ~100 W import buffer, and the dump it guarded against was a stuck forced
+   command, now reliably cleared.
 
 WRITES ARE STATE-GATED — _apply() writes a register only when its value differs
 from the last applied value, so steady state issues zero Modbus writes per tick.
@@ -269,9 +271,10 @@ class AutoController:
     def _set_self_consumption(self, worker, data: dict):
         """
         Put the battery in true max self-consumption: cover the house load from the
-        battery natively (no fixed power setpoint), never charging from grid and
-        never exporting. The caller engages the export cap (47415) so the firmware
-        cannot dump the battery to grid in mode 4.
+        battery natively (no fixed power setpoint), targeting grid ≈ 0. Grid charge
+        is held OFF (no import to charge) and any forced command is cleared (so a
+        stuck force-discharge can't dump the battery to grid — the real cause of the
+        earlier −2500 W "dump").
 
         DRIVEN OFF THE LIVE READ-BACK (47086/47087/47100 are polled), NOT the
         optimistic _applied cache. The SDongle drops writes intermittently; the cache
@@ -522,10 +525,13 @@ class AutoController:
         # battery to grid during a surplus on this firmware.
         #
         # DEFICIT (PV ≤ load): true max self-consumption — mode 4 covers the load
-        # natively (no fixed setpoint), grid charge is held OFF so it can't import to
-        # charge, and the export cap (mode 6, feed 0) blocks any grid export so it
-        # can't dump the battery. No grid in either direction; the battery just
-        # follows the house load.
+        # natively (no fixed setpoint), targeting grid ≈ 0. The export cap is LIFTED
+        # here: with the cap (mode 6, feed 0) the firmware under-discharges to
+        # guarantee zero export, leaving a ~100 W import buffer (batt −400 W while the
+        # deficit was 488 W). The earlier −2500 W "dump" was actually a stuck forced
+        # discharge (47100=2 at 2500 W) whose clear write had dropped — now that
+        # _set_self_consumption clears 47100=0 via read-back, the dump can't recur, so
+        # the cap isn't needed and only gets in the way of clean load-following.
         self._grid_charging = False
         if surplus_w > 100 and pv_w > _MIN_PV_W:
             self._set_export_limit(worker, False, data)   # let excess PV export
@@ -534,9 +540,9 @@ class AutoController:
                       f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
             return _Cmd(mode='export_unlimited', detail=detail)
-        self._set_export_limit(worker, True, data)        # no grid export (cap dump)
+        self._set_export_limit(worker, False, data)       # native mode 4: grid ≈ 0
         self._set_self_consumption(worker, data)
-        detail = (f'Self-consumption: battery covers load, no grid import/export '
+        detail = (f'Self-consumption: battery follows load natively (mode 4) '
                   f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                   f'deficit {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
         return _Cmd(mode='sc_discharge', detail=detail)
