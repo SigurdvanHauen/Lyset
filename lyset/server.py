@@ -82,6 +82,8 @@ _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 # Accumulator: collect 10-s Modbus samples within the current 15-min slot
 _slot_samples: list[float] = []   # watts values
 _slot_key: int = -1               # int(ts_utc / 900)
+# One-shot battery-sign diagnostic (see _on_data): counts captured samples.
+_disch_diag: dict = {'n': 0}
 _backfill_done: bool = False      # run historical prediction backfill once per process
 _last_batt_soc: float | None = None  # used to detect single-poll SoC outliers
 _last_batt_soc_ts: float = 0.0      # unix timestamp of last accepted SoC reading
@@ -487,6 +489,27 @@ def _on_data(data: dict):
             _slot_key = key
         else:
             _slot_samples.append(grid_import_w)
+
+    # ── One-shot battery-sign diagnostic ─────────────────────────────────────
+    # Settles whether house_load's `− batt_power` term correctly counts an
+    # overnight battery-supplied standby as load. When PV≈0 and the battery is
+    # clearly moving power, log the raw terms a handful of times then go quiet.
+    # If batt_power is NEGATIVE while discharging, the formula is right and the
+    # overnight zeros are just stale seed (will heal). If POSITIVE, the sign is
+    # flipped and house_load is wrongly clamped to 0. (Formula: modbus_client.py)
+    if _disch_diag['n'] < 8:
+        pv_w = clean.get('active_power')
+        bp   = clean.get('batt_power')
+        if pv_w is not None and bp is not None and pv_w < 50 and abs(bp) > 100:
+            _disch_diag['n'] += 1
+            log.info(
+                'DISCHARGE-DIAG #%d: active_power=%s meter_active_power=%s '
+                'batt_power=%s house_load=%s  [batt sign: %s]',
+                _disch_diag['n'], pv_w, clean.get('meter_active_power'),
+                bp, clean.get('house_load'),
+                'NEGATIVE = discharge (formula correct)' if bp < 0
+                else 'POSITIVE = discharge (sign flipped!)',
+            )
 
     # Save and push power forecast whenever we have all prerequisites.
     # Re-simulate only when the anchor SoC shifts by ≥ 1 % to avoid pushing
