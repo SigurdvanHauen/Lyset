@@ -285,13 +285,15 @@ def _simulate_soc(
 
             if do_neg:
                 # Negative export → charge from surplus only (never import, never
-                # discharge). Surplus beyond the battery's max rate still exports.
+                # discharge). The export-limit overlay (47415=zero export) curtails
+                # any surplus beyond the battery's max rate, so net feed-in is 0:
+                # grid_kw is clamped to ≥0 (no export) for the forecast.
                 gc_active  = False
                 if soc >= FORCE_CHARGE_SOC_MAX or net_kw <= 0:
                     batt_kw = 0.0
                 else:
                     batt_kw = min(net_kw, max_power_kw)
-                grid_kw    = batt_kw - net_kw
+                grid_kw    = max(0.0, batt_kw - net_kw)  # surplus remainder curtailed, not exported
                 energy_kwh = batt_kw * 0.5 * charge_eff
 
             elif do_gc:

@@ -3,13 +3,19 @@ AutoController — periodic optimizer for solar/battery control.
 
 Runs every 15 s while enabled and picks ONE action per tick, in priority order:
 
+0. EXPORT LIMITATION (overlay, every tick) — register 47415.
+   Whenever export is priced negative, set Active Power Control to mode 5
+   ("zero-power grid connection"): the inverter caps net feed-in to 0 W,
+   curtailing PV surplus beyond the battery's charge rate and never exporting
+   battery energy. This is what finally stops export when surplus > battery max.
+   Lifted (mode 0) in every other regime so the grid can be used freely.
+
 1. NEGATIVE EXPORT (export < −0.01 DKK/kWh)
-   Force-charge the battery (47086=1, 47075+47247, 47100=1) to soak up the PV
-   surplus rather than feed the grid.  Mode 4 will discharge the battery to grid
-   here on this firmware, so we force a charge to guarantee the battery only ever
-   absorbs.  PV cannot be curtailed via Modbus, so surplus beyond the battery's
-   charge rate is still exported at the negative price — but we never add battery
-   power to that export.  Battery full → force-idle (still no discharge to grid).
+   Force-charge the battery (47086=1, 47247, 47100=1) to soak up the PV surplus.
+   Combined with the export-limit overlay above this guarantees zero export: the
+   battery absorbs up to its max rate and mode 5 curtails the rest. The forced
+   charge is belt-and-suspenders — even if this firmware ignored 47415 the
+   battery still soaks surplus up to its max rate. Battery full → force-idle.
 
 2. GRID CHARGE (now at/near the cheapest of the next CHARGE_HORIZON_H h, a
    materially pricier slot ahead, SoC below threshold)
@@ -78,6 +84,12 @@ FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
 MAX_FORCE_CHARGE_W    = 5000    # W — legacy; inverter clamps to rated max
 BATT_MAX_CHARGE_W     = 2500    # W — LUNA2000-5kWh physical max charge rate (C/2)
 
+# Active Power Control (register 47415) — grid export limitation.
+EXPORT_LIMIT_MODE_UNLIMITED = 0   # normal: grid used freely (charge/arbitrage OK)
+EXPORT_LIMIT_MODE_ZERO      = 5   # zero-power grid connection: net feed-in capped
+                                  # to 0 W — inverter curtails surplus PV beyond the
+                                  # battery's charge rate and never exports battery.
+
 # ── Look-ahead optimisation parameters ───────────────────────────────────────
 ARBIT_MARGIN_DKK    = 0.10   # export must exceed future cheapest import by at least this
 MIN_SOC_ARBIT       = 20.0   # minimum SoC before allowing arbitrage discharge
@@ -100,6 +112,8 @@ _GRID_CHARGE_W        = GRID_CHARGE_W
 _FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
 _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
 _BATT_MAX_CHARGE_W    = BATT_MAX_CHARGE_W
+_EXPORT_LIMIT_MODE_UNLIMITED = EXPORT_LIMIT_MODE_UNLIMITED
+_EXPORT_LIMIT_MODE_ZERO      = EXPORT_LIMIT_MODE_ZERO
 _ARBIT_MARGIN_DKK     = ARBIT_MARGIN_DKK
 _MIN_SOC_ARBIT        = MIN_SOC_ARBIT
 _ARBIT_HORIZON_H      = ARBIT_HORIZON_H
@@ -160,6 +174,27 @@ class AutoController:
                 worker.write_u16(addr, val, desc)
             self._applied[addr] = val
 
+    def _set_export_limit(self, worker, zero_export: bool):
+        """
+        Grid export limitation via Active Power Control (register 47415).
+
+        zero_export=True  → mode 5 ("zero-power grid connection"): the inverter
+          caps net feed-in to 0 W. It curtails PV beyond what the battery + load
+          can absorb and refuses to discharge the battery to grid. This is the
+          ONLY way to stop export when PV surplus exceeds the battery's max charge
+          rate — the same mechanism FusionSolar / IntelliCharge use.
+        zero_export=False → mode 0 ("unlimited"): normal operation. Required so
+          grid charge, arbitrage discharge and self-consumption can use the grid.
+
+        State-gated by _apply(), so 47415 is written only on a transition, never
+        every tick — no flooding of the single-client SDongle.
+        """
+        mode = _EXPORT_LIMIT_MODE_ZERO if zero_export else _EXPORT_LIMIT_MODE_UNLIMITED
+        self._apply(worker, [
+            (16, 47415, mode, f'AutoCtrl: active power ctrl mode={mode} '
+                              f'({"zero export" if zero_export else "unlimited"})'),
+        ])
+
     # ── Public control ────────────────────────────────────────────────────────
 
     def enable(self, worker, prices: list, last_data: dict):
@@ -204,6 +239,8 @@ class AutoController:
         worker.write_u16(47100, 0, 'AutoCtrl OFF: stop forced mode')
         worker.write_u16(47087, 0, 'AutoCtrl OFF: disable grid charge')
         worker.write_u16(47086, 4, 'AutoCtrl OFF: mode=max self-consumption')
+        worker.write_u16(47415, _EXPORT_LIMIT_MODE_UNLIMITED,
+                         'AutoCtrl OFF: export limit unlimited')
 
     def _record(self, cmd: _Cmd):
         self.last_action    = cmd.detail
@@ -249,6 +286,16 @@ class AutoController:
         self._tick += 1
         if self._tick % self._RESYNC_EVERY == 0:
             self._applied.clear()
+
+        # Grid export limitation overlay (independent of the battery branch below).
+        # Whenever export is priced negative, cap net feed-in to 0 W so surplus PV
+        # beyond the battery's charge rate is curtailed instead of exported at a
+        # loss. Every other regime (incl. arbitrage, which only fires on a GOOD
+        # export price) runs with the limit lifted so the grid can be used freely.
+        # The negative-export branch below additionally force-charges the battery,
+        # so even if this firmware ignores 47415 the battery still soaks up surplus
+        # up to its max rate (belt-and-suspenders).
+        self._set_export_limit(worker, export_dkk < _NEGATIVE_EXPORT_DKK)
 
         # Future price slots sorted ascending
         future_prices = sorted(

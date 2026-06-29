@@ -92,6 +92,20 @@ REGISTERS: list[Register] = [
     Register(47086,  1, 'U16',  1,    '',    'Battery working mode',     'Control', 'batt_working_mode'),
     Register(47087,  1, 'U16',  1,    '',    'Grid charge enable',       'Control', 'grid_charge_enable'),
     Register(47100,  1, 'U16',  1,    '',    'Forced charge/discharge',  'Control', 'batt_forced_mode'),
+
+    # ── Active Power Control / export limitation (zero-export to grid) ────────
+    # 47415: active power control mode — 0=unlimited, 1=DI scheduling,
+    #        5=zero-power grid connection (no export), 6=power-limited (kW via
+    #        47416), 7=power-limited (% via 47418). Mode 5 is how FusionSolar /
+    #        IntelliCharge implement "do not export": the inverter curtails PV
+    #        beyond what battery+load absorb and never feeds battery to grid.
+    # 47416: max feed-in to grid in W (I32), used when mode=6.
+    # 47418: max feed-in to grid in % of rated (I16, gain 10), used when mode=7.
+    # Polled read-only here so the dashboard/log can confirm the write took effect
+    # on this SDongle firmware (read-back verification).
+    Register(47415,  1, 'U16',  1,    '',    'Active power ctrl mode',   'Control', 'active_power_mode'),
+    Register(47416,  2, 'I32',  1,    'W',   'Max feed-in to grid',      'Control', 'max_feed_grid_w'),
+    Register(47418,  1, 'I16',  10,   '%',   'Max feed-in to grid %',    'Control', 'max_feed_grid_pct'),
 ]
 
 # Quick lookup by key
