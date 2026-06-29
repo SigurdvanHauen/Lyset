@@ -604,10 +604,14 @@ async def lifespan(app: FastAPI):
 
     handler = _WebLogHandler()
     handler.setLevel(logging.DEBUG)
-    for name in ('lyset', 'pymodbus'):
+    for name in ('lyset',):
         logger = logging.getLogger(name)
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
+    # pymodbus is noisy; attach the handler but default to WARNING
+    _pm_logger = logging.getLogger('pymodbus')
+    _pm_logger.setLevel(logging.WARNING)
+    _pm_logger.addHandler(handler)
 
     store.init()
     purged = store.purge_power_outliers()
@@ -1058,6 +1062,14 @@ async def api_ha_snapshot():
         'solar_forecast_today': solar_forecast_today,
         'prices_today':         prices_today,
     }
+
+
+@app.post('/api/pymodbus-logs')
+async def api_pymodbus_logs(body: dict):
+    enabled = bool(body.get('enabled', False))
+    level = logging.DEBUG if enabled else logging.WARNING
+    logging.getLogger('pymodbus').setLevel(level)
+    return {'enabled': enabled}
 
 
 @app.get('/api/state')
