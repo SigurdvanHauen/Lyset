@@ -75,7 +75,9 @@ except Exception:  # pragma: no cover — fallback if tz database is unavailable
 log = logging.getLogger(__name__)
 
 # ── Thresholds (also imported by server.py for the SoC simulation) ────────────
-NEGATIVE_EXPORT_DKK   = -0.01   # export below → limit PV and stop battery discharge
+NEGATIVE_EXPORT_DKK   = 0.0     # export below 0 → curtail PV feed-in and force-charge
+                                # (any negative export means we'd PAY to export — never
+                                # do it; the −0.007 DKK case slipped a −0.01 dead-band)
 MIN_PV_W              = 300     # below this, don't bother writing a PV limit
 CHEAP_IMPORT_DKK      = 0.50    # legacy constant — kept for _simulate_soc in server.py
 GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresis low)
@@ -223,6 +225,42 @@ class AutoController:
                 worker.write_u16(47415, _EXPORT_LIMIT_MODE_UNLIMITED,
                                  'AutoCtrl: active power ctrl mode=0 (unlimited)')
 
+    def _charge_from_surplus(self, worker, surplus_w: float, batt_soc: float) -> str:
+        """
+        Force-charge the battery from the PV surplus (never from grid), or idle it
+        when full / when there is no surplus. Returns a human-readable detail string.
+
+        This is the safe replacement for mode 4 during a SURPLUS. In forced-charge
+        mode (47086=1, 47100=1) the battery physically cannot discharge to grid —
+        which is the whole point: this firmware's mode 4 dumps a near-full battery
+        straight to grid during a solar surplus (observed SoC 97 %, batt −2500 W to
+        grid, at a negative price). Forcing a charge preserves the stored energy for
+        the evening import peak / a high export price, while still letting the battery
+        soak up surplus it has room for. Excess PV beyond the battery's max charge
+        rate exports normally, or is curtailed by the export-limit overlay when the
+        export price is negative.
+
+        Charge power tracks the surplus (capped to the battery's max rate) so we
+        never pull from the grid, quantised to 100 W so small PV jitter doesn't
+        rewrite 47247 every tick.
+        """
+        if batt_soc < _FORCE_CHARGE_SOC_MAX and surplus_w > 100:
+            charge_w = min(int(round(surplus_w / 100.0)) * 100, _BATT_MAX_CHARGE_W)
+            self._apply(worker, [
+                (16, 47087, 0,        'AutoCtrl: grid charge OFF'),
+                (16, 47086, 1,        'AutoCtrl: mode=forced'),
+                (32, 47247, charge_w, f'AutoCtrl: forced charge power {charge_w} W'),
+                (16, 47100, 1,        'AutoCtrl: force CHARGE'),
+            ])
+            return f'charging {charge_w} W from surplus'
+        self._apply(worker, [
+            (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+            (16, 47086, 1, 'AutoCtrl: mode=forced'),
+            (16, 47100, 0, 'AutoCtrl: force IDLE'),
+        ])
+        reason = 'full' if batt_soc >= _FORCE_CHARGE_SOC_MAX else 'no surplus'
+        return f'idle ({reason})'
+
     # ── Public control ────────────────────────────────────────────────────────
 
     def enable(self, worker, prices: list, last_data: dict):
@@ -360,37 +398,15 @@ class AutoController:
         ]
 
         # ── 1. Negative export → force-charge from the SURPLUS only ───────────
-        # At a negative export price we must not feed the grid. Mode 4 on this
-        # firmware can discharge the battery to grid here, so we force a charge —
-        # but at the surplus power (pv − load), NOT a fixed rate. Forcing a fixed
-        # 2500 W when the surplus is smaller would pull the difference from the grid
-        # (importing at the positive import price). Charging exactly the surplus
-        # (capped to the battery's max rate) absorbs what would otherwise be exported
-        # without importing. Any surplus beyond the battery's max rate is still
-        # exported (PV can't be curtailed via this SDongle). No surplus or battery
-        # full → force-idle (never discharge to grid at a negative price).
+        # At a negative export price we must not feed the grid. The export-limit
+        # overlay above curtails surplus PV beyond the battery, and here we force a
+        # charge so the battery soaks up what it can and can never discharge to grid.
+        # Charge power tracks the surplus (never imports); full / no surplus → idle.
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
-            if batt_soc < _FORCE_CHARGE_SOC_MAX and surplus_w > 100:
-                # Quantise to 100 W so small surplus jitter doesn't rewrite 47247 every tick
-                charge_w = min(int(round(surplus_w / 100.0)) * 100, _BATT_MAX_CHARGE_W)
-                self._apply(worker, [
-                    (16, 47087, 0,        'AutoCtrl: grid charge OFF'),
-                    (16, 47086, 1,        'AutoCtrl: mode=forced'),
-                    (32, 47247, charge_w, f'AutoCtrl: forced charge power {charge_w} W'),
-                    (16, 47100, 1,        'AutoCtrl: force CHARGE'),
-                ])
-                batt_detail = f'force-charging {charge_w} W from surplus (SoC {batt_soc:.0f}%)'
-            else:
-                self._apply(worker, [
-                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
-                    (16, 47086, 1, 'AutoCtrl: mode=forced'),
-                    (16, 47100, 0, 'AutoCtrl: force IDLE'),
-                ])
-                reason = 'full' if batt_soc >= _FORCE_CHARGE_SOC_MAX else 'no surplus'
-                batt_detail = f'battery idle ({reason}, SoC {batt_soc:.0f}%)'
-            detail = (f'Negative export {export_dkk:.3f} DKK — {batt_detail} '
-                      f'(PV {pv_w:.0f} W, load {house_load:.0f} W)')
+            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc)
+            detail = (f'Negative export {export_dkk:.3f} DKK — battery {batt_detail} '
+                      f'(SoC {batt_soc:.0f}%, PV {pv_w:.0f} W, load {house_load:.0f} W)')
             return _Cmd(mode='export_limited', detail=detail)
 
         # ── 2. Grid charge: bank cheap energy for a pricier period ────────────
@@ -462,13 +478,27 @@ class AutoController:
                           f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='arbit_discharge', detail=detail)
 
-        # ── 5. Default: maximise self-consumption (mode 4) ────────────────────
-        # The inverter's native mode does exactly what we want: charge the battery
-        # from any solar surplus (at the full surplus rate), discharge it to cover
-        # load, and use the grid only for the remainder — never exporting battery
-        # energy nor importing to charge. No power setpoints to get wrong.
+        # ── 5. Default: self-consumption ──────────────────────────────────────
+        # SURPLUS (PV > load): do NOT use mode 4 — this firmware discharges a
+        # near-full battery to grid in mode 4 during a surplus (observed −2500 W to
+        # grid at 97 % SoC), selling stored energy for a pittance (or paying to
+        # export). Force a charge-from-surplus instead: the battery stores what it
+        # can and cannot be dumped to grid; excess PV exports (or is curtailed at a
+        # negative price). This keeps the charge for the evening import peak / a high
+        # export price, which is where it is worth far more.
+        #
+        # DEFICIT (PV ≤ load): mode 4 is correct and safe — the battery discharges
+        # only to cover house load (there is no surplus to export), i.e. exactly the
+        # "spend it in the evening instead of importing" behaviour we want.
         self._grid_charging = False
+        if surplus_w > 100:
+            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc)
+            detail = (f'Self-consumption: battery {batt_detail} '
+                      f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
+                      f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
+            return _Cmd(mode='export_unlimited', detail=detail)
         self._apply(worker, seq_self_consumption)
-        detail = (f'Self-consumption (PV {pv_w:.0f} W, load {house_load:.0f} W, '
-                  f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
+        detail = (f'Self-consumption: battery covers load '
+                  f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
+                  f'deficit {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
         return _Cmd(mode='export_unlimited', detail=detail)
