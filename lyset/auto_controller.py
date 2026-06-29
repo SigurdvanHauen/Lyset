@@ -1,7 +1,7 @@
 """
 AutoController — periodic optimizer for solar/battery control.
 
-Decision loop (every 60 s while enabled), in priority order:
+Decision loop (every 15 s while enabled), in priority order:
 
 1. NEGATIVE EXPORT PRICE (export_dkk < −0.01 DKK/kWh)
    a) Limit PV inverter output to household consumption (40525=2, 40527=house_load W)
@@ -60,7 +60,7 @@ HOLD_HORIZON_H      = 6      # hours ahead to scan for an expensive upcoming slo
 MAX_HOLD_IMPORT_DKK = 1.50   # only hold battery when current import is below this
 MIN_SOC_HOLD        = 20.0   # minimum SoC required to bother holding
 
-_EVAL_INTERVAL_S = 60
+_EVAL_INTERVAL_S = 15
 
 # Private aliases for internal use
 _NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
@@ -287,7 +287,7 @@ class AutoController:
 
         solar_surplus = pv_w - house_load  # + = more solar than load
 
-        if solar_surplus > 200 and pv_w > _MIN_PV_W:
+        if solar_surplus > 50 and pv_w > _MIN_PV_W:
             # Solar surplus: charge battery from excess solar
             charge_w = min(int(solar_surplus), _GRID_CHARGE_W)
             worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
