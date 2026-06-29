@@ -487,6 +487,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
         Plan combines Solcast solar, the learned consumption model, electricity prices and the
         auto-mode controller's decision logic. Battery SOC is on the right axis.
+        Click any legend item to show/hide that line &mdash; import/export price are hidden by default.
       </div>
     </div>
 
@@ -2014,6 +2015,31 @@ const PLAN_SERIES = [
   { key: 'exp',     label: 'Grid export',  color: '#22D3EE', fill: false },
 ];
 
+// Price overlay lines (DKK/kWh, right axis) — toggled on demand, hidden by default.
+const PLAN_PRICE_SERIES = [
+  { key: 'priceImp', label: 'Import price', color: '#F472B6' },
+  { key: 'priceExp', label: 'Export price', color: '#FACC15' },
+];
+
+// Per-series visibility, persisted across reloads. Power lines + SOC default on,
+// price overlays default off.
+const _planVisible = (() => {
+  const def = {};
+  for (const s of PLAN_SERIES) def[s.key] = true;
+  def.soc = true;
+  for (const s of PLAN_PRICE_SERIES) def[s.key] = false;
+  try { Object.assign(def, JSON.parse(localStorage.getItem('planVisible') || '{}')); } catch (e) {}
+  return def;
+})();
+
+function setPlanVisible(key, vis) {
+  _planVisible[key] = vis;
+  try { localStorage.setItem('planVisible', JSON.stringify(_planVisible)); } catch (e) {}
+  refreshPlanChart();
+  renderPlanLegend();
+}
+function togglePlanSeries(key) { setPlanVisible(key, !_planVisible[key]); }
+
 // Past measured series in kW: pull from historyMap, keep only ts ≤ now, smooth in
 // W (integer-rounded), then convert to kW. `pick` maps signed W → the W value we want.
 function _planPastKW(histKey, pick) {
@@ -2085,6 +2111,7 @@ function buildPlanDatasets() {
     tension: 0.3,
     spanGaps: true,
     yAxisID: 'y',
+    hidden: !_planVisible[s.key],
     segment: { borderDash: planDash },
   }));
 
@@ -2101,19 +2128,51 @@ function buildPlanDatasets() {
     tension: 0.3,
     spanGaps: true,
     yAxisID: 'ySoc',
+    hidden: !_planVisible.soc,
     segment: { borderDash: planDash },
   });
+
+  // Price overlays on the third (right) axis — DKK/kWh, hidden by default.
+  const impPx = _pricesData.map(p => ({ x: p.ts, y: p.import }));
+  const expPx = _pricesData.map(p => ({ x: p.ts, y: p.export }));
+  const pxData = { priceImp: impPx, priceExp: expPx };
+  for (const s of PLAN_PRICE_SERIES) {
+    datasets.push({
+      label: s.label,
+      data: pxData[s.key],
+      borderColor: s.color,
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
+      stepped: 'before',
+      spanGaps: true,
+      yAxisID: 'yPrice',
+      hidden: !_planVisible[s.key],
+      segment: { borderDash: planDash },
+    });
+  }
   return datasets;
 }
 
 function renderPlanLegend() {
   const el = document.getElementById('plan-legend');
   if (!el) return;
-  const items = [...PLAN_SERIES, { label: 'Battery SOC', color: '#9CA3AF' }];
-  el.innerHTML = items.map(s =>
-    `<span style="display:flex;align-items:center;gap:6px">
+  const items = [
+    ...PLAN_SERIES,
+    { key: 'soc', label: 'Battery SOC', color: '#9CA3AF' },
+    ...PLAN_PRICE_SERIES,
+  ];
+  el.innerHTML = items.map(s => {
+    const on = _planVisible[s.key] !== false;
+    return `<span data-key="${s.key}" role="button" title="Click to toggle"
+       style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;opacity:${on ? 1 : 0.35}">
        <span style="width:22px;height:3px;background:${s.color};display:inline-block;border-radius:2px"></span>${s.label}
-     </span>`).join('');
+     </span>`;
+  }).join('');
+  el.querySelectorAll('[data-key]').forEach(node =>
+    node.addEventListener('click', () => togglePlanSeries(node.dataset.key)));
 }
 
 // Vertical "now" marker
@@ -2155,8 +2214,10 @@ function renderPlanChart() {
           callbacks: {
             title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }),
             label: ctx => {
-              const unit = ctx.dataset.yAxisID === 'ySoc' ? '%' : ' kW';
-              return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(ctx.dataset.yAxisID === 'ySoc' ? 0 : 2)}${unit}`;
+              const ax = ctx.dataset.yAxisID;
+              if (ax === 'ySoc')   return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)}%`;
+              if (ax === 'yPrice') return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} DKK/kWh`;
+              return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} kW`;
             },
           },
         },
@@ -2187,6 +2248,13 @@ function renderPlanChart() {
           position: 'right',
           min: 0, max: 100,
           title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid: { drawOnChartArea: false },
+        },
+        yPrice: {
+          position: 'right',
+          display: () => _planVisible.priceImp || _planVisible.priceExp,
+          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { drawOnChartArea: false },
         },
