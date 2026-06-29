@@ -93,6 +93,8 @@ GRID_CHARGE_W         = 2500    # W — grid charge rate
 FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
 MAX_FORCE_CHARGE_W    = 5000    # W — legacy; inverter clamps to rated max
 BATT_MAX_CHARGE_W     = 2500    # W — LUNA2000-5kWh physical max charge rate (C/2)
+BATT_MAX_DISCHARGE_W  = 2500    # W — full discharge rate; asserted on 47077 so mode 4
+                                # self-consumption isn't pinned to a low max-discharge limit
 
 # Active Power Control (register 47415) — grid export limitation.
 # Verified against wlcrs/huawei-solar-lib: ActivePowerControlMode enum.
@@ -128,6 +130,7 @@ _GRID_CHARGE_W        = GRID_CHARGE_W
 _FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
 _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
 _BATT_MAX_CHARGE_W    = BATT_MAX_CHARGE_W
+_BATT_MAX_DISCHARGE_W = BATT_MAX_DISCHARGE_W
 _EXPORT_LIMIT_MODE_UNLIMITED = EXPORT_LIMIT_MODE_UNLIMITED
 _EXPORT_LIMIT_MODE_ZERO      = EXPORT_LIMIT_MODE_ZERO
 _EXPORT_LIMIT_MODE_WATT      = EXPORT_LIMIT_MODE_WATT
@@ -304,6 +307,30 @@ class AutoController:
         if wm is not None and int(round(wm)) != 4:
             worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
 
+    def _ensure_power_limits(self, worker, data: dict):
+        """
+        Keep the battery's max charge / max discharge power (47075 / 47077) at the
+        full rate. These are GLOBAL limits that cap the battery in every mode — a low
+        max-discharge-power pins mode 4 self-consumption to a trickle (observed:
+        −400 W discharge while the deficit was 600 W, ~215 W imported). The forced
+        branches used to set them only when forcing; asserting them here makes them
+        right in mode 4 too.
+
+        Read-back driven where the SDongle exposes the registers (re-issue only when
+        the polled value is wrong); optimistic fallback (state-gated _apply) when they
+        don't read back, so they're still set at least once per resync.
+        """
+        for addr, key, target in (
+            (47075, 'max_charge_power',    _BATT_MAX_CHARGE_W),
+            (47077, 'max_discharge_power', _BATT_MAX_DISCHARGE_W),
+        ):
+            cur = data.get(key)
+            if cur is None:
+                self._apply(worker, [(32, addr, target, f'AutoCtrl: {key}={target} W')])
+            elif int(round(cur)) != target:
+                worker.write_u32(addr, target, f'AutoCtrl: {key}={target} W')
+                self._applied[addr] = target
+
     # ── Public control ────────────────────────────────────────────────────────
 
     def enable(self, worker, prices: list, last_data: dict):
@@ -397,10 +424,14 @@ class AutoController:
         apc_lbl  = f'{int(apc_mode)}' if apc_mode is not None else '?'
         feed_w   = data.get('max_feed_grid_w')
         feed_lbl = f'{feed_w:.0f}' if feed_w is not None else '?'
+        # Max discharge limit read-back — if this is low (e.g. 400 W) it caps mode 4
+        # self-consumption no matter what; '?' means the SDongle won't read it back.
+        dis_lim  = data.get('max_discharge_power')
+        dis_lbl  = f'{dis_lim:.0f}' if dis_lim is not None else '?'
 
         log.info(
-            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s  feed=%sW',
-            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w, apc_lbl, feed_lbl,
+            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s  feed=%sW  disLim=%sW',
+            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w, apc_lbl, feed_lbl, dis_lbl,
         )
 
         # Periodically clear the applied-state cache so the next _apply() re-asserts
@@ -408,6 +439,10 @@ class AutoController:
         self._tick += 1
         if self._tick % self._RESYNC_EVERY == 0:
             self._applied.clear()
+
+        # Keep the battery's max charge/discharge power at the full rate in every mode
+        # (a low max-discharge-power pins mode 4 self-consumption to a trickle).
+        self._ensure_power_limits(worker, data)
 
         # Grid export limitation (47415) is decided PER BRANCH below, each calling
         # _set_export_limit exactly once before returning — so at most one export
@@ -460,7 +495,6 @@ class AutoController:
                 self._apply(worker, [
                     (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
                     (16, 47086, 1,              'AutoCtrl: mode=forced'),
-                    (32, 47075, _GRID_CHARGE_W, f'AutoCtrl: max charge power {_GRID_CHARGE_W} W'),
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
                     (16, 47100, 1,              'AutoCtrl: force CHARGE'),
                 ])
@@ -508,7 +542,6 @@ class AutoController:
                 self._apply(worker, [
                     (16, 47087, 0,              'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1,              'AutoCtrl: mode=forced'),
-                    (32, 47077, _GRID_CHARGE_W, f'AutoCtrl: max discharge power {_GRID_CHARGE_W} W'),
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced discharge power {_GRID_CHARGE_W} W'),
                     (16, 47100, 2,              'AutoCtrl: force DISCHARGE'),
                 ])

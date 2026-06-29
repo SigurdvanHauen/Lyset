@@ -87,11 +87,16 @@ REGISTERS: list[Register] = [
     # 47086: 1=forced charge/discharge, 4=max self-consumption
     # 47087: 0=grid charge disabled, 1=grid charge enabled
     # 47100: 0=none, 1=force-charge, 2=force-discharge
-    # Note: 47075/47076 (max charge/discharge power) and 47098 (forced power) are
-    # NOT accessible via this SDongle firmware — they return Illegal Data Address.
+    # 47075/47077 (U32, W): max charge / max discharge power. These are GLOBAL limits
+    # that cap the battery in EVERY mode incl. mode 4 — a low max-discharge-power pins
+    # self-consumption discharge (e.g. -400 W while the deficit is 600 W). Polled so the
+    # controller can read them back and re-assert the full rate. (47098 = forced power is
+    # NOT accessible — Illegal Data Address; use 47247 instead.)
     Register(47086,  1, 'U16',  1,    '',    'Battery working mode',     'Control', 'batt_working_mode'),
     Register(47087,  1, 'U16',  1,    '',    'Grid charge enable',       'Control', 'grid_charge_enable'),
     Register(47100,  1, 'U16',  1,    '',    'Forced charge/discharge',  'Control', 'batt_forced_mode'),
+    Register(47075,  2, 'U32',  1,    'W',   'Max charge power',         'Control', 'max_charge_power'),
+    Register(47077,  2, 'U32',  1,    'W',   'Max discharge power',      'Control', 'max_discharge_power'),
 
     # ── Active Power Control / export limitation (zero-export to grid) ────────
     # 47415: active power control mode — 0=unlimited, 1=DI scheduling,
