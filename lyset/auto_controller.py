@@ -273,21 +273,47 @@ class AutoController:
                           f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='arbit_discharge', detail=detail)
 
-        # ── 5. Default: max self-consumption ──────────────────────────────────
-        # Clear forced-command registers BEFORE switching working mode:
-        # 1. Stop forced direction (47100=0) while still in forced mode
-        # 2. Zero the forced power (47098=0) so any residual discharge stops
-        # 3. Switch working mode to max self-consumption (47086=4)
-        inv_mode   = int(data.get('batt_working_mode', -1))
-        inv_forced = int(data.get('batt_forced_mode',  -1))
-        log.info('AutoCtrl: inverter reports mode=%d forced=%d — writing max self-consumption',
-                 inv_mode, inv_forced)
+        # ── 5. Default: self-consumption via explicit forced commands ─────────
+        # Mode 4 ("Maximise self-consumption") on this firmware discharges at the
+        # last forced-rate (e.g. 2500 W after arbit_discharge) rather than limiting
+        # to house load, causing unwanted battery-to-grid export.  We implement SC
+        # ourselves using forced mode with three sub-states:
+        #   • Solar surplus  → charge at surplus rate (never import for charging)
+        #   • Load deficit   → discharge at min(deficit, house_load) — zero export
+        #   • Balanced/idle  → force-idle, no battery action
         self._grid_charging = False
         worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
         worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
-        worker.write_u16(47100, 0, 'AutoCtrl: stop forced mode')
+
+        solar_surplus = pv_w - house_load  # + = more solar than load
+
+        if solar_surplus > 200 and pv_w > _MIN_PV_W:
+            # Solar surplus: charge battery from excess solar
+            charge_w = min(int(solar_surplus), _GRID_CHARGE_W)
+            worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
+            worker.write_u32(47098, charge_w, f'AutoCtrl: SC charge {charge_w} W')
+            worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE (SC)')
+            detail = (f'SC charging {charge_w} W '
+                      f'(PV {pv_w:.0f} W, load {house_load:.0f} W)')
+            return _Cmd(mode='export_unlimited', detail=detail)
+
+        if house_load > 50 and solar_surplus < 0 and batt_soc > 10.0:
+            # Load deficit: discharge at deficit rate, hard-capped to house_load
+            # so we never push battery power to the grid.
+            discharge_w = min(int(-solar_surplus), int(house_load), _GRID_CHARGE_W)
+            worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
+            worker.write_u32(47098, discharge_w, f'AutoCtrl: SC discharge {discharge_w} W')
+            worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE (SC)')
+            detail = (f'SC discharging {discharge_w} W '
+                      f'(load {house_load:.0f} W, PV {pv_w:.0f} W, '
+                      f'import {import_dkk:.3f} DKK)')
+            return _Cmd(mode='sc_discharge', detail=detail)
+
+        # Balanced or battery too low: force-idle
+        worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
         worker.write_u32(47098, 0, 'AutoCtrl: clear forced power')
-        worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
-        detail = (f'Max self-consumption '
-                  f'(export {export_dkk:.3f} DKK, import {import_dkk:.3f} DKK)')
-        return _Cmd(mode='export_unlimited', detail=detail)
+        worker.write_u16(47100, 0, 'AutoCtrl: force IDLE')
+        detail = (f'Battery idle '
+                  f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
+                  f'import {import_dkk:.3f} DKK)')
+        return _Cmd(mode='battery_idle', detail=detail)

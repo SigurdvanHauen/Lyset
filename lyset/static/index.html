@@ -719,8 +719,10 @@ const AUTO_MODES = [
   { label: 'Grid Charging',    color: '#4F8EF7' },  // 2: grid_charge
   { label: 'Hold Battery',     color: '#A78BFA' },  // 3: hold_battery
   { label: 'Arb. Discharge',   color: '#F87171' },  // 4: arbit_discharge
+  { label: 'SC Discharge',     color: '#6EE7B7' },  // 5: sc_discharge
+  { label: 'Battery Idle',     color: '#6B7280' },  // 6: battery_idle
 ];
-const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4 };
+const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4, sc_discharge: 5, battery_idle: 6 };
 let _smoothEnabled = true;   // default: smoothing on
 let _bandsEnabled  = true;   // default: confidence bands on
 
