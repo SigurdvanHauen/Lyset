@@ -3,12 +3,13 @@ AutoController — periodic optimizer for solar/battery control.
 
 Runs every 15 s while enabled and picks ONE action per tick, in priority order:
 
-0. EXPORT LIMITATION (overlay, every tick) — register 47415.
-   Whenever export is priced negative, set Active Power Control to mode 5
-   ("zero-power grid connection"): the inverter caps net feed-in to 0 W,
-   curtailing PV surplus beyond the battery's charge rate and never exporting
-   battery energy. This is what finally stops export when surplus > battery max.
-   Lifted (mode 0) in every other regime so the grid can be used freely.
+0. EXPORT LIMITATION (overlay, every tick) — registers 47415 + 47416.
+   Whenever export is priced negative, set Active Power Control to mode 6
+   ("power-limited grid connection, W") with the feed-in cap 47416 = 0 W: the
+   inverter caps net feed-in to 0 W, curtailing PV surplus beyond the battery's
+   charge rate and never exporting battery energy. This is the dynamic-limit path
+   FusionSolar / IntelliCharge use. Lifted (mode 0) in every other regime so the
+   grid can be used freely.
 
 1. NEGATIVE EXPORT (export < −0.01 DKK/kWh)
    Force-charge the battery (47086=1, 47247, 47100=1) to soak up the PV surplus.
@@ -85,10 +86,16 @@ MAX_FORCE_CHARGE_W    = 5000    # W — legacy; inverter clamps to rated max
 BATT_MAX_CHARGE_W     = 2500    # W — LUNA2000-5kWh physical max charge rate (C/2)
 
 # Active Power Control (register 47415) — grid export limitation.
+# Verified against wlcrs/huawei-solar-lib: ActivePowerControlMode enum.
 EXPORT_LIMIT_MODE_UNLIMITED = 0   # normal: grid used freely (charge/arbitrage OK)
-EXPORT_LIMIT_MODE_ZERO      = 5   # zero-power grid connection: net feed-in capped
-                                  # to 0 W — inverter curtails surplus PV beyond the
-                                  # battery's charge rate and never exports battery.
+EXPORT_LIMIT_MODE_ZERO      = 5   # "zero-power grid connection" (no 47416 needed)
+EXPORT_LIMIT_MODE_WATT      = 6   # "power-limited grid connection (W)": cap net
+                                  # feed-in to the watts in 47416. With 47416=0 this
+                                  # is FusionSolar's "Grid connection with limited
+                                  # power" = 0 kW, the dynamic-curtailment path
+                                  # IntelliCharge uses. Inverter curtails surplus PV
+                                  # beyond the battery's charge rate and never exports.
+EXPORT_LIMIT_FEED_W         = 0   # W — feed-in cap applied while limiting (0 = none)
 
 # ── Look-ahead optimisation parameters ───────────────────────────────────────
 ARBIT_MARGIN_DKK    = 0.10   # export must exceed future cheapest import by at least this
@@ -114,6 +121,8 @@ _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
 _BATT_MAX_CHARGE_W    = BATT_MAX_CHARGE_W
 _EXPORT_LIMIT_MODE_UNLIMITED = EXPORT_LIMIT_MODE_UNLIMITED
 _EXPORT_LIMIT_MODE_ZERO      = EXPORT_LIMIT_MODE_ZERO
+_EXPORT_LIMIT_MODE_WATT      = EXPORT_LIMIT_MODE_WATT
+_EXPORT_LIMIT_FEED_W         = EXPORT_LIMIT_FEED_W
 _ARBIT_MARGIN_DKK     = ARBIT_MARGIN_DKK
 _MIN_SOC_ARBIT        = MIN_SOC_ARBIT
 _ARBIT_HORIZON_H      = ARBIT_HORIZON_H
@@ -176,24 +185,34 @@ class AutoController:
 
     def _set_export_limit(self, worker, zero_export: bool):
         """
-        Grid export limitation via Active Power Control (register 47415).
+        Grid export limitation via Active Power Control (registers 47415 + 47416).
 
-        zero_export=True  → mode 5 ("zero-power grid connection"): the inverter
-          caps net feed-in to 0 W. It curtails PV beyond what the battery + load
-          can absorb and refuses to discharge the battery to grid. This is the
-          ONLY way to stop export when PV surplus exceeds the battery's max charge
-          rate — the same mechanism FusionSolar / IntelliCharge use.
+        zero_export=True  → mode 6 ("power-limited grid connection, W") with the
+          feed-in cap 47416 = 0 W. The inverter caps net feed-in at 0 W: it
+          curtails PV beyond what the battery + load can absorb and refuses to
+          discharge the battery to grid. This is the dynamic-limit mechanism
+          FusionSolar's "Grid connection with limited power" and IntelliCharge use,
+          and it is honoured more widely on older firmware than the zero-power
+          mode (5). The cap (47416) is written BEFORE the mode (47415) so the limit
+          is already in place the instant the mode engages.
         zero_export=False → mode 0 ("unlimited"): normal operation. Required so
           grid charge, arbitrage discharge and self-consumption can use the grid.
 
-        State-gated by _apply(), so 47415 is written only on a transition, never
-        every tick — no flooding of the single-client SDongle.
+        State-gated by _apply(), so the registers are written only on a transition,
+        never every tick — no flooding of the single-client SDongle.
         """
-        mode = _EXPORT_LIMIT_MODE_ZERO if zero_export else _EXPORT_LIMIT_MODE_UNLIMITED
-        self._apply(worker, [
-            (16, 47415, mode, f'AutoCtrl: active power ctrl mode={mode} '
-                              f'({"zero export" if zero_export else "unlimited"})'),
-        ])
+        if zero_export:
+            self._apply(worker, [
+                (32, 47416, _EXPORT_LIMIT_FEED_W,
+                 f'AutoCtrl: max feed-in {_EXPORT_LIMIT_FEED_W} W'),
+                (16, 47415, _EXPORT_LIMIT_MODE_WATT,
+                 'AutoCtrl: active power ctrl mode=6 (limited feed-in)'),
+            ])
+        else:
+            self._apply(worker, [
+                (16, 47415, _EXPORT_LIMIT_MODE_UNLIMITED,
+                 'AutoCtrl: active power ctrl mode=0 (unlimited)'),
+            ])
 
     # ── Public control ────────────────────────────────────────────────────────
 
@@ -276,14 +295,18 @@ class AutoController:
         except Exception:
             slot_lbl = '?'
 
-        # Live Active Power Control mode (read back from 47415) — confirms whether
-        # the inverter actually accepted the export-limit write (5 = zero export).
+        # Live Active Power Control read-back (47415 mode + 47416 feed cap) — confirms
+        # whether the inverter actually accepted the export-limit write (mode 6,
+        # feed 0 W = limiting). apc=6/feed=0 while still exporting → firmware ignores
+        # it; apc unchanged → write rejected.
         apc_mode = data.get('active_power_mode')
         apc_lbl  = f'{int(apc_mode)}' if apc_mode is not None else '?'
+        feed_w   = data.get('max_feed_grid_w')
+        feed_lbl = f'{feed_w:.0f}' if feed_w is not None else '?'
 
         log.info(
-            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s',
-            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w, apc_lbl,
+            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s  feed=%sW',
+            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w, apc_lbl, feed_lbl,
         )
 
         # Periodically clear the applied-state cache so the next _apply() re-asserts
