@@ -7,7 +7,7 @@ Decision loop (every 15 s while enabled), in priority order:
    a) Limit PV inverter output to household consumption (40525=2, 40527=house_load W)
       — only written when solar is actually producing (pv_w > 300 W)
    b) Battery — prevent discharge to grid:
-      SoC < 95 %: force-charge at max rate (47086=1, 47098=5000 W, 47100=1)
+      SoC < 95 %: force-charge at max rate (47086=1, 47079=5000 W, 47100=1)
       SoC ≥ 95 %: force-idle, neither charge nor discharge (47086=1, 47100=0)
 
 2. GRID CHARGE (import_dkk < future_max_import − CHARGE_MARGIN AND SoC < threshold)
@@ -210,7 +210,6 @@ class AutoController:
             if batt_soc < _FORCE_CHARGE_SOC_MAX:
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
                 worker.write_u32(47079, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge cap {_MAX_FORCE_CHARGE_W} W')
-                worker.write_u16(47098, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge {_MAX_FORCE_CHARGE_W} W')
                 worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
                 batt_detail = f', battery force-charging (SoC {batt_soc:.0f}%)'
             else:
@@ -227,8 +226,8 @@ class AutoController:
         # makes storing energy worthwhile.
         # Uses forced-charge mode so self-consumption logic cannot discharge the
         # battery against the charge at night. Both 47079 (grid-charge power cap)
-        # and 47098 (forced-charge power) are written to avoid a stale 47079 cap
-        # limiting the actual charge rate.
+        # Register 47098 (forced-charge/discharge power) returns Illegal Data Address
+        # via the SDongle and is ignored. Only 47079 actually controls the charge cap.
         charge_window = _window(_CHARGE_HORIZON_H)
         if charge_window and batt_soc < gc_threshold:
             future_min_import = min(p['import'] for p in charge_window)
@@ -240,7 +239,6 @@ class AutoController:
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge feature OFF')
                 worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid cap {_GRID_CHARGE_W} W')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u16(47098, _GRID_CHARGE_W, f'AutoCtrl: charge {_GRID_CHARGE_W} W')
                 worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
                 detail = (f'Grid charging {_GRID_CHARGE_W} W '
                           f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
@@ -277,7 +275,6 @@ class AutoController:
                 worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u16(47098, _GRID_CHARGE_W, f'AutoCtrl: discharge {_GRID_CHARGE_W} W')
                 worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
@@ -297,7 +294,6 @@ class AutoController:
         if solar_surplus > 50 and pv_w > _MIN_PV_W:
             worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
             worker.write_u32(47079, _GRID_CHARGE_W, 'AutoCtrl: SC charge cap')
-            worker.write_u16(47098, _GRID_CHARGE_W, 'AutoCtrl: SC charge power')
             worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE (SC)')
             detail = (f'SC charging (PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {solar_surplus:.0f} W, SoC {batt_soc:.1f}%)')
