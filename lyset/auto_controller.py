@@ -276,9 +276,14 @@ class AutoController:
         except Exception:
             slot_lbl = '?'
 
+        # Live Active Power Control mode (read back from 47415) — confirms whether
+        # the inverter actually accepted the export-limit write (5 = zero export).
+        apc_mode = data.get('active_power_mode')
+        apc_lbl  = f'{int(apc_mode)}' if apc_mode is not None else '?'
+
         log.info(
-            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW',
-            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w,
+            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s',
+            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w, apc_lbl,
         )
 
         # Periodically clear the applied-state cache so the next _apply() re-asserts
