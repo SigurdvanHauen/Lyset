@@ -472,14 +472,18 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Plan (auto-mode behaviour: actuals + AI plan) -->
   <div id="panel-plan" class="panel">
-    <div class="sec">
-      AI Plan &amp; Historical Data
-      <span id="plan-auto-badge" style="float:right;font-size:10px;padding:2px 10px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);text-transform:none;font-weight:600;letter-spacing:0">Auto OFF</span>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+      <span id="plan-auto-badge" style="font-size:10px;padding:2px 10px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);text-transform:none;font-weight:600;letter-spacing:0">Auto OFF</span>
     </div>
 
-    <div class="sec" style="margin-top:16px">Power Flow &amp; Battery Plan</div>
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div style="display:flex;flex-wrap:wrap;gap:12px 18px;margin-bottom:12px;font-size:11px" id="plan-legend"></div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
+        <div style="display:flex;gap:8px;flex-shrink:0">
+          <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
+          <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
+        </div>
+      </div>
       <div style="position:relative;height:420px">
         <canvas id="plan-chart"></canvas>
       </div>
@@ -491,8 +495,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
-    <div class="sec" style="margin-top:16px">Electricity Prices</div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-top:16px">
       <div style="display:flex;flex-wrap:wrap;gap:12px 18px;margin-bottom:12px;font-size:11px">
         <span style="display:flex;align-items:center;gap:6px">
           <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>Import (all-in incl. VAT)
@@ -744,6 +747,21 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   </div>
 </div>
 
+<!-- ── Plan smoothing settings ── -->
+<div id="plan-smooth-overlay" onclick="planSmoothOverlayClick(event)"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;min-width:260px;max-width:90vw">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="font-weight:600">Smooth which lines?</div>
+      <button class="modal-close" onclick="closePlanSmoothSettings()">&#215;</button>
+    </div>
+    <div id="plan-smooth-list" style="display:flex;flex-direction:column;gap:10px;font-size:13px"></div>
+    <div style="font-size:10px;color:var(--muted);margin-top:14px;line-height:1.5">
+      The master <b>Smooth</b> button must be on for any of these to take effect.
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -781,7 +799,7 @@ let _smoothEnabled = true;   // default: smoothing on
 let _bandsEnabled  = true;   // default: confidence bands on
 
 // Centered moving average; null points are skipped but their x is preserved.
-function smoothPoints(pts, halfWin) {
+function smoothPoints(pts, halfWin, round = true) {
   if (pts.length < 3 || halfWin < 1) return pts;
   return pts.map((p, i) => {
     if (p.y == null) return p;
@@ -791,7 +809,9 @@ function smoothPoints(pts, halfWin) {
     for (let j = lo; j <= hi; j++) {
       if (pts[j].y != null) { sum += pts[j].y; n++; }
     }
-    return { x: p.x, y: n > 0 ? Math.round(sum / n) : p.y };
+    if (n === 0) return p;
+    const avg = sum / n;
+    return { x: p.x, y: round ? Math.round(avg) : avg };
   });
 }
 
@@ -2040,16 +2060,82 @@ function setPlanVisible(key, vis) {
 }
 function togglePlanSeries(key) { setPlanVisible(key, !_planVisible[key]); }
 
+// ── Plan smoothing: a master toggle plus a per-line choice (persisted). Default
+// on for every line except the two price overlays. ───────────────────────────
+const PLAN_SMOOTH_ITEMS = [
+  ...PLAN_SERIES,
+  { key: 'soc', label: 'Battery SOC', color: '#9CA3AF' },
+  ...PLAN_PRICE_SERIES,
+];
+let _planSmoothEnabled = true;
+const _planSmooth = (() => {
+  const def = {};
+  for (const s of PLAN_SMOOTH_ITEMS) def[s.key] = s.key !== 'priceImp' && s.key !== 'priceExp';
+  try { Object.assign(def, JSON.parse(localStorage.getItem('planSmooth') || '{}')); } catch (e) {}
+  return def;
+})();
+try { const v = localStorage.getItem('planSmoothEnabled'); if (v !== null) _planSmoothEnabled = v === '1'; } catch (e) {}
+
+function planSmoothOn(key) { return _planSmoothEnabled && _planSmooth[key] !== false; }
+
+function savePlanSmooth() {
+  try {
+    localStorage.setItem('planSmooth', JSON.stringify(_planSmooth));
+    localStorage.setItem('planSmoothEnabled', _planSmoothEnabled ? '1' : '0');
+  } catch (e) {}
+}
+
+function updatePlanSmoothBtn() {
+  const btn = document.getElementById('plan-smooth-btn');
+  if (!btn) return;
+  btn.textContent = 'Smooth: ' + (_planSmoothEnabled ? 'On' : 'Off');
+  btn.style.borderColor = _planSmoothEnabled ? 'var(--accent)' : 'var(--border)';
+}
+
+function togglePlanSmooth() {
+  _planSmoothEnabled = !_planSmoothEnabled;
+  savePlanSmooth();
+  updatePlanSmoothBtn();
+  refreshPlanChart();
+}
+
+function openPlanSmoothSettings() {
+  const list = document.getElementById('plan-smooth-list');
+  if (list) {
+    list.innerHTML = PLAN_SMOOTH_ITEMS.map(s =>
+      `<label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+         <input type="checkbox" data-key="${s.key}" ${_planSmooth[s.key] !== false ? 'checked' : ''}>
+         <span style="width:16px;height:3px;background:${s.color};display:inline-block;border-radius:2px"></span>
+         ${s.label}
+       </label>`).join('');
+    list.querySelectorAll('input[data-key]').forEach(cb =>
+      cb.addEventListener('change', () => {
+        _planSmooth[cb.dataset.key] = cb.checked;
+        savePlanSmooth();
+        refreshPlanChart();
+      }));
+  }
+  const ov = document.getElementById('plan-smooth-overlay');
+  if (ov) ov.style.display = 'flex';
+}
+function closePlanSmoothSettings() {
+  const ov = document.getElementById('plan-smooth-overlay');
+  if (ov) ov.style.display = 'none';
+}
+function planSmoothOverlayClick(e) {
+  if (e.target.id === 'plan-smooth-overlay') closePlanSmoothSettings();
+}
+
 // Past measured series in kW: pull from historyMap, keep only ts ≤ now, smooth in
 // W (integer-rounded), then convert to kW. `pick` maps signed W → the W value we want.
-function _planPastKW(histKey, pick) {
+function _planPastKW(histKey, pick, seriesKey) {
   const now = Date.now();
   const h = historyMap[histKey] || { ts: [], val: [] };
   let pts = [];
   for (let i = 0; i < h.ts.length; i++) {
     if (h.ts[i] <= now) pts.push({ x: h.ts[i], y: pick(h.val[i]) });
   }
-  pts = _smoothEnabled ? smoothPoints(pts, 30) : pts;
+  pts = planSmoothOn(seriesKey) ? smoothPoints(pts, 30) : pts;
   return pts.map(p => ({ x: p.x, y: p.y == null ? null : p.y / 1000 }));
 }
 
@@ -2065,17 +2151,17 @@ function _planFutKW(arr, pick) {
 // Assemble the {x,y} arrays for every plan series (past actual ⨝ future plan).
 function buildPlanSeries() {
   const W = {
-    solar: [ _planPastKW('active_power',      v => v),
+    solar: [ _planPastKW('active_power',      v => v, 'solar'),
              _planFutKW(_solcastData,         r => r.pv_w  != null ? r.pv_w  / 1000 : null) ],
-    load:  [ _planPastKW('house_load',        v => v),
+    load:  [ _planPastKW('house_load',        v => v, 'load'),
              _planFutKW(_consumptionForecast, r => r.w     != null ? r.w     / 1000 : null) ],
-    chg:   [ _planPastKW('batt_power',        v => Math.max(v, 0)),
+    chg:   [ _planPastKW('batt_power',        v => Math.max(v, 0), 'chg'),
              _planFutKW(_powerForecast,       r => r.batt_w != null ? Math.max(r.batt_w, 0) / 1000 : null) ],
-    dis:   [ _planPastKW('batt_power',        v => Math.max(-v, 0)),
+    dis:   [ _planPastKW('batt_power',        v => Math.max(-v, 0), 'dis'),
              _planFutKW(_powerForecast,       r => r.batt_w != null ? Math.max(-r.batt_w, 0) / 1000 : null) ],
-    imp:   [ _planPastKW('meter_active_power', v => Math.max(v, 0)),
+    imp:   [ _planPastKW('meter_active_power', v => Math.max(v, 0), 'imp'),
              _planFutKW(_powerForecast,       r => r.grid_w != null ? Math.max(r.grid_w, 0) / 1000 : null) ],
-    exp:   [ _planPastKW('meter_active_power', v => Math.max(-v, 0)),
+    exp:   [ _planPastKW('meter_active_power', v => Math.max(-v, 0), 'exp'),
              _planFutKW(_powerForecast,       r => r.grid_w != null ? Math.max(-r.grid_w, 0) / 1000 : null) ],
   };
   const out = {};
@@ -2089,7 +2175,8 @@ function buildPlanSeries() {
   const socFut = _powerForecast
     .filter(r => r.ts_ms >= now && r.soc != null)
     .map(r => ({ x: r.ts_ms, y: r.soc }));
-  out.soc = socPast.concat(socFut);
+  const socPastS = planSmoothOn('soc') ? smoothPoints(socPast, 30) : socPast;
+  out.soc = socPastS.concat(socFut);
   return out;
 }
 
@@ -2137,9 +2224,10 @@ function buildPlanDatasets() {
   const expPx = _pricesData.map(p => ({ x: p.ts, y: p.export }));
   const pxData = { priceImp: impPx, priceExp: expPx };
   for (const s of PLAN_PRICE_SERIES) {
+    const pd = planSmoothOn(s.key) ? smoothPoints(pxData[s.key], 30, false) : pxData[s.key];
     datasets.push({
       label: s.label,
-      data: pxData[s.key],
+      data: pd,
       borderColor: s.color,
       backgroundColor: 'transparent',
       borderWidth: 2,
@@ -2193,6 +2281,7 @@ const _planNowLine = {
 
 function renderPlanChart() {
   renderPlanLegend();
+  updatePlanSmoothBtn();
   const canvas = document.getElementById('plan-chart');
   if (!canvas) return;
   if (_planChart) { _planChart.destroy(); _planChart = null; }
