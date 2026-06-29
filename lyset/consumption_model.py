@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -31,6 +32,20 @@ _SLOTS_TOTAL   = 7 * _SLOTS_PER_DAY   # 672
 _DEFAULT_ALPHA = 0.10   # EWM learning rate — faster adaptation than old 0.05
 _SEED_CAP      = 30     # max effective count after seeding
 _HALF_LIFE_DAYS = 14.0  # recency decay: data 14 days old gets half the weight
+
+# The house always draws at least this (standby/always-on loads). Predictions are
+# floored to it so slots that still hold the stale D06 net-import seed (≈0 W
+# overnight, because the battery used to cover the standby) — or slots with no data
+# yet — don't forecast an unphysical ~0 W. Non-destructive: the floor is applied to
+# predictions only, so the learned profile keeps converging to the true value and
+# this just stops the forecast (and the SoC simulation) from dropping below standby.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+_MIN_STANDBY_W = _env_float('CONSUMPTION_MIN_STANDBY_W', 300.0)
 
 
 def _local_idx(dt_local: datetime) -> int:
@@ -170,8 +185,10 @@ class ConsumptionModel:
         Generate n_slots × 15-min predictions starting from from_ts_utc.
 
         Returns list of {'ts_ms': int, 'w': float|None, 'p10_w': float|None, 'p90_w': float|None}.
-        Slots with no observations return w=p10_w=p90_w=None.
-        p10/p90 use ±1.28σ (normal approximation) and are omitted when count < 5.
+        Every slot returns at least the standby floor (_MIN_STANDBY_W) for 'w', even
+        with no observations — the house always draws standby, so a None/0 W forecast
+        is never physical.  p10/p90 use ±1.28σ (normal approximation) and are omitted
+        when count < 5.
         """
         slot_sec = 900  # 15 min
         t   = int(from_ts_utc / slot_sec) * slot_sec
@@ -182,15 +199,17 @@ class ConsumptionModel:
             idx      = _local_idx(dt_local)
             if self.counts[idx] > 0:
                 mean = float(self.profile[idx])
-                w    = round(mean, 1)
+                w    = round(max(mean, _MIN_STANDBY_W), 1)
                 if self.counts[idx] >= 5 and self.variance[idx] > 0:
                     std  = math.sqrt(float(self.variance[idx]))
-                    p10  = round(max(0.0, mean - 1.28 * std), 1)
-                    p90  = round(mean + 1.28 * std, 1)
+                    p10  = round(max(_MIN_STANDBY_W, mean - 1.28 * std), 1)
+                    p90  = round(max(w, mean + 1.28 * std), 1)
                 else:
                     p10 = p90 = None
             else:
-                w = p10 = p90 = None
+                # No data for this slot yet — forecast the standby baseline.
+                w   = round(_MIN_STANDBY_W, 1)
+                p10 = p90 = None
             out.append({'ts_ms': ts_utc_i * 1000, 'w': w, 'p10_w': p10, 'p90_w': p90})
         return out
 
