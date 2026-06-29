@@ -3,13 +3,13 @@ AutoController — periodic optimizer for solar/battery control.
 
 Runs every 15 s while enabled and picks ONE action per tick, in priority order:
 
-0. EXPORT LIMITATION (per-branch) — registers 47415 + 47416.
-   Each branch sets Active Power Control once before returning. Capped to mode 6
-   ("power-limited grid connection, W") with feed-in 47416 = 0 W when we must not
-   export — a negative price (curtail PV surplus) or self-consumption (so mode 4
-   can't dump the battery to grid). Lifted (mode 0) when we want the grid:
-   arbitrage discharge and surplus PV export at a good price. This is the
-   dynamic-limit path FusionSolar / IntelliCharge use.
+0. EXPORT LIMITATION (per-branch) — register 47415.
+   Each branch sets Active Power Control once before returning. Set to mode 5
+   ("zero-power grid connection" = FusionSolar's "Zero Export Limitation") when we
+   must not export — a negative price (curtail PV surplus) or self-consumption (so
+   the inverter covers the load from the battery and never exports). Lifted
+   (mode 0) when we want the grid: arbitrage discharge and surplus PV export at a
+   good price. Mode 5 is what the user verified by hand in FusionSolar.
 
 1. NEGATIVE EXPORT (export < −0.01 DKK/kWh)
    Force-charge the battery (47086=1, 47247, 47100=1) to soak up the PV surplus.
@@ -39,13 +39,13 @@ Runs every 15 s while enabled and picks ONE action per tick, in priority order:
    SURPLUS (PV > load): force-charge from the surplus only — mode 4 dumps a
    near-full battery to grid during a surplus on this firmware, so a forced charge
    is used instead; excess PV exports (cap lifted) or is curtailed at a negative
-   price. DEFICIT (PV ≤ load): true max self-consumption — mode 4 covers the load
-   natively (no fixed setpoint), targeting grid ≈ 0, with grid charge held OFF
-   (47087=0) and any forced command cleared (47100=0), both read-back driven so a
-   dropped write can't leave it grid-charging or stuck force-discharging to grid.
-   The export cap is NOT used here: it makes the firmware under-discharge and leave
-   a ~100 W import buffer, and the dump it guarded against was a stuck forced
-   command, now reliably cleared.
+   price. DEFICIT (PV ≤ load): max self-consumption with zero export — mode 4
+   covers the load natively (no fixed setpoint) AND Active Power Control mode 5
+   ("zero export limitation") so the inverter drives the battery to cover the load
+   and never exports. Grid charge held OFF (47087=0) and any forced command cleared
+   (47100=0), read-back driven. The discharge ceiling (47077) is raised so it can
+   cover the whole load, not a trickle. This is the combination the user confirmed
+   by hand in FusionSolar.
 
 WRITES ARE STATE-GATED — _apply() writes a register only when its value differs
 from the last applied value, so steady state issues zero Modbus writes per tick.
@@ -197,18 +197,19 @@ class AutoController:
 
     def _set_export_limit(self, worker, zero_export: bool, data: dict):
         """
-        Grid export limitation via Active Power Control (registers 47415 + 47416).
+        Grid export limitation via Active Power Control (register 47415).
 
-        zero_export=True  → mode 6 ("power-limited grid connection, W") with the
-          feed-in cap 47416 = 0 W. The inverter caps net feed-in at 0 W: it
-          curtails PV beyond what the battery + load can absorb and refuses to
-          discharge the battery to grid. This is the dynamic-limit mechanism
-          FusionSolar's "Grid connection with limited power" and IntelliCharge use,
-          and it is honoured more widely on older firmware than the zero-power
-          mode (5). The cap (47416) is written BEFORE the mode (47415) so the limit
-          is already in place the instant the mode engages.
+        zero_export=True  → mode 5 ("zero-power grid connection" = FusionSolar's
+          "Zero Export Limitation"). The inverter covers the load from PV + battery
+          and never exports: it refuses to discharge the battery to grid and curtails
+          any PV surplus beyond what the battery + load absorb. The user verified this
+          mode does exactly the right thing on this firmware by setting it manually in
+          FusionSolar — so we set the same register here. (Earlier we used mode 6 +
+          47416=0 on the assumption mode 5 might not be honoured; it is, and mode 5 is
+          simpler — no feed-in cap register needed.)
         zero_export=False → mode 0 ("unlimited"): normal operation. Required so
-          grid charge, arbitrage discharge and self-consumption can use the grid.
+          grid charge and arbitrage discharge can use the grid, and so surplus PV
+          can export at a good price.
 
         DRIVEN OFF THE LIVE READ-BACK (47415/47416 are polled), NOT the optimistic
         _applied cache. The SDongle drops write responses intermittently; the cache
@@ -222,14 +223,9 @@ class AutoController:
         cur_mode = int(round(cur_mode)) if cur_mode is not None else None
 
         if zero_export:
-            cur_feed = data.get('max_feed_grid_w')
-            cur_feed = int(round(cur_feed)) if cur_feed is not None else None
-            if cur_feed != _EXPORT_LIMIT_FEED_W:
-                worker.write_i32(47416, _EXPORT_LIMIT_FEED_W,
-                                 f'AutoCtrl: max feed-in {_EXPORT_LIMIT_FEED_W} W')
-            if cur_mode != _EXPORT_LIMIT_MODE_WATT:
-                worker.write_u16(47415, _EXPORT_LIMIT_MODE_WATT,
-                                 'AutoCtrl: active power ctrl mode=6 (limited feed-in)')
+            if cur_mode != _EXPORT_LIMIT_MODE_ZERO:
+                worker.write_u16(47415, _EXPORT_LIMIT_MODE_ZERO,
+                                 'AutoCtrl: active power ctrl mode=5 (zero export limitation)')
         else:
             if cur_mode != _EXPORT_LIMIT_MODE_UNLIMITED:
                 worker.write_u16(47415, _EXPORT_LIMIT_MODE_UNLIMITED,
@@ -557,14 +553,12 @@ class AutoController:
         # trigger a grid charge. Mode 4 isn't used here because it dumps a near-full
         # battery to grid during a surplus on this firmware.
         #
-        # DEFICIT (PV ≤ load): true max self-consumption — mode 4 covers the load
-        # natively (no fixed setpoint), targeting grid ≈ 0. The export cap is LIFTED
-        # here: with the cap (mode 6, feed 0) the firmware under-discharges to
-        # guarantee zero export, leaving a ~100 W import buffer (batt −400 W while the
-        # deficit was 488 W). The earlier −2500 W "dump" was actually a stuck forced
-        # discharge (47100=2 at 2500 W) whose clear write had dropped — now that
-        # _set_self_consumption clears 47100=0 via read-back, the dump can't recur, so
-        # the cap isn't needed and only gets in the way of clean load-following.
+        # DEFICIT (PV ≤ load): max self-consumption with zero export — mode 4 covers
+        # the load natively (no fixed setpoint), plus Active Power Control mode 5
+        # ("zero export limitation", set via _set_export_limit) so the inverter drives
+        # the battery to cover the load and never exports. This is the exact mode the
+        # user confirmed works by hand in FusionSolar. The raised discharge ceiling
+        # (47077, via _ensure_power_limits) lets it cover the whole load, not a trickle.
         self._grid_charging = False
         if surplus_w > 100 and pv_w > _MIN_PV_W:
             self._set_export_limit(worker, False, data)   # let excess PV export
@@ -573,9 +567,9 @@ class AutoController:
                       f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
             return _Cmd(mode='export_unlimited', detail=detail)
-        self._set_export_limit(worker, False, data)       # native mode 4: grid ≈ 0
+        self._set_export_limit(worker, True, data)        # mode 5: zero export limitation
         self._set_self_consumption(worker, data)
-        detail = (f'Self-consumption: battery follows load natively (mode 4) '
+        detail = (f'Self-consumption: zero-export, battery covers load (mode 4 + APC 5) '
                   f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                   f'deficit {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
         return _Cmd(mode='sc_discharge', detail=detail)
