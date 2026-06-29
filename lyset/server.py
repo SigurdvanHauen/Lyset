@@ -43,6 +43,7 @@ from .auto_controller import (
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
     CHARGE_MARGIN_DKK, CHARGE_HORIZON_H,
     HOLD_DELTA_DKK, HOLD_HORIZON_H, MAX_HOLD_IMPORT_DKK, MIN_SOC_HOLD,
+    ARBIT_MARGIN_DKK, MIN_SOC_ARBIT, ARBIT_HORIZON_H,
 )
 from . import store
 
@@ -235,66 +236,71 @@ def _simulate_soc(
                      else None)
 
         if cur_price and prices_sorted:
+            # Mirror AutoController._decide priority order:
+            #   1 negative export → self-consumption
+            #   2 grid charge   3 hold (deficit only)   4 arbitrage   5 self-consumption
             export_dkk = cur_price.get('export') or 0.0
             import_dkk = cur_price.get('import') or 0.5
 
-            if export_dkk < NEGATIVE_EXPORT_DKK:
-                # Negative export: battery force-charges (or idles if nearly full)
-                gc_active = False
-                if soc < FORCE_CHARGE_SOC_MAX:
-                    batt_kw = min(MAX_FORCE_CHARGE_W / 1000.0, max_power_kw)
-                else:
-                    batt_kw = 0.0
-                grid_kw     = load_w / 1000.0 + batt_kw - pv_w / 1000.0
-                energy_kwh  = batt_kw * 0.5 * charge_eff
+            future_from_here = prices_sorted[price_ptr + 1:]
+            gc_soc_limit = GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
 
-            else:
-                # Look-ahead prices available after the current slot
-                future_from_here = prices_sorted[price_ptr + 1:]
-                gc_soc_limit = GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
-
+            do_gc = do_hold = do_arbit = False
+            if export_dkk >= NEGATIVE_EXPORT_DKK:  # else → self-consumption
                 # Grid charge: at/near the cheapest upcoming window AND SoC below threshold?
                 charge_end = ts_ms + CHARGE_HORIZON_H * 3_600_000
                 c_win = [p for p in future_from_here if p['ts'] <= charge_end]
-                do_gc = False
                 if c_win and soc < gc_soc_limit:
                     c_min = min(p['import'] for p in c_win)
                     c_max = max(p['import'] for p in c_win)
                     do_gc = (import_dkk <= c_min + CHARGE_MARGIN_DKK
                              and c_max > import_dkk + CHARGE_MARGIN_DKK)
 
-                # Hold battery: a significantly more expensive slot is coming soon?
-                hold_end = ts_ms + HOLD_HORIZON_H * 3_600_000
-                h_win = [p for p in future_from_here if p['ts'] <= hold_end]
-                do_hold = (
-                    not do_gc
-                    and h_win
-                    and import_dkk < MAX_HOLD_IMPORT_DKK
-                    and soc > MIN_SOC_HOLD
-                    and max(p['import'] for p in h_win) > import_dkk + HOLD_DELTA_DKK
-                )
+                # Hold: deficit now AND a significantly more expensive slot is coming soon
+                if not do_gc and net_kw < 0:
+                    hold_end = ts_ms + HOLD_HORIZON_H * 3_600_000
+                    h_win = [p for p in future_from_here if p['ts'] <= hold_end]
+                    do_hold = (
+                        bool(h_win)
+                        and import_dkk < MAX_HOLD_IMPORT_DKK
+                        and soc > MIN_SOC_HOLD
+                        and max(p['import'] for p in h_win) > import_dkk + HOLD_DELTA_DKK
+                    )
 
-                if do_gc:
-                    gc_active  = True
-                    batt_kw    = min(GRID_CHARGE_W / 1000.0, max_power_kw)
-                    grid_kw    = batt_kw - net_kw
-                    energy_kwh = batt_kw * 0.5 * charge_eff
+                # Arbitrage: export now beats cheapest upcoming import by a margin
+                if not do_gc and not do_hold and soc > MIN_SOC_ARBIT and import_dkk < MAX_HOLD_IMPORT_DKK:
+                    arbit_end = ts_ms + ARBIT_HORIZON_H * 3_600_000
+                    a_win = [p for p in future_from_here if p['ts'] <= arbit_end]
+                    if a_win:
+                        do_arbit = export_dkk > min(p['import'] for p in a_win) + ARBIT_MARGIN_DKK
 
-                elif do_hold:
-                    gc_active  = False
-                    batt_kw    = 0.0
-                    grid_kw    = -net_kw
-                    energy_kwh = 0.0
+            if do_gc:
+                gc_active  = True
+                batt_kw    = min(GRID_CHARGE_W / 1000.0, max_power_kw)
+                grid_kw    = batt_kw - net_kw
+                energy_kwh = batt_kw * 0.5 * charge_eff
 
+            elif do_hold:
+                gc_active  = False
+                batt_kw    = 0.0
+                grid_kw    = -net_kw
+                energy_kwh = 0.0
+
+            elif do_arbit:
+                gc_active  = False
+                batt_kw    = 0.0 if soc <= MIN_SOC_ARBIT else -min(GRID_CHARGE_W / 1000.0, max_power_kw)
+                grid_kw    = batt_kw - net_kw
+                energy_kwh = batt_kw * 0.5 / discharge_eff  # batt_kw ≤ 0 → SoC falls
+
+            else:
+                # Self-consumption (covers negative export and the default case)
+                gc_active = False
+                if net_kw >= 0:
+                    batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
                 else:
-                    # Default: max self-consumption
-                    gc_active = False
-                    if net_kw >= 0:
-                        batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
-                    else:
-                        batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
-                    grid_kw    = batt_kw - net_kw
-                    energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+                    batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
+                grid_kw    = batt_kw - net_kw
+                energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
 
         else:
             # No price data — pure self-consumption
