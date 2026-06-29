@@ -846,12 +846,12 @@ async def api_read(address: int, type: str = 'u16'):
 
 
 @app.get('/api/consumption-forecast')
-async def api_consumption_forecast():
+async def api_consumption_forecast(full: int = 0):
     now_ms = int(time.time() * 1000)
+    from_ms = 0 if full else now_ms - 86_400_000
+    to_ms   = now_ms + 7 * 86_400_000 if full else now_ms + 86_400_000
     loop   = asyncio.get_running_loop()
-    data   = await loop.run_in_executor(
-        None, store.load_consumption_forecast, now_ms - 86_400_000, now_ms + 86_400_000
-    )
+    data   = await loop.run_in_executor(None, store.load_consumption_forecast, from_ms, to_ms)
     return {
         'forecast': data if data else _last_consumption_forecast,
         'coverage': _consumption_model.coverage if _consumption_model else 0,
@@ -878,12 +878,12 @@ async def api_consumption_import_excel(body: ExcelImportRequest):
 
 
 @app.get('/api/solar-forecast')
-async def api_solar_forecast():
+async def api_solar_forecast(full: int = 0):
     now_ms = int(time.time() * 1000)
+    from_ms = 0 if full else now_ms - 86_400_000
+    to_ms   = now_ms + 7 * 86_400_000 if full else now_ms + 2 * 86_400_000
     loop   = asyncio.get_running_loop()
-    data   = await loop.run_in_executor(
-        None, store.load_solar_forecast, now_ms - 86_400_000, now_ms + 2 * 86_400_000
-    )
+    data   = await loop.run_in_executor(None, store.load_solar_forecast, from_ms, to_ms)
     return {'forecast': data if data else _last_solar_forecast, 'status': _solcast_status}
 
 
@@ -924,13 +924,17 @@ async def api_daily_solar():
 
 
 @app.get('/api/power-forecast')
-async def api_power_forecast():
-    """Return stored power forecast: past 24 h (predictions vs actuals) + next 48 h."""
+async def api_power_forecast(full: int = 0):
+    """Return stored power forecast: past 24 h (predictions vs actuals) + next 48 h.
+
+    full=1 returns the entire retained history so the chart modal can show the
+    prediction line over the whole scrolled-back range, not just ±48 h.
+    """
     now_ms = int(time.time() * 1000)
+    from_ms = 0 if full else now_ms - 86_400_000
+    to_ms   = now_ms + 7 * 86_400_000 if full else now_ms + 48 * 3_600_000
     loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(
-        None, store.load_power_forecast, now_ms - 86_400_000, now_ms + 48 * 3_600_000
-    )
+    data = await loop.run_in_executor(None, store.load_power_forecast, from_ms, to_ms)
     return {'forecast': data or _last_power_forecast}
 
 
