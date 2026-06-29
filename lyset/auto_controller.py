@@ -209,7 +209,8 @@ class AutoController:
             worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
             if batt_soc < _FORCE_CHARGE_SOC_MAX:
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u32(47098, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge {_MAX_FORCE_CHARGE_W} W')
+                worker.write_u32(47079, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge cap {_MAX_FORCE_CHARGE_W} W')
+                worker.write_u16(47098, _MAX_FORCE_CHARGE_W, f'AutoCtrl: charge {_MAX_FORCE_CHARGE_W} W')
                 worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
                 batt_detail = f', battery force-charging (SoC {batt_soc:.0f}%)'
             else:
@@ -239,7 +240,7 @@ class AutoController:
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge feature OFF')
                 worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid cap {_GRID_CHARGE_W} W')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u32(47098, _GRID_CHARGE_W, f'AutoCtrl: charge {_GRID_CHARGE_W} W')
+                worker.write_u16(47098, _GRID_CHARGE_W, f'AutoCtrl: charge {_GRID_CHARGE_W} W')
                 worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE')
                 detail = (f'Grid charging {_GRID_CHARGE_W} W '
                           f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
@@ -276,7 +277,7 @@ class AutoController:
                 worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-                worker.write_u32(47098, _GRID_CHARGE_W, f'AutoCtrl: discharge {_GRID_CHARGE_W} W')
+                worker.write_u16(47098, _GRID_CHARGE_W, f'AutoCtrl: discharge {_GRID_CHARGE_W} W')
                 worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
@@ -295,7 +296,8 @@ class AutoController:
 
         if solar_surplus > 50 and pv_w > _MIN_PV_W:
             worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
-            worker.write_u32(47098, _GRID_CHARGE_W, 'AutoCtrl: SC charge (max)')
+            worker.write_u32(47079, _GRID_CHARGE_W, 'AutoCtrl: SC charge cap')
+            worker.write_u16(47098, _GRID_CHARGE_W, 'AutoCtrl: SC charge power')
             worker.write_u16(47100, 1, 'AutoCtrl: force CHARGE (SC)')
             detail = (f'SC charging (PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {solar_surplus:.0f} W, SoC {batt_soc:.1f}%)')
