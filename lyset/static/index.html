@@ -752,6 +752,10 @@ let isConnected = false;
 const historyMap = {}; // dataKey → { ts: number[], val: number[] }
 let _modalChart = null;
 let _modalKey   = null;
+// Full retained history for the open modal metric, fetched on demand from
+// /api/history/series (the WebSocket only pushes the last 24 h). { ts, val } in ms.
+let _modalFull    = null;
+let _modalFullKey = null;
 
 // ── Auto mode ─────────────────────────────────────────────────────────────────
 let _autoCommands = []; // [{ts, mode, detail}, ...]
@@ -798,6 +802,53 @@ function makeChartPoints(ts, val, gapMs = 60000) {
     }
   }
   return pts;
+}
+
+// Gap threshold scaled to the series' own sample spacing — downsampled full
+// history is spaced far wider than the 5–10 s live feed, so a fixed 60 s gap
+// would shatter the old portion into disconnected dots. Real outages (spacing
+// >> the median) still break the line.
+function autoGap(ts) {
+  if (ts.length < 3) return 60000;
+  const d = [];
+  for (let i = 1; i < ts.length; i++) d.push(ts[i] - ts[i - 1]);
+  d.sort((a, b) => a - b);
+  return Math.max(60000, d[Math.floor(d.length / 2)] * 4);
+}
+
+// Merge the fetched full history (older, downsampled) with the live 24 h
+// historyMap (recent, full-resolution) for the modal metric.
+function mergedSeries(key) {
+  const live = historyMap[key] || { ts: [], val: [] };
+  if (!_modalFull || _modalFullKey !== key || !_modalFull.ts.length) return live;
+  const liveFirst = live.ts.length ? live.ts[0] : Infinity;
+  const ts = [], val = [];
+  for (let i = 0; i < _modalFull.ts.length; i++) {
+    if (_modalFull.ts[i] < liveFirst) { ts.push(_modalFull.ts[i]); val.push(_modalFull.val[i]); }
+  }
+  for (let i = 0; i < live.ts.length; i++) { ts.push(live.ts[i]); val.push(live.val[i]); }
+  return { ts, val };
+}
+
+// Chart-ready data for the modal's primary series (full history + live, smoothed).
+function modalSeriesData(key) {
+  const h = mergedSeries(key);
+  return applySmooth(makeChartPoints(h.ts, h.val, autoGap(h.ts)));
+}
+
+// Pull the full retained history for one metric and fold it into the open modal.
+async function fetchModalSeries(key) {
+  try {
+    const r = await fetch('/api/history/series?key=' + encodeURIComponent(key));
+    if (!r.ok) return;
+    const j = await r.json();
+    _modalFull = { ts: j.points.map(p => p[0]), val: j.points.map(p => p[1]) };
+    _modalFullKey = key;
+    if (_modalChart && _modalKey === key) {
+      _modalChart.data.datasets[0].data = modalSeriesData(key);
+      _modalChart.update('none');
+    }
+  } catch (e) { /* leave the 24 h view in place on failure */ }
 }
 
 const KEY_MAP = {
@@ -987,8 +1038,7 @@ function onData(d) {
   }
 
   if (_modalChart && _modalKey && _modalKey !== '_cstate_idx' && historyMap[_modalKey]) {
-    const h = historyMap[_modalKey];
-    _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
+    _modalChart.data.datasets[0].data = modalSeriesData(_modalKey);
     _modalChart.update('none');
   }
 
@@ -1033,9 +1083,10 @@ function onData(d) {
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
 function openChart(key, label, unit, color) {
-  const hist  = historyMap[key] || { ts: [], val: [] };
+  if (_modalFullKey !== key) { _modalFull = null; _modalFullKey = null; }
+  const hist  = mergedSeries(key);
   const pts   = hist.val.length;
-  const data  = applySmooth(makeChartPoints(hist.ts, hist.val));
+  const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)));
   const hasFc     = key === 'active_power'        && _solcastData.length > 0;
   const hasCons   = key === 'house_load'          && _consumptionForecast.some(r => r.w != null);
   const hasSocFc  = key === 'batt_soc'            && _powerForecast.length > 1;
@@ -1324,12 +1375,17 @@ function openChart(key, label, unit, color) {
       }
     }
   });
+
+  // Backfill the rest of the retained history (the modal opens with the 24 h
+  // live window; pan/zoom out to scroll through everything once this resolves).
+  fetchModalSeries(key);
 }
 
 function closeModal() {
   document.getElementById('modal-overlay').classList.remove('active');
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
   _modalKey = null;
+  _modalFull = null; _modalFullKey = null;
 }
 
 function overlayClick(e) {
@@ -1342,8 +1398,7 @@ function toggleSmooth() {
   btn.textContent = 'Smooth: ' + (_smoothEnabled ? 'On' : 'Off');
   btn.style.borderColor = _smoothEnabled ? 'var(--accent)' : 'var(--border)';
   if (_modalChart && _modalKey) {
-    const h = historyMap[_modalKey] || { ts: [], val: [] };
-    _modalChart.data.datasets[0].data = applySmooth(makeChartPoints(h.ts, h.val));
+    _modalChart.data.datasets[0].data = modalSeriesData(_modalKey);
     _modalChart.update('none');
   }
 }

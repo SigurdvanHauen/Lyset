@@ -380,3 +380,30 @@ def load_last_24h() -> list[tuple[float, dict]]:
             'SELECT ts, data FROM polls WHERE ts > ? ORDER BY ts', (cutoff,)
         ).fetchall()
     return [(ts, json.loads(d)) for ts, d in rows]
+
+
+def load_series(key: str, from_ts: float = 0.0, max_points: int = 8000) -> list[tuple[int, float]]:
+    """
+    Return the full history of a single numeric poll field as (ts_ms, value) pairs.
+
+    Pulls every poll that has the field set (the stored JSON includes the computed
+    keys too, e.g. pv1_power / house_load), so this serves the entire retained
+    history rather than just the last 24 h.  When the result exceeds max_points it
+    is evenly strided down so the browser stays responsive over weeks of data;
+    the most recent point is always kept.
+    """
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts, json_extract(data, ?) FROM polls '
+            'WHERE ts >= ? AND json_extract(data, ?) IS NOT NULL ORDER BY ts',
+            (f'$.{key}', from_ts, f'$.{key}'),
+        ).fetchall()
+
+    n = len(rows)
+    if n > max_points:
+        stride = (n + max_points - 1) // max_points
+        picked = rows[::stride]
+        if picked[-1] is not rows[-1]:
+            picked.append(rows[-1])   # always keep the latest sample
+        rows = picked
+    return [(int(ts * 1000), val) for ts, val in rows]

@@ -965,6 +965,19 @@ async def api_automode_set(body: AutoModeRequest):
     return {'ok': True, 'enabled': _auto_controller.enabled}
 
 
+@app.get('/api/history/series')
+async def api_history_series(key: str, from_ms: int | None = None):
+    """Full retained history for one numeric metric, downsampled for the browser.
+
+    Powers the 'scroll all history' view in the per-metric chart modal — the
+    WebSocket only pushes the last 24 h, so this on-demand call backfills the rest.
+    """
+    from_ts = (from_ms / 1000) if from_ms is not None else 0.0
+    loop = asyncio.get_running_loop()
+    points = await loop.run_in_executor(None, store.load_series, key, from_ts)
+    return {'key': key, 'points': points}
+
+
 @app.get('/api/prices')
 async def api_prices():
     now_ms = int(time.time() * 1000)
