@@ -274,14 +274,19 @@ class AutoController:
                 return _Cmd(mode='arbit_discharge', detail=detail)
 
         # ── 5. Default: max self-consumption ──────────────────────────────────
-        # Clear forced-command registers BEFORE switching working mode so the
-        # inverter processes the stop while still in forced mode (47086=1).
-        # Writing 47086=4 first and then 47100=0 can leave the forced discharge
-        # running if the inverter only evaluates 47100 while in mode 1.
+        # Clear forced-command registers BEFORE switching working mode:
+        # 1. Stop forced direction (47100=0) while still in forced mode
+        # 2. Zero the forced power (47098=0) so any residual discharge stops
+        # 3. Switch working mode to max self-consumption (47086=4)
+        inv_mode   = int(data.get('batt_working_mode', -1))
+        inv_forced = int(data.get('batt_forced_mode',  -1))
+        log.info('AutoCtrl: inverter reports mode=%d forced=%d — writing max self-consumption',
+                 inv_mode, inv_forced)
         self._grid_charging = False
         worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
         worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
         worker.write_u16(47100, 0, 'AutoCtrl: stop forced mode')
+        worker.write_u32(47098, 0, 'AutoCtrl: clear forced power')
         worker.write_u16(47086, 4, 'AutoCtrl: mode=max self-consumption')
         detail = (f'Max self-consumption '
                   f'(export {export_dkk:.3f} DKK, import {import_dkk:.3f} DKK)')

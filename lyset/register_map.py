@@ -149,3 +149,9 @@ BATTERY_WORKING_MODES: dict[int, str] = {
     5: 'Fully fed to grid',
     6: 'Time-of-use (LG, Pro)',
 }
+
+BATT_FORCED_MODES: dict[int, str] = {
+    0: 'None',
+    1: 'Charging',
+    2: 'Discharging',
+}

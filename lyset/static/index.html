@@ -398,6 +398,14 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-top"><div class="card-lbl">Status</div><div class="card-times" id="t-d-bstat"></div></div>
         <div class="card-val" style="font-size:14px" id="d-bstat">&#8212;</div>
       </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Working Mode</div><div class="card-times" id="t-d-bmode"></div></div>
+        <div class="card-val" style="font-size:13px" id="d-bmode">&#8212;</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Forced Cmd</div><div class="card-times" id="t-d-bforced"></div></div>
+        <div class="card-val" style="font-size:14px" id="d-bforced">&#8212;</div>
+      </div>
     </div>
 
     <div class="sec">PV Strings</div>
@@ -753,7 +761,8 @@ const KEY_MAP = {
   batt:  'batt_power',        load:   'house_load',
   soc:   'batt_soc',          soh:    'batt_soh',
   btemp: 'batt_temperature',  bvolt:  'batt_bus_voltage',
-  bstat: 'batt_status_label', pv1v:   'pv1_voltage',
+  bstat: 'batt_status_label', bmode: 'batt_working_mode_label', bforced: 'batt_forced_label',
+  pv1v:  'pv1_voltage',
   pv1a:  'pv1_current',       pv1w:   'pv1_power',
   pv2v:  'pv2_voltage',       pv2a:   'pv2_current',
   pv2w:  'pv2_power',         freq:   'meter_frequency',
@@ -953,7 +962,9 @@ function onData(d) {
   setCard('d-soh',   d.batt_soh,         1);
   setCard('d-btemp', d.batt_temperature, 1);
   setCard('d-bvolt', d.batt_bus_voltage, 1);
-  setText('d-bstat', d.batt_status_label);
+  setText('d-bstat',   d.batt_status_label);
+  setText('d-bmode',   d.batt_working_mode_label);
+  setText('d-bforced', d.batt_forced_label);
 
   setCard('d-pv1v', d.pv1_voltage, 1);
   setCard('d-pv1a', d.pv1_current, 2);

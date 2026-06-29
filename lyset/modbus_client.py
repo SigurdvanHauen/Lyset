@@ -16,7 +16,7 @@ from typing import Optional, Callable
 from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
 
-from .register_map import REGISTERS, Register, INVERTER_STATES, BATTERY_STATUSES
+from .register_map import REGISTERS, Register, INVERTER_STATES, BATTERY_STATUSES, BATTERY_WORKING_MODES, BATT_FORCED_MODES
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +273,12 @@ class ModbusWorker(threading.Thread):
             if 'batt_status' in data:
                 code = int(data['batt_status'])
                 data['batt_status_label'] = BATTERY_STATUSES.get(code, f'Unknown ({code})')
+            if 'batt_working_mode' in data:
+                code = int(data['batt_working_mode'])
+                data['batt_working_mode_label'] = BATTERY_WORKING_MODES.get(code, f'Unknown ({code})')
+            if 'batt_forced_mode' in data:
+                code = int(data['batt_forced_mode'])
+                data['batt_forced_label'] = BATT_FORCED_MODES.get(code, f'Unknown ({code})')
 
             data['_timestamp'] = time.time()
             return data
