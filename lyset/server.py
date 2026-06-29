@@ -284,9 +284,13 @@ def _simulate_soc(
                         do_arbit = export_dkk > min(p['import'] for p in a_win) + ARBIT_MARGIN_DKK
 
             if do_neg:
-                # Negative export → force-charge to soak surplus (idle if full).
+                # Negative export → charge from surplus only (never import, never
+                # discharge). Surplus beyond the battery's max rate still exports.
                 gc_active  = False
-                batt_kw    = 0.0 if soc >= FORCE_CHARGE_SOC_MAX else min(MAX_FORCE_CHARGE_W / 1000.0, max_power_kw)
+                if soc >= FORCE_CHARGE_SOC_MAX or net_kw <= 0:
+                    batt_kw = 0.0
+                else:
+                    batt_kw = min(net_kw, max_power_kw)
                 grid_kw    = batt_kw - net_kw
                 energy_kwh = batt_kw * 0.5 * charge_eff
 

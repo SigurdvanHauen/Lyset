@@ -75,7 +75,8 @@ GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresi
 GRID_CHARGE_SOC_MAX   = 80.0    # stop grid charging above this (hysteresis high)
 GRID_CHARGE_W         = 2500    # W — grid charge rate
 FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
-MAX_FORCE_CHARGE_W    = 5000    # W — battery charge rate (inverter clamps to rated max)
+MAX_FORCE_CHARGE_W    = 5000    # W — legacy; inverter clamps to rated max
+BATT_MAX_CHARGE_W     = 2500    # W — LUNA2000-5kWh physical max charge rate (C/2)
 
 # ── Look-ahead optimisation parameters ───────────────────────────────────────
 ARBIT_MARGIN_DKK    = 0.10   # export must exceed future cheapest import by at least this
@@ -98,6 +99,7 @@ _GRID_CHARGE_SOC_MAX  = GRID_CHARGE_SOC_MAX
 _GRID_CHARGE_W        = GRID_CHARGE_W
 _FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
 _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
+_BATT_MAX_CHARGE_W    = BATT_MAX_CHARGE_W
 _ARBIT_MARGIN_DKK     = ARBIT_MARGIN_DKK
 _MIN_SOC_ARBIT        = MIN_SOC_ARBIT
 _ARBIT_HORIZON_H      = ARBIT_HORIZON_H
@@ -273,33 +275,38 @@ class AutoController:
             (16, 47086, 4, 'AutoCtrl: mode=max self-consumption'),
         ]
 
-        # ── 1. Negative export → FORCE CHARGE to soak up the surplus ──────────
+        # ── 1. Negative export → force-charge from the SURPLUS only ───────────
         # At a negative export price we must not feed the grid. Mode 4 on this
-        # firmware will happily discharge the battery to grid here, so we force a
-        # charge instead: it guarantees the battery is charging (never discharging)
-        # and absorbs as much PV surplus as its rate allows. PV can't be curtailed,
-        # so any surplus beyond the battery's charge rate is still exported — but we
-        # never *add* battery power to that export. If the battery is full there is
-        # nothing to absorb with, so force-idle (still no discharge to grid).
+        # firmware can discharge the battery to grid here, so we force a charge —
+        # but at the surplus power (pv − load), NOT a fixed rate. Forcing a fixed
+        # 2500 W when the surplus is smaller would pull the difference from the grid
+        # (importing at the positive import price). Charging exactly the surplus
+        # (capped to the battery's max rate) absorbs what would otherwise be exported
+        # without importing. Any surplus beyond the battery's max rate is still
+        # exported (PV can't be curtailed via this SDongle). No surplus or battery
+        # full → force-idle (never discharge to grid at a negative price).
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
-            if batt_soc < _FORCE_CHARGE_SOC_MAX:
+            if batt_soc < _FORCE_CHARGE_SOC_MAX and surplus_w > 100:
+                # Quantise to 100 W so small surplus jitter doesn't rewrite 47247 every tick
+                charge_w = min(int(round(surplus_w / 100.0)) * 100, _BATT_MAX_CHARGE_W)
                 self._apply(worker, [
-                    (16, 47087, 0,                   'AutoCtrl: grid charge OFF'),
-                    (16, 47086, 1,                   'AutoCtrl: mode=forced'),
-                    (32, 47075, _MAX_FORCE_CHARGE_W, f'AutoCtrl: max charge power {_MAX_FORCE_CHARGE_W} W'),
-                    (32, 47247, _MAX_FORCE_CHARGE_W, f'AutoCtrl: forced charge power {_MAX_FORCE_CHARGE_W} W'),
-                    (16, 47100, 1,                   'AutoCtrl: force CHARGE'),
+                    (16, 47087, 0,        'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1,        'AutoCtrl: mode=forced'),
+                    (32, 47247, charge_w, f'AutoCtrl: forced charge power {charge_w} W'),
+                    (16, 47100, 1,        'AutoCtrl: force CHARGE'),
                 ])
-                batt_detail = f'battery force-charging (SoC {batt_soc:.0f}%)'
+                batt_detail = f'force-charging {charge_w} W from surplus (SoC {batt_soc:.0f}%)'
             else:
                 self._apply(worker, [
                     (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1, 'AutoCtrl: mode=forced'),
-                    (16, 47100, 0, 'AutoCtrl: force IDLE (full)'),
+                    (16, 47100, 0, 'AutoCtrl: force IDLE'),
                 ])
-                batt_detail = f'battery idle — full (SoC {batt_soc:.0f}%)'
-            detail = f'Negative export {export_dkk:.3f} DKK — {batt_detail}'
+                reason = 'full' if batt_soc >= _FORCE_CHARGE_SOC_MAX else 'no surplus'
+                batt_detail = f'battery idle ({reason}, SoC {batt_soc:.0f}%)'
+            detail = (f'Negative export {export_dkk:.3f} DKK — {batt_detail} '
+                      f'(PV {pv_w:.0f} W, load {house_load:.0f} W)')
             return _Cmd(mode='export_limited', detail=detail)
 
         # ── 2. Grid charge: bank cheap energy for a pricier period ────────────
