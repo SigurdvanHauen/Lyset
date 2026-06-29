@@ -35,10 +35,13 @@ Runs every 15 s while enabled and picks ONE action per tick, in priority order:
    energy high, rebuy cheaper later.  Guarded to cheap-import periods — when
    import is expensive, self-consuming the stored energy beats the round-trip.
 
-5. DEFAULT — self-consumption (mode 4)
-   Charge from any solar surplus at the full surplus rate, discharge to cover
-   load, touch the grid only for the remainder.  No power setpoints to get wrong;
-   the inverter balances it natively and never exports battery energy.
+5. DEFAULT — self-consumption (explicit forced control, NOT mode 4)
+   Mode 4 ("max self-consumption") is uncontrollable on this firmware — it dumps
+   the battery to grid during a surplus and flaps charge↔discharge to grid during
+   a deficit, both at the worst possible times. So self-consumption is done with
+   explicit forced commands: SURPLUS → force-charge from the surplus only; DEFICIT
+   → force-discharge exactly enough to cover the house load (never importing to
+   charge, never dumping surplus to grid).
 
 WRITES ARE STATE-GATED — _apply() writes a register only when its value differs
 from the last applied value, so steady state issues zero Modbus writes per tick.
@@ -109,6 +112,7 @@ HOLD_DELTA_DKK      = 0.80   # hold battery if a future slot is at least this mu
 HOLD_HORIZON_H      = 6      # hours ahead to scan for an expensive upcoming slot
 MAX_HOLD_IMPORT_DKK = 1.50   # only hold battery when current import is below this
 MIN_SOC_HOLD        = 20.0   # minimum SoC required to bother holding
+MIN_SOC_SC          = 8.0    # below this, stop self-consumption discharge (let grid cover)
 
 _EVAL_INTERVAL_S = 15
 
@@ -134,6 +138,7 @@ _HOLD_DELTA_DKK       = HOLD_DELTA_DKK
 _HOLD_HORIZON_H       = HOLD_HORIZON_H
 _MAX_HOLD_IMPORT_DKK  = MAX_HOLD_IMPORT_DKK
 _MIN_SOC_HOLD         = MIN_SOC_HOLD
+_MIN_SOC_SC           = MIN_SOC_SC
 
 
 @dataclass
@@ -261,6 +266,45 @@ class AutoController:
         reason = 'full' if batt_soc >= _FORCE_CHARGE_SOC_MAX else 'no surplus'
         return f'idle ({reason})'
 
+    def _discharge_to_cover_load(self, worker, pv_w: float, house_load: float,
+                                 batt_soc: float) -> str:
+        """
+        Force-discharge the battery to cover the household load deficit (load − PV)
+        and nothing more. Returns a human-readable detail string.
+
+        This REPLACES mode 4 ("max self-consumption") for the deficit case. On this
+        firmware mode 4 is uncontrollable during a deficit: it has been observed both
+        dumping the battery to grid (−2500 W, grid −1884 W while the house needed
+        607 W) AND importing from grid to charge the battery (+2200 W, grid +2527 W)
+        at a 3.6 DKK import peak — neither is self-consumption, and the rapid
+        charge↔discharge flapping also corrupts the batched register reads (house_load
+        briefly computed as −4084 W).
+
+        Forced discharge (47086=1, 47100=2) at a setpoint equal to the deficit makes
+        the battery cover the load and only the load: it physically cannot import to
+        charge, and the setpoint caps how much it can push toward grid. Power is
+        quantised to 100 W so load jitter doesn't rewrite 47247 every tick. Battery at
+        the SoC floor → idle and let the grid cover the load.
+        """
+        deficit_w = house_load - pv_w
+        if batt_soc > _MIN_SOC_SC and deficit_w > 100:
+            discharge_w = min(int(round(deficit_w / 100.0)) * 100, _BATT_MAX_CHARGE_W)
+            self._apply(worker, [
+                (16, 47087, 0,           'AutoCtrl: grid charge OFF'),
+                (16, 47086, 1,           'AutoCtrl: mode=forced'),
+                (32, 47077, discharge_w, f'AutoCtrl: max discharge power {discharge_w} W'),
+                (32, 47247, discharge_w, f'AutoCtrl: forced discharge power {discharge_w} W'),
+                (16, 47100, 2,           'AutoCtrl: force DISCHARGE'),
+            ])
+            return f'discharging {discharge_w} W to cover load'
+        self._apply(worker, [
+            (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+            (16, 47086, 1, 'AutoCtrl: mode=forced'),
+            (16, 47100, 0, 'AutoCtrl: force IDLE'),
+        ])
+        reason = 'SoC floor' if batt_soc <= _MIN_SOC_SC else 'no deficit'
+        return f'idle ({reason})'
+
     # ── Public control ────────────────────────────────────────────────────────
 
     def enable(self, worker, prices: list, last_data: dict):
@@ -329,7 +373,11 @@ class AutoController:
         export_dkk = cur_price.get('export') or 0.0
         import_dkk = cur_price.get('import') or 0.0
         pv_w       = (data.get('pv1_power') or 0) + (data.get('pv2_power') or 0)
-        house_load = data.get('house_load') or 0
+        # house_load = active_power + meter − batt_power: during a fast battery
+        # charge↔discharge transition the batched reads are captured a few ms apart
+        # and this briefly computes a physically impossible value (seen at −4084 W).
+        # Clamp to ≥0 so a glitch can never masquerade as a chargeable PV surplus.
+        house_load = max(0.0, data.get('house_load') or 0)
         batt_soc   = data.get('batt_soc')   or 50.0
         grid_w     = data.get('meter_active_power') or 0.0  # +import / -export
         batt_w     = data.get('batt_power') or 0.0           # +charge / -discharge
@@ -386,16 +434,6 @@ class AutoController:
         gc_threshold = _GRID_CHARGE_SOC_MAX if self._grid_charging else _GRID_CHARGE_SOC_START
 
         surplus_w = pv_w - house_load  # + = solar exceeds load
-
-        # Register sequences reused below. Order matters within a sequence: enter
-        # forced mode (47086=1) before issuing a forced command (47100), and clear
-        # the forced command (47100=0) before leaving forced mode (47086=4). The
-        # state-gating in _apply() only writes the registers that actually changed.
-        seq_self_consumption = [
-            (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
-            (16, 47100, 0, 'AutoCtrl: stop forced'),
-            (16, 47086, 4, 'AutoCtrl: mode=max self-consumption'),
-        ]
 
         # ── 1. Negative export → force-charge from the SURPLUS only ───────────
         # At a negative export price we must not feed the grid. The export-limit
@@ -479,26 +517,28 @@ class AutoController:
                 return _Cmd(mode='arbit_discharge', detail=detail)
 
         # ── 5. Default: self-consumption ──────────────────────────────────────
-        # SURPLUS (PV > load): do NOT use mode 4 — this firmware discharges a
-        # near-full battery to grid in mode 4 during a surplus (observed −2500 W to
-        # grid at 97 % SoC), selling stored energy for a pittance (or paying to
-        # export). Force a charge-from-surplus instead: the battery stores what it
-        # can and cannot be dumped to grid; excess PV exports (or is curtailed at a
-        # negative price). This keeps the charge for the evening import peak / a high
-        # export price, which is where it is worth far more.
+        # Mode 4 ("max self-consumption") is NOT used in either case — on this
+        # firmware it is uncontrollable and dumps the battery to grid during a
+        # surplus AND flaps charge↔discharge to grid during a deficit. Both cases
+        # use explicit forced control instead.
         #
-        # DEFICIT (PV ≤ load): mode 4 is correct and safe — the battery discharges
-        # only to cover house load (there is no surplus to export), i.e. exactly the
+        # SURPLUS (PV meaningfully exceeds load): force-charge from the surplus only
+        # — the battery stores what it can and cannot be dumped to grid; excess PV
+        # exports (or is curtailed at a negative price). Gated on real PV (> MIN_PV_W)
+        # so a glitched house_load can't fake a surplus and trigger a grid charge.
+        #
+        # DEFICIT (PV ≤ load): force-discharge exactly enough to cover the house load
+        # — never importing to charge and never dumping surplus to grid. This is the
         # "spend it in the evening instead of importing" behaviour we want.
         self._grid_charging = False
-        if surplus_w > 100:
+        if surplus_w > 100 and pv_w > _MIN_PV_W:
             batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc)
             detail = (f'Self-consumption: battery {batt_detail} '
                       f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
             return _Cmd(mode='export_unlimited', detail=detail)
-        self._apply(worker, seq_self_consumption)
-        detail = (f'Self-consumption: battery covers load '
+        batt_detail = self._discharge_to_cover_load(worker, pv_w, house_load, batt_soc)
+        detail = (f'Self-consumption: battery {batt_detail} '
                   f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                   f'deficit {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
-        return _Cmd(mode='export_unlimited', detail=detail)
+        return _Cmd(mode='sc_discharge', detail=detail)
