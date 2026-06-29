@@ -183,7 +183,7 @@ class AutoController:
                 worker.write_u16(addr, val, desc)
             self._applied[addr] = val
 
-    def _set_export_limit(self, worker, zero_export: bool):
+    def _set_export_limit(self, worker, zero_export: bool, data: dict):
         """
         Grid export limitation via Active Power Control (registers 47415 + 47416).
 
@@ -198,21 +198,30 @@ class AutoController:
         zero_export=False → mode 0 ("unlimited"): normal operation. Required so
           grid charge, arbitrage discharge and self-consumption can use the grid.
 
-        State-gated by _apply(), so the registers are written only on a transition,
-        never every tick — no flooding of the single-client SDongle.
+        DRIVEN OFF THE LIVE READ-BACK (47415/47416 are polled), NOT the optimistic
+        _applied cache. The SDongle drops write responses intermittently; the cache
+        would mark the write done even when it failed, leaving the inverter stuck on
+        the old mode (e.g. still curtailing after the price turned positive). By
+        comparing against the polled value we re-issue the write every tick until the
+        inverter actually confirms it, then stop — self-healing, and at most one write
+        per tick so the single-client SDongle is never flooded.
         """
+        cur_mode = data.get('active_power_mode')
+        cur_mode = int(round(cur_mode)) if cur_mode is not None else None
+
         if zero_export:
-            self._apply(worker, [
-                (32, 47416, _EXPORT_LIMIT_FEED_W,
-                 f'AutoCtrl: max feed-in {_EXPORT_LIMIT_FEED_W} W'),
-                (16, 47415, _EXPORT_LIMIT_MODE_WATT,
-                 'AutoCtrl: active power ctrl mode=6 (limited feed-in)'),
-            ])
+            cur_feed = data.get('max_feed_grid_w')
+            cur_feed = int(round(cur_feed)) if cur_feed is not None else None
+            if cur_feed != _EXPORT_LIMIT_FEED_W:
+                worker.write_i32(47416, _EXPORT_LIMIT_FEED_W,
+                                 f'AutoCtrl: max feed-in {_EXPORT_LIMIT_FEED_W} W')
+            if cur_mode != _EXPORT_LIMIT_MODE_WATT:
+                worker.write_u16(47415, _EXPORT_LIMIT_MODE_WATT,
+                                 'AutoCtrl: active power ctrl mode=6 (limited feed-in)')
         else:
-            self._apply(worker, [
-                (16, 47415, _EXPORT_LIMIT_MODE_UNLIMITED,
-                 'AutoCtrl: active power ctrl mode=0 (unlimited)'),
-            ])
+            if cur_mode != _EXPORT_LIMIT_MODE_UNLIMITED:
+                worker.write_u16(47415, _EXPORT_LIMIT_MODE_UNLIMITED,
+                                 'AutoCtrl: active power ctrl mode=0 (unlimited)')
 
     # ── Public control ────────────────────────────────────────────────────────
 
@@ -323,7 +332,7 @@ class AutoController:
         # The negative-export branch below additionally force-charges the battery,
         # so even if this firmware ignores 47415 the battery still soaks up surplus
         # up to its max rate (belt-and-suspenders).
-        self._set_export_limit(worker, export_dkk < _NEGATIVE_EXPORT_DKK)
+        self._set_export_limit(worker, export_dkk < _NEGATIVE_EXPORT_DKK, data)
 
         # Future price slots sorted ascending
         future_prices = sorted(
