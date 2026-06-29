@@ -27,6 +27,32 @@ import requests
 
 log = logging.getLogger(__name__)
 
+
+def _parse_iso_utc_ms(date_str: str) -> Optional[int]:
+    """
+    Parse an ISO-8601 timestamp to UTC epoch milliseconds, RESPECTING any
+    timezone offset the string carries.
+
+    Strømligning sends slot timestamps that may be UTC ('...Z') or carry a
+    local offset ('...+02:00').  The offset MUST be honoured: dropping it and
+    assuming UTC shifts every price slot by the offset (2 h in Danish summer),
+    which makes the controller act on the wrong hour's price.  A naive string
+    (no offset) is assumed to be UTC.
+    """
+    s = date_str.strip()
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            dt = datetime.strptime(date_str[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
 _BASE             = 'https://stromligning.dk/api'
 _DEFAULT_POLL     = 1800.0   # 30 min
 _DEFAULT_POSTAL   = '5500'
@@ -90,12 +116,9 @@ def _parse_records(records: list[dict]) -> list[dict]:
         date_str = rec.get('date', '')
         if not date_str:
             continue
-        # Parse ISO UTC timestamp — trim to seconds first so this works on
-        # Python < 3.11 which doesn't handle milliseconds in fromisoformat.
-        try:
-            dt    = datetime.strptime(date_str[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
-            ts_ms = int(dt.timestamp()) * 1000
-        except Exception:
+        # Parse to UTC epoch ms, honouring any timezone offset in the string.
+        ts_ms = _parse_iso_utc_ms(date_str)
+        if ts_ms is None:
             continue
 
         price = rec.get('price', {})

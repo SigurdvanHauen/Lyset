@@ -55,7 +55,14 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+    _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
+except Exception:  # pragma: no cover — fallback if tz database is unavailable
+    _TZ_LOCAL = None
 
 log = logging.getLogger(__name__)
 
@@ -221,9 +228,17 @@ class AutoController:
         grid_w     = data.get('meter_active_power') or 0.0  # +import / -export
         batt_w     = data.get('batt_power') or 0.0           # +charge / -discharge
 
+        # Active price slot in Danish local time — lets us verify the controller is
+        # matching the correct hour (now_ms and price ts are both UTC epoch ms).
+        try:
+            slot_dt = datetime.fromtimestamp(cur_price['ts'] / 1000, _TZ_LOCAL)
+            slot_lbl = slot_dt.strftime('%a %H:%M')
+        except Exception:
+            slot_lbl = '?'
+
         log.info(
-            'AutoCtrl: import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW',
-            import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w,
+            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW',
+            slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w,
         )
 
         # Periodically clear the applied-state cache so the next _apply() re-asserts
