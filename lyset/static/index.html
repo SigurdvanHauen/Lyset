@@ -332,6 +332,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <!-- ── Tab bar ── -->
 <div id="tabbar">
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
+  <button class="tab-btn"        onclick="showTab('plan',this)">Plan</button>
   <button class="tab-btn"        onclick="showTab('prices',this)">Prices</button>
   <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
@@ -467,6 +468,42 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
+  </div>
+
+  <!-- Plan (auto-mode behaviour: actuals + AI plan) -->
+  <div id="panel-plan" class="panel">
+    <div class="sec">
+      AI Plan &amp; Historical Data
+      <span id="plan-auto-badge" style="float:right;font-size:10px;padding:2px 10px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);text-transform:none;font-weight:600;letter-spacing:0">Auto OFF</span>
+    </div>
+
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Current Plan Action</div></div>
+        <div class="card-val" style="font-size:13px;line-height:1.5;word-break:break-word" id="plan-action">No commands yet</div>
+      </div>
+      <div class="card batt">
+        <div class="card-top"><div class="card-lbl">Battery SOC</div></div>
+        <div class="card-val" id="plan-soc">&#8212;<span class="unit">%</span></div>
+      </div>
+      <div class="card pv">
+        <div class="card-top"><div class="card-lbl">Forecast SOC (next slot)</div></div>
+        <div class="card-val" id="plan-soc-fc">&#8212;<span class="unit">%</span></div>
+      </div>
+    </div>
+
+    <div class="sec" style="margin-top:16px">Power Flow &amp; Battery Plan</div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+      <div style="display:flex;flex-wrap:wrap;gap:12px 18px;margin-bottom:12px;font-size:11px" id="plan-legend"></div>
+      <div style="position:relative;height:420px">
+        <canvas id="plan-chart"></canvas>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
+        Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
+        Plan combines Solcast solar, the learned consumption model, electricity prices and the
+        auto-mode controller's decision logic. Battery SOC is on the right axis.
+      </div>
+    </div>
   </div>
 
   <!-- Prices -->
@@ -811,6 +848,7 @@ function showTab(name, btn) {
   btn.classList.add('active');
   if (name === 'control' && isConnected) refreshCtrl();
   if (name === 'prices') { renderPriceChart(); renderPriceLineChart(); }
+  if (name === 'plan') renderPlanChart();
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -962,6 +1000,7 @@ function onData(d) {
     d.batt_power > 0 ? 'Charging' : d.batt_power < 0 ? 'Discharging' : '');
 
   setCard('d-soc',   d.batt_soc,         1);
+  setCard('plan-soc', d.batt_soc,        1);
   setCard('d-soh',   d.batt_soh,         1);
   setCard('d-btemp', d.batt_temperature, 1);
   setCard('d-bvolt', d.batt_bus_voltage, 1);
@@ -984,6 +1023,8 @@ function onData(d) {
 
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
+
+  refreshPlanChart();
 }
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
@@ -1718,6 +1759,16 @@ function onAutoMode(msg) {
   if (msg.last_action && msg.last_action !== '—') {
     action.textContent = msg.last_action;
     action.style.color = 'var(--text)';
+    setText('plan-action', msg.last_action);
+  }
+
+  // Plan-tab auto badge
+  const planBadge = document.getElementById('plan-auto-badge');
+  if (planBadge) {
+    planBadge.textContent = msg.enabled ? 'Auto ON' : 'Auto OFF';
+    planBadge.style.color       = msg.enabled ? 'var(--success)' : 'var(--muted)';
+    planBadge.style.borderColor = msg.enabled ? 'var(--success)' : 'var(--border)';
+    planBadge.style.background   = msg.enabled ? '#0d2e1a' : 'var(--surf2)';
   }
 
   // Append new command to local history if this message carries one
@@ -1725,6 +1776,7 @@ function onAutoMode(msg) {
     _autoCommands.push(msg.cmd);
     // Refresh chart if it's open
     if (_modalChart && _modalKey === '_auto_mode') openAutoChart();
+    refreshPlanChart();
   }
 }
 
@@ -1846,9 +1898,209 @@ function openAutoChart() {
   });
 }
 
+// ── Plan tab (IntelliCharge-style: actuals + AI plan on one chart) ────────────
+let _planChart = null;
+
+// Colours matching the IntelliCharge legend
+const PLAN_SERIES = [
+  { key: 'solar',   label: 'Solar',        color: '#F59E0B', fill: true  },
+  { key: 'load',    label: 'House load',   color: '#34D399', fill: false },
+  { key: 'chg',     label: 'Batt charge',  color: '#4F8EF7', fill: false },
+  { key: 'dis',     label: 'Batt discharge',color: '#F87171', fill: false },
+  { key: 'imp',     label: 'Grid import',  color: '#A78BFA', fill: false },
+  { key: 'exp',     label: 'Grid export',  color: '#FB923C', fill: false },
+];
+
+// Past measured series in kW: pull from historyMap, keep only ts ≤ now, smooth in
+// W (integer-rounded), then convert to kW. `pick` maps signed W → the W value we want.
+function _planPastKW(histKey, pick) {
+  const now = Date.now();
+  const h = historyMap[histKey] || { ts: [], val: [] };
+  let pts = [];
+  for (let i = 0; i < h.ts.length; i++) {
+    if (h.ts[i] <= now) pts.push({ x: h.ts[i], y: pick(h.val[i]) });
+  }
+  pts = _smoothEnabled ? smoothPoints(pts, 30) : pts;
+  return pts.map(p => ({ x: p.x, y: p.y == null ? null : p.y / 1000 }));
+}
+
+// Future planned series in kW from a forecast array (ts_ms keyed); keep ts ≥ now.
+function _planFutKW(arr, pick) {
+  const now = Date.now();
+  return arr
+    .filter(r => r.ts_ms >= now)
+    .map(r => ({ x: r.ts_ms, y: pick(r) }))
+    .filter(p => p.y != null);
+}
+
+// Assemble the {x,y} arrays for every plan series (past actual ⨝ future plan).
+function buildPlanSeries() {
+  const W = {
+    solar: [ _planPastKW('active_power',      v => v),
+             _planFutKW(_solcastData,         r => r.pv_w  != null ? r.pv_w  / 1000 : null) ],
+    load:  [ _planPastKW('house_load',        v => v),
+             _planFutKW(_consumptionForecast, r => r.w     != null ? r.w     / 1000 : null) ],
+    chg:   [ _planPastKW('batt_power',        v => Math.max(v, 0)),
+             _planFutKW(_powerForecast,       r => r.batt_w != null ? Math.max(r.batt_w, 0) / 1000 : null) ],
+    dis:   [ _planPastKW('batt_power',        v => Math.max(-v, 0)),
+             _planFutKW(_powerForecast,       r => r.batt_w != null ? Math.max(-r.batt_w, 0) / 1000 : null) ],
+    imp:   [ _planPastKW('meter_active_power', v => Math.max(v, 0)),
+             _planFutKW(_powerForecast,       r => r.grid_w != null ? Math.max(r.grid_w, 0) / 1000 : null) ],
+    exp:   [ _planPastKW('meter_active_power', v => Math.max(-v, 0)),
+             _planFutKW(_powerForecast,       r => r.grid_w != null ? Math.max(-r.grid_w, 0) / 1000 : null) ],
+  };
+  const out = {};
+  for (const [k, [past, fut]] of Object.entries(W)) out[k] = past.concat(fut);
+
+  // SOC (right axis, %): past actual + future plan
+  const now = Date.now();
+  const socPast = [];
+  const sh = historyMap['batt_soc'] || { ts: [], val: [] };
+  for (let i = 0; i < sh.ts.length; i++) if (sh.ts[i] <= now) socPast.push({ x: sh.ts[i], y: sh.val[i] });
+  const socFut = _powerForecast
+    .filter(r => r.ts_ms >= now && r.soc != null)
+    .map(r => ({ x: r.ts_ms, y: r.soc }));
+  out.soc = socPast.concat(socFut);
+  return out;
+}
+
+function buildPlanDatasets() {
+  const series = buildPlanSeries();
+  const nowMs = Date.now();
+  // Solid past, dashed future (plan) — split on the "now" boundary.
+  const planDash = ctx => (ctx.p0.parsed.x >= nowMs ? [5, 4] : undefined);
+
+  const datasets = PLAN_SERIES.map(s => ({
+    label: s.label,
+    data: series[s.key],
+    borderColor: s.color,
+    backgroundColor: s.color + (s.fill ? '20' : '00'),
+    borderWidth: 2,
+    pointRadius: 0,
+    pointHoverRadius: 4,
+    fill: s.fill,
+    tension: 0.3,
+    spanGaps: true,
+    yAxisID: 'y',
+    segment: { borderDash: planDash },
+  }));
+
+  // SOC on the secondary axis
+  datasets.push({
+    label: 'Battery SOC',
+    data: series.soc,
+    borderColor: '#9CA3AF',
+    backgroundColor: 'transparent',
+    borderWidth: 2.5,
+    pointRadius: 0,
+    pointHoverRadius: 4,
+    fill: false,
+    tension: 0.3,
+    spanGaps: true,
+    yAxisID: 'ySoc',
+    segment: { borderDash: planDash },
+  });
+  return datasets;
+}
+
+function renderPlanLegend() {
+  const el = document.getElementById('plan-legend');
+  if (!el) return;
+  const items = [...PLAN_SERIES, { label: 'Battery SOC', color: '#9CA3AF' }];
+  el.innerHTML = items.map(s =>
+    `<span style="display:flex;align-items:center;gap:6px">
+       <span style="width:22px;height:3px;background:${s.color};display:inline-block;border-radius:2px"></span>${s.label}
+     </span>`).join('');
+}
+
+// Vertical "now" marker
+const _planNowLine = {
+  id: 'planNowLine',
+  afterDraw(chart) {
+    const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+    const px = x.getPixelForValue(Date.now());
+    if (px < x.left || px > x.right) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(226,232,244,0.45)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
+    ctx.restore();
+  },
+};
+
+function renderPlanChart() {
+  renderPlanLegend();
+  const canvas = document.getElementById('plan-chart');
+  if (!canvas) return;
+  if (_planChart) { _planChart.destroy(); _planChart = null; }
+
+  _planChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { datasets: buildPlanDatasets() },
+    plugins: [_planNowLine],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA',
+          bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          callbacks: {
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }),
+            label: ctx => {
+              const unit = ctx.dataset.yAxisID === 'ySoc' ? '%' : ' kW';
+              return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(ctx.dataset.yAxisID === 'ySoc' ? 0 : 2)}${unit}`;
+            },
+          },
+        },
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 12,
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          position: 'left',
+          title: { display: true, text: 'kW', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid: { color: '#2D3555' },
+        },
+        ySoc: {
+          position: 'right',
+          min: 0, max: 100,
+          title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid: { drawOnChartArea: false },
+        },
+      },
+    },
+  });
+}
+
+// Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
+function refreshPlanChart() {
+  if (!_planChart) return;
+  if (!document.getElementById('panel-plan').classList.contains('active')) return;
+  _planChart.data.datasets = buildPlanDatasets();
+  _planChart.update('none');
+}
+
 function onSolarForecast(data) {
   _solcastData = data.slice().sort((a, b) => a.ts_ms - b.ts_ms);
   updateSolarFcKwh();
+  refreshPlanChart();
   // Refresh the PV Power modal if it's open so the overlay appears immediately
   if (_modalChart && _modalKey === 'active_power') {
     openChart('active_power', 'PV Power', 'W', '#F59E0B');
@@ -1863,6 +2115,7 @@ function onConsumptionForecast(data) {
   if (_modalChart && _modalKey === 'house_load') {
     openChart('house_load', 'House Load', 'W', '#F87171');
   }
+  refreshPlanChart();
 }
 
 // ── Power forecast (SoC + battery + grid) ────────────────────────────────────
@@ -1875,6 +2128,10 @@ function onPowerForecast(data) {
     if (_modalKey === 'batt_power')        openChart('batt_power',        'Battery Power', 'W', '#34D399');
     if (_modalKey === 'meter_active_power') openChart('meter_active_power','Grid Power',   'W', '#4F8EF7');
   }
+  // Update the forecast-SOC card (first plan slot after now)
+  const nextFc = _powerForecast.find(r => r.ts_ms >= Date.now() && r.soc != null);
+  if (nextFc) setCard('plan-soc-fc', nextFc.soc, 0);
+  refreshPlanChart();
 }
 
 // ── Grid sub-label (direction + current price) ────────────────────────────────
