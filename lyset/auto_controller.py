@@ -145,7 +145,6 @@ class AutoController:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _restore_defaults(self, worker):
-        worker.write_u16(40525, 0, 'AutoCtrl OFF: remove PV limit')
         worker.write_u16(47100, 0, 'AutoCtrl OFF: stop forced mode')
         worker.write_u16(47087, 0, 'AutoCtrl OFF: disable grid charge')
         worker.write_u16(47086, 4, 'AutoCtrl OFF: mode=max self-consumption')
@@ -203,7 +202,6 @@ class AutoController:
                 worker.write_i32(40527, limit_w, f'AutoCtrl: PV limit {limit_w} W')
                 pv_detail = f'PV limited to {limit_w} W'
             else:
-                worker.write_u16(40525, 0, 'AutoCtrl: no limit (low solar)')
                 pv_detail = 'Low solar'
 
             worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
@@ -235,7 +233,6 @@ class AutoController:
             if (import_dkk <= future_min_import + _CHARGE_MARGIN_DKK
                     and future_max_import > import_dkk + _CHARGE_MARGIN_DKK):
                 self._grid_charging = True
-                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge feature OFF')
                 worker.write_u32(47079, _GRID_CHARGE_W, f'AutoCtrl: grid cap {_GRID_CHARGE_W} W')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
@@ -254,7 +251,6 @@ class AutoController:
             max_upcoming = max(p['import'] for p in hold_window)
             if max_upcoming > import_dkk + _HOLD_DELTA_DKK:
                 self._grid_charging = False
-                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced (idle)')
                 worker.write_u16(47100, 0, 'AutoCtrl: force IDLE')
@@ -272,7 +268,6 @@ class AutoController:
             future_min_import = min(p['import'] for p in arbit_window)
             if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
                 self._grid_charging = False
-                worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
                 worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
                 worker.write_u16(47086, 1, 'AutoCtrl: mode=forced')
                 worker.write_u16(47100, 2, 'AutoCtrl: force DISCHARGE')
@@ -286,7 +281,6 @@ class AutoController:
         # of surplus needed, the power balance caps it naturally.
         # No surplus / no solar: mode 4 covers load from battery then grid.
         self._grid_charging = False
-        worker.write_u16(40525, 0, 'AutoCtrl: no PV limit')
         worker.write_u16(47087, 0, 'AutoCtrl: grid charge OFF')
 
         solar_surplus = pv_w - house_load
