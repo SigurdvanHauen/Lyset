@@ -4,11 +4,12 @@ AutoController — periodic optimizer for solar/battery control.
 Runs every 15 s while enabled and picks ONE action per tick, in priority order:
 
 1. NEGATIVE EXPORT (export < −0.01 DKK/kWh)
-   Self-consumption (mode 4): route the PV surplus into the battery; never
-   discharge to grid.  PV cannot be curtailed via Modbus on this SDongle, so
-   surplus beyond the battery's charge rate is still exported at the negative
-   price (unavoidable).  We do NOT force-charge from grid here — that would
-   import at the positive import price to dodge a small negative export.
+   Force-charge the battery (47086=1, 47075+47247, 47100=1) to soak up the PV
+   surplus rather than feed the grid.  Mode 4 will discharge the battery to grid
+   here on this firmware, so we force a charge to guarantee the battery only ever
+   absorbs.  PV cannot be curtailed via Modbus, so surplus beyond the battery's
+   charge rate is still exported at the negative price — but we never add battery
+   power to that export.  Battery full → force-idle (still no discharge to grid).
 
 2. GRID CHARGE (now at/near the cheapest of the next CHARGE_HORIZON_H h, a
    materially pricier slot ahead, SoC below threshold)
@@ -272,17 +273,34 @@ class AutoController:
             (16, 47086, 4, 'AutoCtrl: mode=max self-consumption'),
         ]
 
-        # ── 1. Negative export → self-consumption (mode 4) ────────────────────
-        # Negative export implies a PV surplus (export only happens when pv > load).
-        # Mode 4 directs that surplus into the battery at its full charge rate and
-        # never discharges to grid. We can't curtail PV here, so surplus beyond the
-        # battery's charge rate is still exported at the negative price.
+        # ── 1. Negative export → FORCE CHARGE to soak up the surplus ──────────
+        # At a negative export price we must not feed the grid. Mode 4 on this
+        # firmware will happily discharge the battery to grid here, so we force a
+        # charge instead: it guarantees the battery is charging (never discharging)
+        # and absorbs as much PV surplus as its rate allows. PV can't be curtailed,
+        # so any surplus beyond the battery's charge rate is still exported — but we
+        # never *add* battery power to that export. If the battery is full there is
+        # nothing to absorb with, so force-idle (still no discharge to grid).
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
-            self._apply(worker, seq_self_consumption)
-            detail = (f'Negative export {export_dkk:.3f} DKK — self-consumption '
-                      f'(PV {pv_w:.0f} W, load {house_load:.0f} W, SoC {batt_soc:.0f}%)')
-            return _Cmd(mode='export_unlimited', detail=detail)
+            if batt_soc < _FORCE_CHARGE_SOC_MAX:
+                self._apply(worker, [
+                    (16, 47087, 0,                   'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1,                   'AutoCtrl: mode=forced'),
+                    (32, 47075, _MAX_FORCE_CHARGE_W, f'AutoCtrl: max charge power {_MAX_FORCE_CHARGE_W} W'),
+                    (32, 47247, _MAX_FORCE_CHARGE_W, f'AutoCtrl: forced charge power {_MAX_FORCE_CHARGE_W} W'),
+                    (16, 47100, 1,                   'AutoCtrl: force CHARGE'),
+                ])
+                batt_detail = f'battery force-charging (SoC {batt_soc:.0f}%)'
+            else:
+                self._apply(worker, [
+                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1, 'AutoCtrl: mode=forced'),
+                    (16, 47100, 0, 'AutoCtrl: force IDLE (full)'),
+                ])
+                batt_detail = f'battery idle — full (SoC {batt_soc:.0f}%)'
+            detail = f'Negative export {export_dkk:.3f} DKK — {batt_detail}'
+            return _Cmd(mode='export_limited', detail=detail)
 
         # ── 2. Grid charge: bank cheap energy for a pricier period ────────────
         # Fires when the current slot is at/near the cheapest of the next

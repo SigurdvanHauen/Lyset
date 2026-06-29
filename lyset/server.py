@@ -120,6 +120,14 @@ def _push(msg: dict):
 
 # ── Log handler that forwards Python log records to the browser ───────────────
 
+class _TZFormatter(logging.Formatter):
+    """logging.Formatter that renders asctime in Danish local time, not the
+    server's timezone (the Proxmox LXC runs in UTC)."""
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, _TZ_LOCAL)
+        return dt.strftime(datefmt or '%H:%M:%S')
+
+
 class _WebLogHandler(logging.Handler):
     _LEVELS = {
         logging.DEBUG:    'debug',
@@ -131,7 +139,7 @@ class _WebLogHandler(logging.Handler):
 
     def __init__(self):
         super().__init__()
-        self.setFormatter(logging.Formatter(
+        self.setFormatter(_TZFormatter(
             '%(asctime)s  %(levelname)-8s  %(name)s — %(message)s',
             datefmt='%H:%M:%S',
         ))
@@ -139,7 +147,7 @@ class _WebLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord):
         try:
             entry = {
-                't': time.strftime('%H:%M:%S'),
+                't': datetime.now(_TZ_LOCAL).strftime('%H:%M:%S'),
                 'level': self._LEVELS.get(record.levelno, 'info'),
                 'msg': self.format(record),
             }
@@ -245,8 +253,9 @@ def _simulate_soc(
             future_from_here = prices_sorted[price_ptr + 1:]
             gc_soc_limit = GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
 
+            do_neg = export_dkk < NEGATIVE_EXPORT_DKK
             do_gc = do_hold = do_arbit = False
-            if export_dkk >= NEGATIVE_EXPORT_DKK:  # else → self-consumption
+            if not do_neg:
                 # Grid charge: at/near the cheapest upcoming window AND SoC below threshold?
                 charge_end = ts_ms + CHARGE_HORIZON_H * 3_600_000
                 c_win = [p for p in future_from_here if p['ts'] <= charge_end]
@@ -274,7 +283,14 @@ def _simulate_soc(
                     if a_win:
                         do_arbit = export_dkk > min(p['import'] for p in a_win) + ARBIT_MARGIN_DKK
 
-            if do_gc:
+            if do_neg:
+                # Negative export → force-charge to soak surplus (idle if full).
+                gc_active  = False
+                batt_kw    = 0.0 if soc >= FORCE_CHARGE_SOC_MAX else min(MAX_FORCE_CHARGE_W / 1000.0, max_power_kw)
+                grid_kw    = batt_kw - net_kw
+                energy_kwh = batt_kw * 0.5 * charge_eff
+
+            elif do_gc:
                 gc_active  = True
                 batt_kw    = min(GRID_CHARGE_W / 1000.0, max_power_kw)
                 grid_kw    = batt_kw - net_kw
