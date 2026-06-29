@@ -406,6 +406,14 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-top"><div class="card-lbl">Forced Cmd</div><div class="card-times" id="t-d-bforced"></div></div>
         <div class="card-val" style="font-size:14px" id="d-bforced">&#8212;</div>
       </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Max Charge</div><div class="card-times" id="t-d-bmaxch"></div></div>
+        <div class="card-val" id="d-bmaxch">&#8212;<span class="unit">W</span></div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Max Discharge</div><div class="card-times" id="t-d-bmaxdis"></div></div>
+        <div class="card-val" id="d-bmaxdis">&#8212;<span class="unit">W</span></div>
+      </div>
     </div>
 
     <div class="sec">PV Strings</div>
@@ -968,6 +976,8 @@ function onData(d) {
   setText('d-bstat',   d.batt_status_label);
   setText('d-bmode',   d.batt_working_mode_label);
   setText('d-bforced', d.batt_forced_label);
+  setCard('d-bmaxch',  d.batt_max_charge_w,   0);
+  setCard('d-bmaxdis', d.batt_max_discharge_w, 0);
 
   setCard('d-pv1v', d.pv1_voltage, 1);
   setCard('d-pv1a', d.pv1_current, 2);
