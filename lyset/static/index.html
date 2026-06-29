@@ -504,6 +504,25 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         auto-mode controller's decision logic. Battery SOC is on the right axis.
       </div>
     </div>
+
+    <div class="sec" style="margin-top:16px">Electricity Prices</div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+      <div style="display:flex;flex-wrap:wrap;gap:12px 18px;margin-bottom:12px;font-size:11px">
+        <span style="display:flex;align-items:center;gap:6px">
+          <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>Import (all-in incl. VAT)
+        </span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>Export est. (spot only)
+        </span>
+      </div>
+      <div style="position:relative;height:200px">
+        <canvas id="plan-price-chart"></canvas>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
+        DKK/kWh &middot; solid = actual prices, dashed = forecast. The time axis follows the
+        plan chart above — zoom or pan the top chart and this one matches its window.
+      </div>
+    </div>
   </div>
 
   <!-- Prices -->
@@ -2058,8 +2077,11 @@ function renderPlanChart() {
           },
         },
         zoom: {
-          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
-          pan:  { enabled: true, mode: 'x' },
+          zoom: {
+            wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x',
+            onZoomComplete: syncPlanPriceX,
+          },
+          pan: { enabled: true, mode: 'x', onPanComplete: syncPlanPriceX },
         },
       },
       scales: {
@@ -2087,6 +2109,82 @@ function renderPlanChart() {
       },
     },
   });
+
+  renderPlanPriceChart();
+  syncPlanPriceX();
+}
+
+// ── Price chart under the plan chart (x-axis slaved to the plan chart) ─────────
+let _planPriceChart = null;
+
+function buildPlanPriceDatasets() {
+  const nowMs = Date.now();
+  const planDash = ctx => (ctx.p0.parsed.x >= nowMs ? [5, 4] : undefined);
+  const imp = _pricesData.map(p => ({ x: p.ts, y: p.import }));
+  const exp = _pricesData.map(p => ({ x: p.ts, y: p.export }));
+  const base = {
+    borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+    stepped: 'before', tension: 0, fill: false, spanGaps: true,
+    segment: { borderDash: planDash },
+  };
+  return [
+    { label: 'Import', data: imp, borderColor: '#F59E0B', backgroundColor: '#F59E0B20', ...base },
+    { label: 'Export', data: exp, borderColor: '#34D399', backgroundColor: 'transparent', ...base },
+  ];
+}
+
+function renderPlanPriceChart() {
+  const canvas = document.getElementById('plan-price-chart');
+  if (!canvas) return;
+  if (_planPriceChart) { _planPriceChart.destroy(); _planPriceChart = null; }
+
+  _planPriceChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { datasets: buildPlanPriceDatasets() },
+    plugins: [_planNowLine],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA',
+          bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          callbacks: {
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }),
+            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} DKK/kWh`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 12,
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid: { color: '#2D3555' },
+        },
+      },
+    },
+  });
+}
+
+// Slave the price chart's x-window to the plan chart's current (possibly zoomed) view.
+function syncPlanPriceX() {
+  if (!_planChart || !_planPriceChart) return;
+  const xs = _planChart.scales.x;
+  if (xs == null || xs.min == null || xs.max == null) return;
+  _planPriceChart.options.scales.x.min = xs.min;
+  _planPriceChart.options.scales.x.max = xs.max;
+  _planPriceChart.update('none');
 }
 
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
@@ -2095,6 +2193,11 @@ function refreshPlanChart() {
   if (!document.getElementById('panel-plan').classList.contains('active')) return;
   _planChart.data.datasets = buildPlanDatasets();
   _planChart.update('none');
+  if (_planPriceChart) {
+    _planPriceChart.data.datasets = buildPlanPriceDatasets();
+    _planPriceChart.update('none');
+  }
+  syncPlanPriceX();
 }
 
 function onSolarForecast(data) {
@@ -2170,6 +2273,11 @@ function onPrices(prices) {
   document.getElementById('pr-status').textContent = '';
   const prPanel = document.getElementById('panel-prices');
   if (prPanel.classList.contains('active')) { renderPriceChart(); renderPriceLineChart(); }
+  if (_planPriceChart && document.getElementById('panel-plan').classList.contains('active')) {
+    _planPriceChart.data.datasets = buildPlanPriceDatasets();
+    _planPriceChart.update('none');
+    syncPlanPriceX();
+  }
 }
 
 function _fmtTime(ts) {
