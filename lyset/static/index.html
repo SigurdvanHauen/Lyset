@@ -2183,15 +2183,80 @@ function buildPlanSeries() {
   return out;
 }
 
+// Resample an irregular {x,y} series onto a regular time grid so that every plan
+// line shares identical timestamps. Fixes mismatched tooltip times and the
+// "no value between forecast points" holes. stepped=true holds the previous value
+// (prices); otherwise linear interpolation. A gap wider than maxGapMs breaks the
+// line (null) rather than bridging a real outage.
+function _planResample(points, grid, stepped, maxGapMs) {
+  const pts = points.filter(p => p && p.y != null).sort((p, q) => p.x - q.x);
+  const out = new Array(grid.length);
+  let i = 0;
+  for (let g = 0; g < grid.length; g++) {
+    const t = grid[g];
+    while (i + 1 < pts.length && pts[i + 1].x <= t) i++;
+    const a = (pts.length && pts[i].x <= t) ? pts[i] : null;
+    const b = a ? (pts[i + 1] || null) : null;
+    let y = null;
+    if (a && t === a.x) {
+      y = a.y;
+    } else if (a && b) {
+      if (b.x - a.x <= maxGapMs)
+        y = stepped ? a.y : a.y + (b.y - a.y) * (t - a.x) / (b.x - a.x);
+    } else if (a && !b && stepped && t - a.x <= maxGapMs) {
+      y = a.y;  // hold a price briefly past its last known point
+    }
+    out[g] = { x: t, y };
+  }
+  return out;
+}
+
+// Build a regular time grid (stepMs) spanning every series' data, capped for safety.
+function _planGridFrom(seriesList, stepMs) {
+  let lo = Infinity, hi = -Infinity;
+  for (const arr of seriesList) for (const p of arr) {
+    if (!p || p.y == null) continue;
+    if (p.x < lo) lo = p.x;
+    if (p.x > hi) hi = p.x;
+  }
+  if (!isFinite(lo) || hi <= lo) return [];
+  lo = Math.floor(lo / stepMs) * stepMs;
+  hi = Math.ceil(hi / stepMs) * stepMs;
+  const n = Math.min(Math.round((hi - lo) / stepMs) + 1, 4000);
+  const grid = new Array(n);
+  for (let k = 0; k < n; k++) grid[k] = lo + k * stepMs;
+  return grid;
+}
+
 function buildPlanDatasets() {
-  const series = buildPlanSeries();
+  const series = buildPlanSeries();   // raw, native resolution per series
   const nowMs = Date.now();
+
+  // Price overlays (raw), optionally smoothed.
+  let impPx = _pricesData.map(p => ({ x: p.ts, y: p.import }));
+  let expPx = _pricesData.map(p => ({ x: p.ts, y: p.export }));
+  if (planSmoothOn('priceImp')) impPx = smoothPoints(impPx, 30, false);
+  if (planSmoothOn('priceExp')) expPx = smoothPoints(expPx, 30, false);
+
+  // One shared 5-min grid for every line → aligned tooltips, no between-point holes.
+  const STEP      = 5 * 60 * 1000;
+  const POWER_GAP = 75 * 60 * 1000;    // bridges 30-min forecast steps; breaks real outages
+  const PRICE_GAP = 130 * 60 * 1000;   // bridges hourly price steps
+  const grid = _planGridFrom([...Object.values(series), impPx, expPx], STEP);
+
+  const R = {};
+  for (const k in series) R[k] = _planResample(series[k], grid, false, POWER_GAP);
+  const pxData = {
+    priceImp: _planResample(impPx, grid, true, PRICE_GAP),
+    priceExp: _planResample(expPx, grid, true, PRICE_GAP),
+  };
+
   // Solid past, dashed future (plan) — split on the "now" boundary.
   const planDash = ctx => (ctx.p0.parsed.x >= nowMs ? [5, 4] : undefined);
 
   const datasets = PLAN_SERIES.map(s => ({
     label: s.label,
-    data: series[s.key],
+    data: R[s.key],
     borderColor: s.color,
     backgroundColor: s.color + (s.fill ? '20' : '00'),
     borderWidth: 2,
@@ -2199,7 +2264,7 @@ function buildPlanDatasets() {
     pointHoverRadius: 4,
     fill: s.fill,
     tension: 0.3,
-    spanGaps: true,
+    spanGaps: false,
     yAxisID: 'y',
     hidden: !_planVisible[s.key],
     segment: { borderDash: planDash },
@@ -2208,7 +2273,7 @@ function buildPlanDatasets() {
   // SOC on the secondary axis
   datasets.push({
     label: 'Battery SOC',
-    data: series.soc,
+    data: R.soc,
     borderColor: '#9CA3AF',
     backgroundColor: 'transparent',
     borderWidth: 2.5,
@@ -2216,21 +2281,17 @@ function buildPlanDatasets() {
     pointHoverRadius: 4,
     fill: false,
     tension: 0.3,
-    spanGaps: true,
+    spanGaps: false,
     yAxisID: 'ySoc',
     hidden: !_planVisible.soc,
     segment: { borderDash: planDash },
   });
 
   // Price overlays on the third (right) axis — DKK/kWh, hidden by default.
-  const impPx = _pricesData.map(p => ({ x: p.ts, y: p.import }));
-  const expPx = _pricesData.map(p => ({ x: p.ts, y: p.export }));
-  const pxData = { priceImp: impPx, priceExp: expPx };
   for (const s of PLAN_PRICE_SERIES) {
-    const pd = planSmoothOn(s.key) ? smoothPoints(pxData[s.key], 30, false) : pxData[s.key];
     datasets.push({
       label: s.label,
-      data: pd,
+      data: pxData[s.key],
       borderColor: s.color,
       backgroundColor: 'transparent',
       borderWidth: 2,
@@ -2238,7 +2299,7 @@ function buildPlanDatasets() {
       pointHoverRadius: 4,
       fill: false,
       stepped: 'before',
-      spanGaps: true,
+      spanGaps: false,
       yAxisID: 'yPrice',
       hidden: !_planVisible[s.key],
       segment: { borderDash: planDash },
