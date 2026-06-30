@@ -683,15 +683,18 @@ class AutoController:
             if do_export:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # MUST export to grid
-                # Use forced mode (47086=1) with NO forced command (47100=0).
-                # Empirically: 47100=2 (force discharge) caps the inverter at ~1634 W
-                # regardless of the 47247 setpoint. 47100=0 with 47086=1 lets the
-                # BMS discharge freely at full rated power (2500 W observed).
-                # Grid charge is blocked by 47087=0, so the battery can only discharge.
+                # Write 47247 unconditionally every tick (bypasses _apply cache).
+                # cmd=0 only self-consumes; cmd=2 forces export but caps at ~1634 W
+                # on this firmware (47247 is ignored in discharge mode). 1634 W is
+                # still better than no export, so we use cmd=2 until a better
+                # mechanism is found.
+                worker.write_u32(47247, _BATT_MAX_DISCHARGE_W,
+                                 f'AutoCtrl: forced discharge power {_BATT_MAX_DISCHARGE_W} W')
+                self._applied[47247] = _BATT_MAX_DISCHARGE_W
                 self._apply(worker, [
                     (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1, 'AutoCtrl: mode=forced'),
-                    (16, 47100, 0, 'AutoCtrl: stop forced cmd — discharge freely'),
+                    (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
                 ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK, '
