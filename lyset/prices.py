@@ -4,15 +4,14 @@ Danish electricity prices — Strømligning API (stromligning.dk).
 Fetches all-in electricity prices for the correct DSO tariff zone via postal
 code lookup. Returns 15-minute resolution for current/historical data and
 1-hour resolution for forecasts. Import price includes spot, network tariffs,
-electricity tax, and VAT. Export payout = bare Nord Pool spot (electricity.value
-minus elafgift) minus small feed-in/balance tariffs — matching Vindstød's surplus
-settlement, where elafgift and VAT do NOT apply.
+electricity tax, and VAT. Export payout = bare Nord Pool spot (electricity.value,
+which is already the raw spot — not tax-inclusive) minus small feed-in/balance
+tariffs — matching Vindstød's surplus settlement, where elafgift and VAT do NOT apply.
 
 Environment variables:
   STROMLIGNING_API_KEY       — API key, Bearer scheme (required)
   STROMLIGNING_POSTAL_CODE   — Danish postal code for DSO auto-lookup (default: 5500)
   STROMLIGNING_SUPPLIER_ID   — Override DSO lookup with a known supplier ID
-  PRICE_ELAFGIFT             — Elafgift DKK/kWh excl. VAT, stripped to recover spot (default: 0.763)
   PRICE_EXPORT_FEE           — DKK/kWh feed-in/balance tariffs deducted from export (default: 0.033375)
   PRICE_POLL_INTERVAL        — Seconds between refreshes (default: 1800)
 """
@@ -112,12 +111,12 @@ def fetch_prices(api_key: str, supplier_id: str) -> list[dict]:
 
 def _parse_records(records: list[dict]) -> list[dict]:
     """Convert raw API records to the internal price format."""
-    # electricity.value bundles the raw spot + elafgift (excl. VAT); strip elafgift
-    # to recover the bare Nord Pool spot that the export payout is based on.
-    elafgift = _env_float('PRICE_ELAFGIFT', 0.763)
-    # Vindstød "salg af overskydende el": spot minus small feed-in/balance tariffs
-    # (Energinet indfødning 0.00625 + balance 0.006625 + netselskab indfødning
-    # 0.0105 + Vindstød balance 0.01 ≈ 0.033375). Netselskab tariff varies by area.
+    # details.electricity.value IS the bare Nord Pool spot price (it goes negative
+    # midday on solar-glut days — proof it does NOT bundle elafgift, which is a
+    # ≥0 consumption tax). The export payout is this spot minus small feed-in/
+    # balance tariffs. Vindstød "salg af overskydende el": Energinet indfødning
+    # 0.00625 + balance 0.006625 + netselskab indfødning 0.0105 + Vindstød balance
+    # 0.01 ≈ 0.033375. Netselskab indfødningstarif varies by net area.
     export_fee = _env_float('PRICE_EXPORT_FEE', 0.033375)
     out = []
     for rec in records:
@@ -133,25 +132,22 @@ def _parse_records(records: list[dict]) -> list[dict]:
         elec  = rec.get('details', {}).get('electricity', {})
 
         import_price = price.get('total')            # DKK/kWh incl. VAT (all-in)
-        elec_value   = elec.get('value')             # spot + elafgift, excl. VAT
+        spot_price   = elec.get('value')             # bare Nord Pool spot, excl. VAT
 
-        if import_price is None or elec_value is None:
+        if import_price is None or spot_price is None:
             continue
 
-        # Export payout (what Vindstød actually pays): the bare Nord Pool spot
-        # minus the small feed-in/balance tariffs. Elafgift and VAT are NOT part
-        # of export settlement (Vindstød: "Netydelse og elafgift er ikke en del af
-        # afregning med salg af strøm"). IntelliCharge's higher number includes
-        # elafgift — that's the net-settlement self-consumption value, not the
-        # export cash. Can be negative when the spot is negative.
-        spot_price   = elec_value - elafgift
+        # Export payout (what Vindstød actually pays): the bare spot minus the small
+        # feed-in/balance tariffs. Elafgift and VAT are NOT part of export settlement
+        # (Vindstød: "Netydelse og elafgift er ikke en del af afregning med salg af
+        # strøm"). Naturally goes negative when the spot itself is negative.
         export_price = round(spot_price - export_fee, 4)
 
         out.append({
             'ts':         ts_ms,
             'import':     round(import_price, 4),
             'export':     export_price,
-            'spot_est':   round(elec_value, 4),   # spot + elafgift for tooltip
+            'spot_est':   round(spot_price, 4),   # bare spot, for tooltip
             'resolution': rec.get('resolution', '1h'),
             'forecast':   rec.get('forecast', False),
         })
