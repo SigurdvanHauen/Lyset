@@ -2152,11 +2152,48 @@ function _planFutKW(arr, pick) {
     .filter(p => p.y != null);
 }
 
+// Step/hold lookup: value of the record whose timestamp is the latest at or
+// before t (matches how prices/forecast slots apply forward in time).
+function _lookupHold(arr, tsKey, valKey, t) {
+  let best = null, bestTs = -Infinity;
+  for (const r of arr) {
+    const rt = r[tsKey];
+    if (rt != null && rt <= t && rt > bestTs && r[valKey] != null) {
+      bestTs = rt; best = r[valKey];
+    }
+  }
+  return best;
+}
+
+// Future solar in kW, curtailed for negative export prices. When export is
+// negative the controller runs zero-export (mode 5): PV is capped to what the
+// house draws plus whatever the battery can soak up, so actual generation is
+// min(Solcast potential, load + battery charge) — the surplus is never produced.
+// Outside negative-price slots the raw Solcast potential stands.
+function _planFutSolarKW() {
+  const now = Date.now();
+  const out = [];
+  for (const r of _solcastData) {
+    if (r.ts_ms < now || r.pv_w == null) continue;
+    let pvKw = r.pv_w / 1000;
+    const exp = _lookupHold(_pricesData, 'ts', 'export', r.ts_ms);
+    if (exp != null && exp < 0) {
+      const loadW = _lookupHold(_consumptionForecast, 'ts_ms', 'w', r.ts_ms);
+      const chgW  = _lookupHold(_powerForecast,       'ts_ms', 'batt_w', r.ts_ms);
+      const capKw = (loadW != null ? loadW / 1000 : 0)
+                  + (chgW  != null ? Math.max(chgW, 0) / 1000 : 0);
+      pvKw = Math.min(pvKw, capKw);
+    }
+    out.push({ x: r.ts_ms, y: pvKw });
+  }
+  return out;
+}
+
 // Assemble the {x,y} arrays for every plan series (past actual ⨝ future plan).
 function buildPlanSeries() {
   const W = {
     solar: [ _planPastKW('active_power',      v => v, 'solar'),
-             _planFutKW(_solcastData,         r => r.pv_w  != null ? r.pv_w  / 1000 : null) ],
+             _planFutSolarKW() ],
     load:  [ _planPastKW('house_load',        v => v, 'load'),
              _planFutKW(_consumptionForecast, r => r.w     != null ? r.w     / 1000 : null) ],
     chg:   [ _planPastKW('batt_power',        v => Math.max(v, 0), 'chg'),
