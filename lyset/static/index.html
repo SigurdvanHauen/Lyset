@@ -2205,8 +2205,19 @@ function _planFutSolarKW() {
 function _planSolarBand() {
   const now = Date.now();
   const p10 = [], p90 = [];
+  // Anchor the band at the present time. Solcast slots are 30 min wide and stamped
+  // at slot-start, so the first slot with ts_ms >= now can be up to 30 min ahead;
+  // taking only future slots makes the band visibly start late. Interpolate the
+  // in-progress slot's value at `now` and prepend it so the band begins exactly now.
+  let prev = null;
   for (const r of _solcastData) {
-    if (r.ts_ms < now) continue;
+    if (r.ts_ms < now) { prev = r; continue; }
+    if (prev && p10.length === 0 && prev.ts_ms < now && r.ts_ms > now) {
+      const f = (now - prev.ts_ms) / (r.ts_ms - prev.ts_ms);
+      const lerp = (a, b) => (a != null && b != null) ? (a + (b - a) * f) / 1000 : null;
+      p10.push({ x: now, y: lerp(prev.p10_w, r.p10_w) });
+      p90.push({ x: now, y: lerp(prev.p90_w, r.p90_w) });
+    }
     p10.push({ x: r.ts_ms, y: r.p10_w != null ? r.p10_w / 1000 : null });
     p90.push({ x: r.ts_ms, y: r.p90_w != null ? r.p90_w / 1000 : null });
   }
