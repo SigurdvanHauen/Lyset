@@ -480,6 +480,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
         <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
         <div style="display:flex;gap:8px;flex-shrink:0">
+          <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
           <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
           <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
           <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
@@ -2076,6 +2077,27 @@ function togglePlanBands() {
   refreshPlanChart();
 }
 
+// Predicted-vs-actual overlay — toggled by its own button (default OFF), persisted.
+// When on, each trace gets a dashed companion line drawn over the PAST region
+// showing what was forecast for those slots, so plan accuracy can be eyeballed
+// against the solid actuals. No legend entry; same colour as the live trace.
+let _planPredEnabled = false;
+try { const v = localStorage.getItem('planPredEnabled'); if (v !== null) _planPredEnabled = v === '1'; } catch (e) {}
+
+function updatePlanPredBtn() {
+  const btn = document.getElementById('plan-pred-btn');
+  if (!btn) return;
+  btn.textContent = 'Predicted: ' + (_planPredEnabled ? 'On' : 'Off');
+  btn.style.borderColor = _planPredEnabled ? 'var(--accent)' : 'var(--border)';
+}
+
+function togglePlanPred() {
+  _planPredEnabled = !_planPredEnabled;
+  try { localStorage.setItem('planPredEnabled', _planPredEnabled ? '1' : '0'); } catch (e) {}
+  updatePlanPredBtn();
+  refreshPlanChart();
+}
+
 let _planSmoothEnabled = true;
 const _planSmooth = (() => {
   const def = {};
@@ -2155,6 +2177,27 @@ function _planFutKW(arr, pick) {
     .filter(r => r.ts_ms >= now)
     .map(r => ({ x: r.ts_ms, y: pick(r) }))
     .filter(p => p.y != null);
+}
+
+// Predicted (forecast) values for PAST slots — the historical plan, kept so it can
+// be compared against what actually happened. Same forecast arrays the future plan
+// is drawn from (_powerForecast / _consumptionForecast / _solcastData all retain
+// ~24 h of past records), but filtered to ts ≤ now. kW for power lines, % for SOC.
+function buildPlanPredPast() {
+  const now = Date.now();
+  const pastFc = (arr, pick) => arr
+    .filter(r => r.ts_ms <= now)
+    .map(r => ({ x: r.ts_ms, y: pick(r) }))
+    .filter(p => p.y != null);
+  return {
+    solar: pastFc(_solcastData,         r => r.pv_w   != null ? r.pv_w   / 1000 : null),
+    load:  pastFc(_consumptionForecast, r => r.w      != null ? r.w      / 1000 : null),
+    chg:   pastFc(_powerForecast,       r => r.batt_w != null ? Math.max(r.batt_w, 0)  / 1000 : null),
+    dis:   pastFc(_powerForecast,       r => r.batt_w != null ? Math.max(-r.batt_w, 0) / 1000 : null),
+    imp:   pastFc(_powerForecast,       r => r.grid_w != null ? Math.max(r.grid_w, 0)  / 1000 : null),
+    exp:   pastFc(_powerForecast,       r => r.grid_w != null ? Math.max(-r.grid_w, 0) / 1000 : null),
+    soc:   pastFc(_powerForecast,       r => r.soc    != null ? r.soc : null),
+  };
 }
 
 // Step/hold lookup: value of the record whose timestamp is the latest at or
@@ -2323,6 +2366,11 @@ function buildPlanDatasets() {
 
   const R = {};
   for (const k in series) R[k] = _planResample(series[k], grid, false, POWER_GAP);
+  // Predicted-past overlay (forecast values for ts ≤ now), resampled onto the same
+  // grid. No smoothing — the forecasts are already coarse (15–30 min slots).
+  const predPast = buildPlanPredPast();
+  const PR = {};
+  for (const k in predPast) PR[k] = _planResample(predPast[k], grid, false, POWER_GAP);
   const pxData = {
     priceImp: _planResample(impPx, grid, true, PRICE_GAP),
     priceExp: _planResample(expPx, grid, true, PRICE_GAP),
@@ -2366,6 +2414,44 @@ function buildPlanDatasets() {
     yAxisID: 'ySoc',
     hidden: !_planVisible.soc,
     segment: { borderDash: planDash },
+  });
+
+  // Predicted-vs-actual overlay: a dashed companion per power line + SOC, drawn
+  // over the past region only (data is ts ≤ now), same colour as the live trace.
+  // Toggled by the "Predicted" button; each follows its trace's own visibility.
+  // Excluded from the tooltip via the ' (pred)' label suffix so hover stays clean.
+  const predHidden = !_planPredEnabled;
+  for (const s of PLAN_SERIES) {
+    datasets.push({
+      label: s.label + ' (pred)',
+      data: PR[s.key],
+      borderColor: s.color,
+      backgroundColor: 'transparent',
+      borderWidth: 1.5,
+      borderDash: [5, 4],
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      fill: false,
+      tension: 0.3,
+      spanGaps: false,
+      yAxisID: 'y',
+      hidden: predHidden || !_planVisible[s.key],
+    });
+  }
+  datasets.push({
+    label: 'Battery SOC (pred)',
+    data: PR.soc,
+    borderColor: '#9CA3AF',
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+    borderDash: [5, 4],
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false,
+    tension: 0.3,
+    spanGaps: false,
+    yAxisID: 'ySoc',
+    hidden: predHidden || !_planVisible.soc,
   });
 
   // Price overlays on the third (right) axis — DKK/kWh, hidden by default.
@@ -2537,6 +2623,7 @@ function renderPlanChart() {
   renderPlanLegend();
   updatePlanSmoothBtn();
   updatePlanBandsBtn();
+  updatePlanPredBtn();
   const canvas = document.getElementById('plan-chart');
   if (!canvas) return;
   if (_planChart) { _planChart.destroy(); _planChart = null; }
@@ -2560,7 +2647,8 @@ function renderPlanChart() {
           // the P10/P90 band bounds — only the "Solar forecast" mean gets a row.
           filter: item => item.parsed && item.parsed.y != null
             && item.dataset.label !== 'Solar P10'
-            && item.dataset.label !== 'Solar P90',
+            && item.dataset.label !== 'Solar P90'
+            && !item.dataset.label.endsWith(' (pred)'),
           callbacks: {
             title: ctx => ctx.length ? new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '',
             label: ctx => {
