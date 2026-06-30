@@ -166,8 +166,12 @@ class AutoController:
     """
 
     # Force a full re-apply of all registers every Nth tick, so the controller
-    # recovers if the inverter state drifts (e.g. manual change, reconnect).
-    _RESYNC_EVERY = 20  # ticks (20 × 15 s = 5 min)
+    # recovers if the inverter state drifts (e.g. manual change, reconnect). The
+    # read-back-gated writes self-heal every tick on their own; this blind
+    # re-assert only matters for registers that don't read back (e.g. 47247 forced
+    # charge power), so it can be infrequent — keeping it low just floods the
+    # single-client SDongle with redundant writes.
+    _RESYNC_EVERY = 60  # ticks (60 × 15 s = 15 min)
 
     def __init__(self):
         self.enabled:         bool            = False
@@ -237,25 +241,32 @@ class AutoController:
           grid charge and arbitrage discharge can use the grid, and so surplus PV
           can export at a good price.
 
-        DRIVEN OFF THE LIVE READ-BACK (47415/47416 are polled), NOT the optimistic
-        _applied cache. The SDongle drops write responses intermittently; the cache
-        would mark the write done even when it failed, leaving the inverter stuck on
-        the old mode (e.g. still curtailing after the price turned positive). By
-        comparing against the polled value we re-issue the write every tick until the
-        inverter actually confirms it, then stop — self-healing, and at most one write
-        per tick so the single-client SDongle is never flooded.
+        DRIVEN OFF THE LIVE READ-BACK (47415 is polled) WHEN IT READS BACK, else
+        the optimistic _applied cache. When the inverter reports its mode we compare
+        and re-issue the write every tick until it confirms, then stop — self-healing
+        without flooding. But on firmware where 47415 does NOT read back
+        (active_power_mode polls as None, logged 'apc=?'), `None != target` is always
+        true, so the old code re-wrote it EVERY tick forever — flooding the
+        single-client SDongle. In that case fall back to the optimistic _apply cache:
+        write once, then re-assert only on the periodic resync.
         """
+        target = _EXPORT_LIMIT_MODE_ZERO if zero_export else _EXPORT_LIMIT_MODE_UNLIMITED
+        label  = 'zero export limitation' if zero_export else 'unlimited'
+        desc   = f'AutoCtrl: active power ctrl mode={target} ({label})'
+
         cur_mode = data.get('active_power_mode')
         cur_mode = int(round(cur_mode)) if cur_mode is not None else None
 
-        if zero_export:
-            if cur_mode != _EXPORT_LIMIT_MODE_ZERO:
-                worker.write_u16(47415, _EXPORT_LIMIT_MODE_ZERO,
-                                 'AutoCtrl: active power ctrl mode=5 (zero export limitation)')
+        if cur_mode is None:
+            # 47415 doesn't read back — write once and let the resync re-assert,
+            # never blindly every tick.
+            self._apply(worker, [(16, 47415, target, desc)])
         else:
-            if cur_mode != _EXPORT_LIMIT_MODE_UNLIMITED:
-                worker.write_u16(47415, _EXPORT_LIMIT_MODE_UNLIMITED,
-                                 'AutoCtrl: active power ctrl mode=0 (unlimited)')
+            if cur_mode != target:
+                worker.write_u16(47415, target, desc)
+            # Keep the cache coherent so a resync clear won't needlessly re-write a
+            # register the inverter already confirms is correct.
+            self._applied[47415] = target
 
     def _charge_from_surplus(self, worker, surplus_w: float, batt_soc: float) -> str:
         """
