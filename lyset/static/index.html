@@ -486,6 +486,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
       <div style="position:relative;height:420px">
         <canvas id="plan-chart"></canvas>
+        <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
         Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
@@ -2368,12 +2369,51 @@ const _planNowLine = {
   },
 };
 
-// Tooltip positioner that pins the box to the top of the plot, following the
-// cursor's x — so it never sits on top of the data point being probed.
-if (window.Chart && Chart.Tooltip && Chart.Tooltip.positioners) {
-  Chart.Tooltip.positioners.planTop = function (items, eventPos) {
-    return { x: eventPos.x, y: this.chart.chartArea.top + 4 };
-  };
+// Thin vertical crosshair at the hovered time, so the probed slice is obvious.
+const _planCrosshair = {
+  id: 'planCrosshair',
+  afterDraw(chart) {
+    const tt = chart.tooltip;
+    if (!tt || !tt.getActiveElements || tt.getActiveElements().length === 0) return;
+    const x = tt.caretX;
+    const { ctx, chartArea: { top, bottom } } = chart;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(226,232,244,0.30)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.restore();
+  },
+};
+
+// External HTML tooltip rendered into #plan-tip and positioned BESIDE the cursor
+// (flips to whichever side has room) so it never covers the traces being probed.
+function planExternalTooltip(context) {
+  const { chart, tooltip } = context;
+  const el = document.getElementById('plan-tip');
+  if (!el) return;
+  if (!tooltip || tooltip.opacity === 0) { el.style.opacity = '0'; return; }
+
+  const title = (tooltip.title && tooltip.title[0]) || '';
+  const rows = (tooltip.body || []).map((b, i) => {
+    const c = (tooltip.labelColors && tooltip.labelColors[i]) || {};
+    return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#E2E8F4;line-height:1.55">
+      <span style="width:10px;height:10px;border-radius:2px;flex-shrink:0;background:${c.borderColor || c.backgroundColor || '#fff'}"></span>
+      ${b.lines.join(' ')}</div>`;
+  }).join('');
+  el.innerHTML = `<div style="font-size:11px;color:#8892AA;margin-bottom:5px;font-weight:600">${title}</div>${rows}`;
+
+  // Place beside the cursor: prefer right; flip left if it would overflow.
+  const cx = tooltip.caretX, cy = tooltip.caretY;
+  const bw = el.offsetWidth, bh = el.offsetHeight;
+  const gap = 18;
+  let left = cx + gap;
+  if (left + bw > chart.width - 4) left = cx - gap - bw;
+  left = Math.max(4, Math.min(left, chart.width - bw - 4));
+  let top = cy - bh / 2;
+  top = Math.max(chart.chartArea.top + 2, Math.min(top, chart.chartArea.bottom - bh - 2));
+  el.style.left = left + 'px';
+  el.style.top  = top + 'px';
+  el.style.opacity = '1';
 }
 
 function renderPlanChart() {
@@ -2386,7 +2426,7 @@ function renderPlanChart() {
   _planChart = new Chart(canvas.getContext('2d'), {
     type: 'line',
     data: { datasets: buildPlanDatasets() },
-    plugins: [_planNowLine],
+    plugins: [_planNowLine, _planCrosshair],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -2395,9 +2435,8 @@ function renderPlanChart() {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#1C2032', titleColor: '#8892AA',
-          bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
-          position: 'planTop', caretPadding: 10,
+          enabled: false,
+          external: planExternalTooltip,
           // Skip the null gap-break points so hovering the forecast region doesn't
           // produce empty/jumpy rows (and never calls toFixed on null).
           filter: item => item.parsed && item.parsed.y != null,
