@@ -234,6 +234,78 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
   padding: 12px 16px 16px;
 }
 
+/* ── Settings modal ── */
+#settings-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 210;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+#settings-overlay.active { display: flex; }
+#settings-overlay .modal-box { width: min(94vw, 640px); height: min(88vh, 760px); }
+#settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 18px 18px;
+}
+.set-group { margin-top: 16px; }
+.set-group:first-child { margin-top: 4px; }
+.set-group-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+.set-group-note { font-size: 10px; color: var(--muted); margin-bottom: 10px; }
+.set-field { margin-bottom: 12px; }
+.set-field > label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.set-input-wrap { position: relative; display: flex; align-items: center; gap: 6px; }
+.set-field input[type=text],
+.set-field input[type=number],
+.set-field input[type=password] {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+.set-field input:focus { outline: none; border-color: var(--accent); }
+.set-reveal {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 6px 9px;
+  border-color: var(--border);
+}
+.set-help { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+.set-bool { display: flex; align-items: center; gap: 8px; }
+.set-bool input { width: 16px; height: 16px; }
+.set-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.set-footer .hint { margin-right: auto; font-size: 11px; color: var(--muted); }
+
 /* ── Control ── */
 .ctrl-status {
   background: var(--surface);
@@ -327,6 +399,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <span id="status-badge">Disconnected</span>
   <button id="auto-btn" onclick="toggleAutoMode()" title="Auto mode: let Lyset control export limits and battery charging based on prices">&#9881; Auto: OFF</button>
   <span id="last-update"></span>
+  <button id="settings-btn" onclick="openSettings()" title="Settings — configure inverter, API keys and more" style="margin-left:auto;font-size:16px;padding:4px 10px;line-height:1">&#9881;</button>
 </div>
 
 <!-- ── Tab bar ── -->
@@ -731,6 +804,29 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
     </div>
     <div id="modal-canvas-wrap">
       <canvas id="modal-canvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ── Settings modal ── -->
+<div id="settings-overlay" onclick="settingsOverlayClick(event)">
+  <div class="modal-box">
+    <div class="modal-hdr">
+      <div>
+        <div class="modal-hdr-title">&#9881; Settings</div>
+        <div class="modal-hdr-hint">Saved to the server's private <code>.env</code> — never committed to git</div>
+      </div>
+      <div class="modal-actions">
+        <button class="modal-close" onclick="closeSettings()">&#215;</button>
+      </div>
+    </div>
+    <div id="settings-body">
+      <div id="settings-form"></div>
+    </div>
+    <div class="set-footer">
+      <span class="hint" id="settings-hint"></span>
+      <button onclick="closeSettings()" style="font-size:12px;padding:7px 14px">Cancel</button>
+      <button id="settings-save" class="primary" onclick="saveSettings()" style="font-size:12px;padding:7px 16px">Save</button>
     </div>
   </div>
 </div>
@@ -3141,9 +3237,179 @@ function renderPriceLineChart() {
   });
 }
 
+// ── Settings ──────────────────────────────────────────────────────────────────
+let _settingsGroups = null;
+
+async function openSettings() {
+  const overlay = document.getElementById('settings-overlay');
+  const form    = document.getElementById('settings-form');
+  form.innerHTML = '<div style="color:var(--muted);padding:20px 0">Loading…</div>';
+  overlay.classList.add('active');
+  document.getElementById('settings-hint').textContent = '';
+  try {
+    const r = await fetch('/api/settings');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    _settingsGroups = data.groups;
+    renderSettingsForm(data.groups);
+  } catch (e) {
+    form.innerHTML = '<div style="color:var(--danger);padding:20px 0">Failed to load settings: ' + e.message + '</div>';
+  }
+}
+
+function renderSettingsForm(groups) {
+  const form = document.getElementById('settings-form');
+  form.innerHTML = '';
+  for (const g of groups) {
+    const sec = document.createElement('div');
+    sec.className = 'set-group';
+
+    const title = document.createElement('div');
+    title.className = 'set-group-title';
+    title.textContent = g.group;
+    sec.appendChild(title);
+
+    if (g.note) {
+      const note = document.createElement('div');
+      note.className = 'set-group-note';
+      note.textContent = g.note;
+      sec.appendChild(note);
+    }
+
+    for (const f of g.fields) {
+      const field = document.createElement('div');
+      field.className = 'set-field';
+
+      if (f.type === 'bool') {
+        const wrap = document.createElement('label');
+        wrap.className = 'set-bool';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.dataset.key = f.key;
+        cb.dataset.bool = '1';
+        cb.checked = !['0', 'false', 'no', 'off', ''].includes(String(f.value).trim().toLowerCase());
+        const span = document.createElement('span');
+        span.textContent = f.label;
+        span.style.fontSize = '12px';
+        span.style.fontWeight = '600';
+        wrap.appendChild(cb);
+        wrap.appendChild(span);
+        field.appendChild(wrap);
+      } else {
+        const lbl = document.createElement('label');
+        lbl.textContent = f.label;
+        field.appendChild(lbl);
+
+        const iwrap = document.createElement('div');
+        iwrap.className = 'set-input-wrap';
+        const input = document.createElement('input');
+        input.dataset.key = f.key;
+        input.type = f.type === 'password' ? 'password'
+                   : f.type === 'number' ? 'number' : 'text';
+        if (f.type === 'number') { input.step = 'any'; }
+        input.value = f.value != null ? f.value : '';
+        if (f.placeholder) input.placeholder = f.placeholder;
+        iwrap.appendChild(input);
+
+        if (f.type === 'password') {
+          const eye = document.createElement('button');
+          eye.type = 'button';
+          eye.className = 'set-reveal';
+          eye.textContent = 'Show';
+          eye.onclick = () => {
+            const hidden = input.type === 'password';
+            input.type = hidden ? 'text' : 'password';
+            eye.textContent = hidden ? 'Hide' : 'Show';
+          };
+          iwrap.appendChild(eye);
+        }
+        field.appendChild(iwrap);
+      }
+
+      if (f.help) {
+        const help = document.createElement('div');
+        help.className = 'set-help';
+        help.textContent = f.help;
+        field.appendChild(help);
+      }
+      sec.appendChild(field);
+    }
+    form.appendChild(sec);
+  }
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('settings-save');
+  const values = {};
+  document.querySelectorAll('#settings-form [data-key]').forEach(el => {
+    values[el.dataset.key] = el.dataset.bool ? (el.checked ? '1' : '0') : el.value.trim();
+  });
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const res = await r.json();
+    // Reflect inverter changes into the topbar connect inputs.
+    syncTopbarFromValues(values);
+    let msg = 'Settings saved';
+    if (res.restarted && res.restarted.length) msg += ' — restarted: ' + res.restarted.join(', ');
+    if (res.restart_pending) msg += '. Some changes apply after a server restart.';
+    toast(msg, res.restart_pending ? 'twarn' : 'tok');
+    closeSettings();
+  } catch (e) {
+    toast('Save failed: ' + e.message, 'terr');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save';
+  }
+}
+
+function syncTopbarFromValues(values) {
+  const map = { INVERTER_HOST: 'c-host', INVERTER_PORT: 'c-port',
+                INVERTER_SLAVE_ID: 'c-slave', INVERTER_POLL_INTERVAL: 'c-poll' };
+  for (const [k, id] of Object.entries(map)) {
+    if (values[k] != null && values[k] !== '') {
+      const el = document.getElementById(id);
+      if (el) el.value = values[k];
+    }
+  }
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('active');
+}
+
+function settingsOverlayClick(e) {
+  if (e.target.id === 'settings-overlay') closeSettings();
+}
+
+// Populate the topbar connect inputs from the persisted .env so they reflect
+// the real configured inverter, not the hardcoded HTML defaults.
+async function loadTopbarFromSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    if (!r.ok) return;
+    const data = await r.json();
+    const vals = {};
+    for (const g of data.groups) for (const f of g.fields) vals[f.key] = f.value;
+    syncTopbarFromValues(vals);
+  } catch (e) { /* non-fatal */ }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (document.getElementById('settings-overlay').classList.contains('active')) closeSettings();
+    else closeModal();
+  }
+});
 setCtrlEnabled(false);
+loadTopbarFromSettings();
 connectWS();
 setInterval(updateMeta, 1000);
 setInterval(() => { if (_priceLineChart) _priceLineChart.draw(); }, 60000);

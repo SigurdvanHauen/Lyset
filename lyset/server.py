@@ -26,12 +26,14 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pymodbus.client import ModbusTcpClient
 
+from . import config
 from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
@@ -842,11 +844,28 @@ async def lifespan(app: FastAPI):
         _solcast_worker.join(timeout=5)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(name, '').strip()))
+    except (ValueError, TypeError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, '').strip())
+    except (ValueError, TypeError):
+        return default
+
+
 class ConnectRequest(BaseModel):
-    host: str = '192.168.1.185'
-    port: int = 502
-    slave_id: int = 1
-    poll_interval: float = 10.0
+    # Defaults are read from the environment (populated from .env) at request
+    # time, so the Settings dialog's saved values become the connection defaults.
+    host: str = Field(default_factory=lambda: os.getenv('INVERTER_HOST', '192.168.1.185').strip()
+                      or '192.168.1.185')
+    port: int = Field(default_factory=lambda: _env_int('INVERTER_PORT', 502))
+    slave_id: int = Field(default_factory=lambda: _env_int('INVERTER_SLAVE_ID', 1))
+    poll_interval: float = Field(default_factory=lambda: _env_float('INVERTER_POLL_INTERVAL', 10.0))
 
 
 app = FastAPI(title='Lyset — SUN2000 Monitor', lifespan=lifespan)
@@ -877,6 +896,76 @@ async def api_disconnect():
         _worker = None
     _on_connection(False, 'Disconnected')
     return {'ok': True}
+
+
+# ── REST: settings ────────────────────────────────────────────────────────────
+
+def _restart_price_worker():
+    global _price_worker
+    if _price_worker and _price_worker.is_alive():
+        _price_worker.stop()
+        _price_worker.join(timeout=5)
+    _price_worker = prices_from_env(on_prices=_on_prices, on_status=_on_price_status)
+    if _price_worker:
+        _price_worker.start()
+    return _price_worker is not None
+
+
+def _restart_solcast_worker():
+    global _solcast_worker
+    if _solcast_worker and _solcast_worker.is_alive():
+        _solcast_worker.stop()
+        _solcast_worker.join(timeout=5)
+    _solcast_worker = solcast_from_env(on_forecast=_on_solar_forecast, on_status=_on_solcast_status)
+    if _solcast_worker:
+        _solcast_worker.start()
+    return _solcast_worker is not None
+
+
+class SettingsRequest(BaseModel):
+    values: dict[str, str]
+
+
+@app.get('/api/settings')
+async def api_settings_get():
+    return {'groups': config.schema_with_values()}
+
+
+@app.post('/api/settings')
+async def api_settings_post(body: SettingsRequest):
+    written = await asyncio.get_running_loop().run_in_executor(
+        None, config.write_settings, body.values)
+    # Refresh process env from the freshly-written .env so the workers pick up
+    # the new values when we rebuild them.
+    load_dotenv(dotenv_path=config.ENV_PATH, override=True)
+
+    written_set = set(written)
+    restarted: list[str] = []
+
+    if written_set & {'INVERTER_HOST', 'INVERTER_PORT', 'INVERTER_SLAVE_ID', 'INVERTER_POLL_INTERVAL'}:
+        defaults = ConnectRequest()
+        _start_worker(defaults.host, defaults.port, defaults.slave_id, defaults.poll_interval)
+        restarted.append('inverter')
+
+    if written_set & {'STROMLIGNING_API_KEY', 'STROMLIGNING_POSTAL_CODE',
+                      'STROMLIGNING_SUPPLIER_ID', 'PRICE_EXPORT_FEE', 'PRICE_POLL_INTERVAL'}:
+        _restart_price_worker()
+        restarted.append('prices')
+
+    if written_set & {'SOLCAST_API_KEY', 'SOLCAST_RESOURCE_ID',
+                      'SOLCAST_FETCH_HOURS', 'SOLCAST_POLL_INTERVAL'}:
+        _restart_solcast_worker()
+        restarted.append('solar')
+
+    # CONSUMPTION_HISTORY_PATH / AUTO_CONTROLLER_AUTOSTART only take effect at
+    # startup; flag them so the UI can tell the user a restart is needed.
+    restart_pending = bool(written_set & {'CONSUMPTION_HISTORY_PATH', 'AUTO_CONTROLLER_AUTOSTART'})
+
+    log.info('Settings saved: %d key(s); restarted %s%s',
+             len(written), restarted or 'none',
+             ' (restart pending for startup-only keys)' if restart_pending else '')
+    return {'ok': True, 'written': written, 'restarted': restarted,
+            'restart_pending': restart_pending}
 
 
 # ── REST: register read/write ─────────────────────────────────────────────────
