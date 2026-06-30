@@ -306,41 +306,7 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 }
 .set-footer .hint { margin-right: auto; font-size: 11px; color: var(--muted); }
 
-/* ── Control ── */
-.ctrl-status {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 14px;
-  margin-bottom: 14px;
-  color: var(--warning);
-}
-.ctrl-box {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px;
-  margin-bottom: 12px;
-}
-.ctrl-box h3 {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--muted);
-  margin-bottom: 14px;
-}
-.ctrl-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-.ctrl-row label { min-width: 240px; color: var(--text); }
-.ctrl-row input[type=number] { width: 110px; }
-.note { font-size: 11px; color: var(--warning); margin: 6px 0; }
-.hint { font-size: 11px; color: var(--muted);   margin: 4px 0; }
+.hint { font-size: 11px; color: var(--muted); margin: 4px 0; }
 
 input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
 
@@ -387,15 +353,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <!-- ── Top bar ── -->
 <div id="topbar">
   <h1>&#9889; Lyset</h1>
-  <label>Host</label>
-  <input type="text"   id="c-host"  value="192.168.1.185" style="width:140px">
-  <label>Port</label>
-  <input type="number" id="c-port"  value="502"  min="1" max="65535" style="width:66px">
-  <label>Slave ID</label>
-  <input type="number" id="c-slave" value="1"    min="0" max="255"   style="width:52px">
-  <label>Poll (s)</label>
-  <input type="number" id="c-poll"  value="10"   min="1" max="60"    style="width:54px">
-  <button id="conn-btn" class="primary" onclick="toggleConnect()">Connect</button>
   <span id="status-badge">Disconnected</span>
   <button id="auto-btn" onclick="toggleAutoMode()" title="Auto mode: let Lyset control export limits and battery charging based on prices">&#9881; Auto: OFF</button>
   <span id="last-update"></span>
@@ -407,7 +364,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
   <button class="tab-btn"        onclick="showTab('plan',this)">Plan</button>
   <button class="tab-btn"        onclick="showTab('prices',this)">Prices</button>
-  <button class="tab-btn"        onclick="showTab('control',this)">Control</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
 </div>
 
@@ -650,128 +606,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   </div>
 
   <!-- Control -->
-  <div id="panel-control" class="panel">
-    <div class="ctrl-status" id="ctrl-status">Not connected — connect to the inverter first.</div>
-
-    <div class="ctrl-box">
-      <h3>Storage Working Mode</h3>
-      <div class="ctrl-row">
-        <label>Mode</label>
-        <select id="ctrl-mode" style="min-width:260px">
-          <option value="0">Maximise self-consumption</option>
-          <option value="1">Fully fed to grid</option>
-          <option value="2">Time-of-use (TOU)</option>
-          <option value="3">Time-of-use (TOU) Pro</option>
-          <option value="4">Fixed charge/discharge</option>
-          <option value="5">Forced charge/discharge</option>
-        </select>
-        <button class="ctrl-write" onclick="applyMode()">Apply</button>
-      </div>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>Battery Power Limits</h3>
-      <div class="ctrl-row">
-        <label>Max charge power</label>
-        <input type="number" id="ctrl-max-chg"  value="2500" min="0" max="5000" step="100">
-        <span class="unit">W</span>
-      </div>
-      <div class="ctrl-row">
-        <label>Max discharge power</label>
-        <input type="number" id="ctrl-max-dchg" value="2500" min="0" max="5000" step="100">
-        <span class="unit">W</span>
-      </div>
-      <button class="ctrl-write" onclick="applyPowerLimits()">Apply</button>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>SOC Targets</h3>
-      <div class="ctrl-row">
-        <label>Charge cut-off (stop charging at)</label>
-        <input type="number" id="ctrl-chg-soc"  value="100" min="0" max="100">
-        <span class="unit">%</span>
-      </div>
-      <div class="ctrl-row">
-        <label>Discharge cut-off (stop discharging at)</label>
-        <input type="number" id="ctrl-dchg-soc" value="10"  min="0" max="100">
-        <span class="unit">%</span>
-      </div>
-      <button class="ctrl-write" onclick="applySOC()">Apply</button>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>Forced Charge / Discharge</h3>
-      <div class="ctrl-row">
-        <label>Power</label>
-        <input type="number" id="ctrl-force-pwr" value="2500" min="0" max="5000" step="100">
-        <span class="unit">W</span>
-      </div>
-      <div class="ctrl-row" style="gap:8px">
-        <button class="ctrl-write success" onclick="forceCmd(1)">&#9889; Force Charge</button>
-        <button class="ctrl-write warning" onclick="forceCmd(2)">&#11015; Force Discharge</button>
-        <button class="ctrl-write danger"  onclick="forceCmd(0)">&#9632; Stop</button>
-      </div>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>Grid Charge (charge battery from grid)</h3>
-      <div class="ctrl-row">
-        <label>Enable grid charge</label>
-        <input type="checkbox" id="ctrl-grid-en">
-      </div>
-      <div class="ctrl-row">
-        <label>Power limit</label>
-        <input type="number" id="ctrl-grid-pwr" value="1000" min="0" max="5000" step="100">
-        <span class="unit">W</span>
-      </div>
-      <button class="ctrl-write" onclick="applyGridCharge()">Apply</button>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>Active Power Curtailment (limit PV output)</h3>
-      <div class="ctrl-row">
-        <label>Mode</label>
-        <select id="ctrl-pwr-mode" style="min-width:220px" onchange="updatePwrRows()">
-          <option value="0">No limit</option>
-          <option value="1">Limit by percentage</option>
-          <option value="2">Limit by fixed watt value</option>
-        </select>
-      </div>
-      <div class="ctrl-row" id="row-pct" style="display:none">
-        <label>Percentage</label>
-        <input type="number" id="ctrl-pwr-pct" value="100" min="0" max="100">
-        <span class="unit">%</span>
-      </div>
-      <div class="ctrl-row" id="row-w" style="display:none">
-        <label>Fixed value</label>
-        <input type="number" id="ctrl-pwr-w" value="6000" min="0" max="6000" step="100">
-        <span class="unit">W</span>
-      </div>
-      <p class="note">&#9888; Register 40525 — may return "illegal address" on some firmware versions.</p>
-      <br>
-      <button class="ctrl-write" onclick="applyActivePower()">Apply</button>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>Power Factor</h3>
-      <div class="ctrl-row">
-        <label>Target power factor</label>
-        <input type="number" id="ctrl-pf" value="1.000" min="-1" max="1" step="0.001" style="width:110px">
-      </div>
-      <p class="hint">Writes to register 40122 (&#215;1000). Check your grid code before changing.</p>
-      <br>
-      <button class="ctrl-write" onclick="applyPF()">Apply</button>
-    </div>
-
-    <div class="ctrl-box">
-      <h3>Device</h3>
-      <div class="ctrl-row">
-        <button class="ctrl-write danger" onclick="doShutdown()">&#9211; Shutdown Inverter</button>
-        <span class="hint">Sends 1 to register 40200. Use the physical DC switch to restart.</span>
-      </div>
-    </div>
-  </div>
-
   <!-- Log -->
   <div id="panel-log" class="panel">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -1041,7 +875,6 @@ function showTab(name, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
-  if (name === 'control' && isConnected) refreshCtrl();
   if (name === 'prices') { renderPriceChart(); renderPriceLineChart(); }
   if (name === 'plan') renderPlanChart();
 }
@@ -1078,41 +911,12 @@ function dispatch(msg) {
 }
 
 // ── Connection ────────────────────────────────────────────────────────────────
-async function toggleConnect() {
-  if (isConnected) {
-    await fetch('/api/disconnect', { method: 'POST' });
-  } else {
-    const r = await fetch('/api/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        host:          document.getElementById('c-host').value.trim(),
-        port:          parseInt(document.getElementById('c-port').value),
-        slave_id:      parseInt(document.getElementById('c-slave').value),
-        poll_interval: parseFloat(document.getElementById('c-poll').value),
-      }),
-    });
-    if (!r.ok) toast('Connect request failed', 'terr');
-  }
-}
-
 function onConn(ok, msg) {
   isConnected = ok;
   const badge = document.getElementById('status-badge');
-  const btn   = document.getElementById('conn-btn');
   badge.textContent = ok ? 'Connected' : (msg.length < 50 ? msg : 'Disconnected');
   badge.className   = ok ? 'connected' : (msg.toLowerCase().includes('fail') ? 'err' : '');
-  btn.textContent   = ok ? 'Disconnect' : 'Connect';
-
-  const cs = document.getElementById('ctrl-status');
-  cs.style.color = ok ? 'var(--success)' : 'var(--warning)';
-  cs.textContent  = ok ? 'Connected — values loaded from inverter.' : msg;
-  setCtrlEnabled(ok);
   addLog(ok ? 'info' : 'warn', '[connection] ' + msg);
-}
-
-function setCtrlEnabled(en) {
-  document.querySelectorAll('.ctrl-write').forEach(b => b.disabled = !en);
 }
 
 // ── History (server-persisted data loaded on connect) ─────────────────────────
@@ -1599,77 +1403,8 @@ function writeReg(type, address, value, description) {
   }).then(r => { if (!r.ok) r.json().then(j => toast('Write error: ' + (j.detail || r.status), 'terr')); });
 }
 
-function applyMode() {
-  writeReg('u16', 47086, parseInt(document.getElementById('ctrl-mode').value), 'Working mode');
-}
-function applyPowerLimits() {
-  writeReg('u32', 47075, parseInt(document.getElementById('ctrl-max-chg').value),  'Max charge power');
-  writeReg('u32', 47077, parseInt(document.getElementById('ctrl-max-dchg').value), 'Max discharge power');
-}
-function applySOC() {
-  writeReg('u16', 47088, parseInt(document.getElementById('ctrl-chg-soc').value)  * 10, 'Charge cut-off SOC');
-  writeReg('u16', 47089, parseInt(document.getElementById('ctrl-dchg-soc').value) * 10, 'Discharge cut-off SOC');
-}
-function forceCmd(cmd) {
-  const names = { 0:'Stop forced mode', 1:'Force CHARGE', 2:'Force DISCHARGE' };
-  if (cmd && !confirm(`${names[cmd]} at ${document.getElementById('ctrl-force-pwr').value} W?`)) return;
-  if (cmd) writeReg('u32', 47098, parseInt(document.getElementById('ctrl-force-pwr').value), 'Forced power');
-  writeReg('u16', 47100, cmd, names[cmd]);
-}
-function applyGridCharge() {
-  writeReg('u16', 47087, document.getElementById('ctrl-grid-en').checked ? 1 : 0, 'Grid charge enable');
-  writeReg('u32', 47079, parseInt(document.getElementById('ctrl-grid-pwr').value), 'Grid charge power');
-}
-function updatePwrRows() {
-  const m = parseInt(document.getElementById('ctrl-pwr-mode').value);
-  document.getElementById('row-pct').style.display = m === 1 ? '' : 'none';
-  document.getElementById('row-w').style.display   = m === 2 ? '' : 'none';
-}
-function applyActivePower() {
-  const m = parseInt(document.getElementById('ctrl-pwr-mode').value);
-  writeReg('u16', 40525, m, 'Active power mode');
-  if (m === 1) writeReg('u16', 40526, parseInt(document.getElementById('ctrl-pwr-pct').value) * 10, 'Active power %');
-  if (m === 2) writeReg('i32', 40527, parseInt(document.getElementById('ctrl-pwr-w').value), 'Active power W');
-}
-function applyPF() {
-  const pf = parseFloat(document.getElementById('ctrl-pf').value);
-  writeReg('u16', 40122, Math.round(pf * 1000) & 0xFFFF, `Power factor → ${pf.toFixed(3)}`);
-}
-function doShutdown() {
-  if (confirm('This will send a remote shutdown command to the inverter.\n\nUse the physical DC switch or wait for sunrise to restart.\n\nContinue?')) {
-    writeReg('u16', 40200, 1, 'Device shutdown');
-  }
-}
-
 function onWriteResult(ok, msg) {
   toast(msg, ok ? 'tok' : 'terr');
-  const cs = document.getElementById('ctrl-status');
-  cs.style.color = ok ? 'var(--success)' : 'var(--danger)';
-  cs.textContent  = msg;
-}
-
-async function refreshCtrl() {
-  const reads = [
-    { id: 'ctrl-mode',     addr: 47086, type: 'u16', gain: 1,  sel: true },
-    { id: 'ctrl-max-chg',  addr: 47075, type: 'u32', gain: 1  },
-    { id: 'ctrl-max-dchg', addr: 47077, type: 'u32', gain: 1  },
-    { id: 'ctrl-chg-soc',  addr: 47088, type: 'u16', gain: 10 },
-    { id: 'ctrl-dchg-soc', addr: 47089, type: 'u16', gain: 10 },
-    { id: 'ctrl-grid-en',  addr: 47087, type: 'u16', gain: 1,  chk: true },
-    { id: 'ctrl-grid-pwr', addr: 47079, type: 'u32', gain: 1  },
-  ];
-  await Promise.all(reads.map(async r => {
-    try {
-      const resp = await fetch(`/api/read?address=${r.addr}&type=${r.type}`);
-      if (!resp.ok) return;
-      const { value } = await resp.json();
-      const el = document.getElementById(r.id);
-      if (!el) return;
-      if (r.chk)      el.checked  = !!value;
-      else if (r.sel) el.value    = String(value);
-      else            el.value    = r.gain > 1 ? Math.round(value / r.gain) : value;
-    } catch(_) {}
-  }));
 }
 
 // ── Meta timers ───────────────────────────────────────────────────────────────
@@ -3369,16 +3104,7 @@ async function saveSettings() {
   }
 }
 
-function syncTopbarFromValues(values) {
-  const map = { INVERTER_HOST: 'c-host', INVERTER_PORT: 'c-port',
-                INVERTER_SLAVE_ID: 'c-slave', INVERTER_POLL_INTERVAL: 'c-poll' };
-  for (const [k, id] of Object.entries(map)) {
-    if (values[k] != null && values[k] !== '') {
-      const el = document.getElementById(id);
-      if (el) el.value = values[k];
-    }
-  }
-}
+function syncTopbarFromValues(_values) { /* topbar inputs removed */ }
 
 function closeSettings() {
   document.getElementById('settings-overlay').classList.remove('active');
@@ -3408,8 +3134,6 @@ document.addEventListener('keydown', e => {
     else closeModal();
   }
 });
-setCtrlEnabled(false);
-loadTopbarFromSettings();
 connectWS();
 setInterval(updateMeta, 1000);
 setInterval(() => { if (_priceLineChart) _priceLineChart.draw(); }, 60000);
