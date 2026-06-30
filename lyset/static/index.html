@@ -2029,6 +2029,10 @@ function openAutoChart() {
 // ── Plan tab (IntelliCharge-style: actuals + AI plan on one chart) ────────────
 let _planChart = null;
 
+// Fixed y-axis widths (px) shared by the plan chart and the price chart below it
+// so their plot areas line up in x no matter which axes are toggled on.
+const _PLAN_AXIS_W = { left: 50, soc: 46, price: 54 };
+
 // Colours matching the IntelliCharge legend
 const PLAN_SERIES = [
   { key: 'solar',   label: 'Solar',        color: '#F59E0B', fill: true  },
@@ -2510,6 +2514,10 @@ function renderPlanChart() {
         },
         y: {
           position: 'left',
+          // Fixed widths on every y-axis so the plot area stays put regardless of
+          // which axes/labels are shown — this keeps the price chart below in x
+          // alignment even when the price axis is toggled on. See _PLAN_AXIS_W.
+          afterFit: s => { s.width = _PLAN_AXIS_W.left; },
           title: { display: true, text: 'kW', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { color: '#2D3555' },
@@ -2517,15 +2525,25 @@ function renderPlanChart() {
         ySoc: {
           position: 'right',
           min: 0, max: 100,
+          afterFit: s => { s.width = _PLAN_AXIS_W.soc; },
           title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { drawOnChartArea: false },
         },
         yPrice: {
           position: 'right',
-          display: () => _planVisible.priceImp || _planVisible.priceExp,
-          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 } },
+          // Always present (reserves its space) so toggling prices never shifts the
+          // plot area; ticks/title are blanked when no price line is visible.
+          display: true,
+          afterFit: s => { s.width = _PLAN_AXIS_W.price; },
+          title: {
+            display: () => _planVisible.priceImp || _planVisible.priceExp,
+            text: 'DKK/kWh', color: '#8892AA', font: { size: 10 },
+          },
+          ticks: {
+            color: '#8892AA', font: { size: 10 },
+            callback: v => (_planVisible.priceImp || _planVisible.priceExp) ? v : '',
+          },
           grid: { drawOnChartArea: false },
         },
       },
@@ -2590,9 +2608,20 @@ function renderPlanPriceChart() {
           grid: { color: '#2D3555' },
         },
         y: {
+          position: 'left',
+          afterFit: s => { s.width = _PLAN_AXIS_W.left; },
           title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { color: '#2D3555' },
+        },
+        // Invisible right-side spacer reserving the same width as the plan chart's
+        // ySoc + yPrice axes, so both charts share an identical plot area in x.
+        yRightSpacer: {
+          position: 'right',
+          afterFit: s => { s.width = _PLAN_AXIS_W.soc + _PLAN_AXIS_W.price; },
+          ticks: { display: false },
+          grid: { drawOnChartArea: false, drawTicks: false },
+          border: { display: false },
         },
       },
     },
