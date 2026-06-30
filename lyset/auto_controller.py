@@ -682,11 +682,20 @@ class AutoController:
             if do_export:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # MUST export to grid
+                # Write 47247 (forcible discharge power) unconditionally every tick,
+                # bypassing the _apply cache. The SDongle drops writes intermittently
+                # and the inverter resets 47247 to an internal default (~1634 W) when
+                # a write is lost or the inverter leaves forced mode. The _apply cache
+                # would suppress the 2500 W re-write for the rest of the session, so
+                # we assert it directly every cycle instead — one extra write/10 s, no
+                # meaningful SDongle load.
+                worker.write_u32(47247, _BATT_MAX_DISCHARGE_W,
+                                 f'AutoCtrl: forced discharge power {_BATT_MAX_DISCHARGE_W} W')
+                self._applied[47247] = _BATT_MAX_DISCHARGE_W  # keep cache coherent
                 self._apply(worker, [
-                    (16, 47087, 0,              'AutoCtrl: grid charge OFF'),
-                    (16, 47086, 1,              'AutoCtrl: mode=forced'),
-                    (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced discharge power {_GRID_CHARGE_W} W'),
-                    (16, 47100, 2,              'AutoCtrl: force DISCHARGE'),
+                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1, 'AutoCtrl: mode=forced'),
+                    (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
                 ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK, '
