@@ -2266,21 +2266,54 @@ function renderPlanLegend() {
     node.addEventListener('click', () => togglePlanSeries(node.dataset.key)));
 }
 
-// Vertical "now" marker
+// Vertical "now" marker — bold gold line + shaded future region + "NOW" pill.
 const _planNowLine = {
   id: 'planNowLine',
+  beforeDatasetsDraw(chart) {
+    // Tint the future (right of now) so past vs. plan reads at a glance.
+    const { ctx, chartArea: { top, bottom, right }, scales: { x } } = chart;
+    const px = x.getPixelForValue(Date.now());
+    if (px >= right || px > x.right) return;
+    const x0 = Math.max(px, x.left);
+    ctx.save();
+    ctx.fillStyle = 'rgba(120,140,200,0.06)';
+    ctx.fillRect(x0, top, right - x0, bottom - top);
+    ctx.restore();
+  },
   afterDraw(chart) {
     const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
     const px = x.getPixelForValue(Date.now());
     if (px < x.left || px > x.right) return;
     ctx.save();
-    ctx.strokeStyle = 'rgba(226,232,244,0.45)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(245,197,66,0.95)';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = 'rgba(245,197,66,0.5)';
+    ctx.shadowBlur = 6;
     ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
+    ctx.shadowBlur = 0;
+    // "NOW" pill at the top of the line
+    const label = 'NOW';
+    ctx.font = '700 10px system-ui, sans-serif';
+    const w = ctx.measureText(label).width + 12;
+    const h = 16, bx = Math.min(Math.max(px - w / 2, x.left), x.right - w), by = top + 2;
+    ctx.fillStyle = 'rgba(245,197,66,0.95)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, w, h, 8); else ctx.rect(bx, by, w, h);
+    ctx.fill();
+    ctx.fillStyle = '#1C2032';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, bx + w / 2, by + h / 2 + 0.5);
     ctx.restore();
   },
 };
+
+// Tooltip positioner that pins the box to the top of the plot, following the
+// cursor's x — so it never sits on top of the data point being probed.
+if (window.Chart && Chart.Tooltip && Chart.Tooltip.positioners) {
+  Chart.Tooltip.positioners.planTop = function (items, eventPos) {
+    return { x: eventPos.x, y: this.chart.chartArea.top + 4 };
+  };
+}
 
 function renderPlanChart() {
   renderPlanLegend();
@@ -2297,14 +2330,18 @@ function renderPlanChart() {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      interaction: { mode: 'index', intersect: false },
+      interaction: { mode: 'index', intersect: false, axis: 'x' },
       plugins: {
         legend: { display: false },
         tooltip: {
           backgroundColor: '#1C2032', titleColor: '#8892AA',
           bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          position: 'planTop', caretPadding: 10,
+          // Skip the null gap-break points so hovering the forecast region doesn't
+          // produce empty/jumpy rows (and never calls toFixed on null).
+          filter: item => item.parsed && item.parsed.y != null,
           callbacks: {
-            title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }),
+            title: ctx => ctx.length ? new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '',
             label: ctx => {
               const ax = ctx.dataset.yAxisID;
               if (ax === 'ySoc')   return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)}%`;
@@ -2324,6 +2361,10 @@ function renderPlanChart() {
       scales: {
         x: {
           type: 'linear',
+          // Default view: past 6 h → next 12 h. Pan/zoom overrides this; a full
+          // re-render (tab switch) re-centres on the current time.
+          min: Date.now() - 6 * 3_600_000,
+          max: Date.now() + 12 * 3_600_000,
           ticks: {
             color: '#8892AA', font: { size: 10 }, maxTicksLimit: 12,
             callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
