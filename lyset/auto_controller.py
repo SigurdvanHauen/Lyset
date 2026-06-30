@@ -31,9 +31,10 @@ Runs every 15 s while enabled and picks ONE action per tick, in priority order:
 
 4. EXPORT ARBITRAGE (export > cheapest future import + ARBIT_MARGIN within
    ARBIT_HORIZON_H h, SoC > MIN_SOC_ARBIT, import < MAX_HOLD)
-   Force-discharge to grid (47086=1, 47077+47247=2500 W, 47100=2): sell stored
-   energy high, rebuy cheaper later.  Guarded to cheap-import periods — when
-   import is expensive, self-consuming the stored energy beats the round-trip.
+   Discharge to grid (47086=1 forced mode, 47100=0 no forced cmd): sell stored
+   energy high, rebuy cheaper later. 47100=0 lets the BMS discharge at full rate
+   (~2500 W); 47100=2 caps at ~1634 W on this firmware. Grid charge blocked by
+   47087=0 so the battery can only discharge.
 
 5. DEFAULT — self-consumption
    SURPLUS (PV > load): force-charge from the surplus only — mode 4 dumps a
@@ -59,8 +60,8 @@ Register notes for this SDongle firmware:
   • Charge/discharge POWER registers are U32 — write as two words (write_u32),
     never one (write_u16 → Illegal Data Address):
       47075 max charge power, 47077 max discharge power,
-      47247 forcible charge/discharge power (the setpoint used while 47100 forces
-      a charge/discharge; a low default here pins forced charging to ~200 W).
+      47247 forcible charge/discharge power (the setpoint for 47100=1 charge;
+      NOT used for discharge — 47100=2 caps at ~1634 W regardless of 47247).
   • Forced control is U16: 47086 mode (1=forced, 4=self-consumption),
       47087 grid-charge enable, 47100 forced command (0=stop,1=charge,2=discharge).
 
@@ -682,20 +683,15 @@ class AutoController:
             if do_export:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # MUST export to grid
-                # Write 47247 (forcible discharge power) unconditionally every tick,
-                # bypassing the _apply cache. The SDongle drops writes intermittently
-                # and the inverter resets 47247 to an internal default (~1634 W) when
-                # a write is lost or the inverter leaves forced mode. The _apply cache
-                # would suppress the 2500 W re-write for the rest of the session, so
-                # we assert it directly every cycle instead — one extra write/10 s, no
-                # meaningful SDongle load.
-                worker.write_u32(47247, _BATT_MAX_DISCHARGE_W,
-                                 f'AutoCtrl: forced discharge power {_BATT_MAX_DISCHARGE_W} W')
-                self._applied[47247] = _BATT_MAX_DISCHARGE_W  # keep cache coherent
+                # Use forced mode (47086=1) with NO forced command (47100=0).
+                # Empirically: 47100=2 (force discharge) caps the inverter at ~1634 W
+                # regardless of the 47247 setpoint. 47100=0 with 47086=1 lets the
+                # BMS discharge freely at full rated power (2500 W observed).
+                # Grid charge is blocked by 47087=0, so the battery can only discharge.
                 self._apply(worker, [
                     (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1, 'AutoCtrl: mode=forced'),
-                    (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
+                    (16, 47100, 0, 'AutoCtrl: stop forced cmd — discharge freely'),
                 ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
                           f'future min import {future_min_import:.3f} DKK, '
