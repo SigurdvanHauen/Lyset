@@ -394,9 +394,15 @@ class AutoController:
         # Keep the optimistic _apply cache (used by the forced branches, which share
         # these registers) coherent with the intended state, so a later forced branch
         # never skips a write believing the register is still forced.
+        # 47247 (forcible power setpoint) is cleared from cache so that re-entering
+        # forced discharge always sends a fresh write — the inverter resets 47247 to
+        # an internal default (~1634 W observed) when leaving forced mode, and without
+        # this the cache would suppress the 2500 W re-write, leaving arbitrage locked
+        # at 1634 W instead of the full rate.
         self._applied[47087] = 0
         self._applied[47100] = 0
         self._applied[47086] = 4
+        self._applied.pop(47247, None)
 
         gce = data.get('grid_charge_enable')
         if gce is not None and int(round(gce)) != 0:
