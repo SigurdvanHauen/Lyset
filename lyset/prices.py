@@ -4,14 +4,15 @@ Danish electricity prices — Strømligning API (stromligning.dk).
 Fetches all-in electricity prices for the correct DSO tariff zone via postal
 code lookup. Returns 15-minute resolution for current/historical data and
 1-hour resolution for forecasts. Import price includes spot, network tariffs,
-electricity tax, and VAT. Export price is estimated as the spot component
-(electricity.value) minus the standard elafgift — configurable via env.
+electricity tax, and VAT. Export price = the electricity component
+(electricity.value = spot + elafgift, excl. VAT), matching Huawei IntelliCharge
+and Danish hourly net settlement; an optional PRICE_EXPORT_FEE is deducted.
 
 Environment variables:
   STROMLIGNING_API_KEY       — API key, Bearer scheme (required)
   STROMLIGNING_POSTAL_CODE   — Danish postal code for DSO auto-lookup (default: 5500)
   STROMLIGNING_SUPPLIER_ID   — Override DSO lookup with a known supplier ID
-  PRICE_ELAFGIFT             — Elafgift DKK/kWh excl. VAT for export calc (default: 0.763)
+  PRICE_EXPORT_FEE           — DKK/kWh balancing/trading fee deducted from export (default: 0.0)
   PRICE_POLL_INTERVAL        — Seconds between refreshes (default: 1800)
 """
 from __future__ import annotations
@@ -110,7 +111,7 @@ def fetch_prices(api_key: str, supplier_id: str) -> list[dict]:
 
 def _parse_records(records: list[dict]) -> list[dict]:
     """Convert raw API records to the internal price format."""
-    elafgift = _env_float('PRICE_ELAFGIFT', 0.763)
+    export_fee = _env_float('PRICE_EXPORT_FEE', 0.0)
     out = []
     for rec in records:
         date_str = rec.get('date', '')
@@ -130,11 +131,13 @@ def _parse_records(records: list[dict]) -> list[dict]:
         if import_price is None or elec_value is None:
             continue
 
-        # Export ≈ spot price only (net-metering); subtract elafgift from the
-        # electricity component (elafgift is bundled into electricity.value).
-        # Can be negative during low/negative spot periods — keep the real value
-        # so the UI can show when exporting costs money (IntelliCharge.ai trigger).
-        export_price = round(elec_value - elafgift, 4)
+        # Export price = the electricity component (spot + elafgift, excl. VAT) —
+        # this matches Huawei IntelliCharge and Danish hourly net settlement, where
+        # exported energy is valued at the electricity component, NOT the bare spot.
+        # (We previously subtracted elafgift, which pushed export ~0.76 DKK too low
+        # and often negative.) PRICE_EXPORT_FEE optionally deducts a small
+        # balancing/trading fee to match the supplier's exact figure.
+        export_price = round(elec_value - export_fee, 4)
 
         out.append({
             'ts':         ts_ms,
