@@ -563,6 +563,7 @@ def _save_model_and_regen():
               'p90_w': pred_by_ts.get(r['ts_ms'], {}).get('p90_w')}
         for r in (combined or future)
     ]
+    _auto_controller.set_consumption_forecast(_last_consumption_forecast)
     _push({'type': 'consumption_forecast', 'payload': _last_consumption_forecast})
 
 
@@ -772,6 +773,7 @@ async def lifespan(app: FastAPI):
                   'p90_w': pred_by_ts.get(r['ts_ms'], {}).get('p90_w')}
             for r in (stored or future)
         ]
+        _auto_controller.set_consumption_forecast(_last_consumption_forecast)
 
     # Restore stored power forecast from DB
     global _last_power_forecast

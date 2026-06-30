@@ -112,6 +112,8 @@ EXPORT_LIMIT_FEED_W         = 0   # W — feed-in cap applied while limiting (0 
 ARBIT_MARGIN_DKK    = 0.10   # export must exceed future cheapest import by at least this
 MIN_SOC_ARBIT       = 20.0   # minimum SoC before allowing arbitrage discharge
 ARBIT_HORIZON_H     = 12     # hours ahead to find cheapest import for arbitrage
+ARBIT_MIN_EXCESS_KWH = 0.30  # only discharge to grid when at least this much stored
+                             # energy is surplus to upcoming self-consumption needs
 CHARGE_MARGIN_DKK   = 0.15   # import must be at least this cheaper than future max to justify charging
 CHARGE_HORIZON_H    = 24     # hours ahead to look for price peaks that justify grid charging
 HOLD_DELTA_DKK      = 0.80   # hold battery if a future slot is at least this much more expensive
@@ -143,6 +145,7 @@ _EXPORT_LIMIT_FEED_W         = EXPORT_LIMIT_FEED_W
 _ARBIT_MARGIN_DKK     = ARBIT_MARGIN_DKK
 _MIN_SOC_ARBIT        = MIN_SOC_ARBIT
 _ARBIT_HORIZON_H      = ARBIT_HORIZON_H
+_ARBIT_MIN_EXCESS_KWH = ARBIT_MIN_EXCESS_KWH
 _CHARGE_MARGIN_DKK    = CHARGE_MARGIN_DKK
 _CHARGE_HORIZON_H     = CHARGE_HORIZON_H
 _HOLD_DELTA_DKK       = HOLD_DELTA_DKK
@@ -182,6 +185,7 @@ class AutoController:
         self._applied:        dict[int, int]  = {}     # addr → last value written
         self._tick:           int             = 0
         self._solar_fc:       list[dict]      = []     # latest Solcast forecast
+        self._load_fc:        list[dict]      = []     # latest consumption forecast
 
     def set_command_callback(self, cb: Callable[[str, str], None]):
         self._on_command = cb
@@ -191,6 +195,70 @@ class AutoController:
         Used by the hold branch to tell whether the sun will refill the battery
         before an upcoming price peak."""
         self._solar_fc = fc or []
+
+    def set_consumption_forecast(self, fc: list[dict]):
+        """Latest house-consumption forecast ([{ts_ms, w}, ...], 15-min slots).
+        Used by the arbitrage branch to size how much stored energy is reserved
+        for upcoming self-consumption vs. free to export now."""
+        self._load_fc = fc or []
+
+    @staticmethod
+    def _price_at(prices: list, ts_ms: int) -> Optional[float]:
+        """Import price (DKK/kWh) of the slot covering ts_ms — the latest price
+        record at or before it. Prices aren't assumed sorted."""
+        best = None
+        for p in prices:
+            t = p.get('ts')
+            if t is not None and t <= ts_ms and (best is None or t > best['ts']):
+                best = p
+        return best.get('import') if best else None
+
+    def _solar_at(self, ts_ms: int) -> float:
+        """Forecast PV (W) nearest ts_ms (nearest-slot, robust to start/end
+        stamping). 0 when no forecast."""
+        best, best_d = 0.0, None
+        for r in self._solar_fc:
+            t = r.get('ts_ms')
+            if t is None:
+                continue
+            d = abs(t - ts_ms)
+            if best_d is None or d < best_d:
+                best_d, best = d, (r.get('pv_w') or 0.0)
+        return best
+
+    def _reserve_energy_kwh(self, from_ms: int, to_ms: int, export_now: float,
+                            prices: list) -> float:
+        """
+        Energy (kWh) the battery should keep for upcoming self-consumption that is
+        worth MORE than exporting now — the opportunity cost of a discharge-to-grid.
+
+        For each future consumption slot in (from_ms, to_ms] whose IMPORT price
+        exceeds export_now, the battery's best use is to cover that slot's net
+        deficit (load − forecast solar) rather than export now and rebuy then. Sum
+        those deficits. Slots cheaper than export_now are NOT reserved: their load
+        is better covered by rebuying cheap (or exporting now and letting solar
+        refill the pack), which is exactly the arbitrage we want to allow.
+
+        Conservative simplifications: per-slot deficits are summed without modelling
+        inter-slot solar recharge (over-reserves slightly, never under-reserves),
+        and the window is the arbitrage horizon, so a price peak further out than
+        ARBIT_HORIZON_H is left to solar to cover (true in summer; in winter the
+        rebuy-floor check still guards the trade).
+        """
+        if not self._load_fc:
+            return 0.0
+        reserve = 0.0
+        for r in self._load_fc:
+            ts = r.get('ts_ms')
+            w  = r.get('w')
+            if ts is None or w is None or ts <= from_ms or ts > to_ms:
+                continue
+            imp = self._price_at(prices, ts)
+            if imp is None or imp <= export_now:
+                continue
+            deficit_w = max(0.0, w - self._solar_at(ts))
+            reserve += deficit_w / 1000.0 * 0.25   # 15-min slot → kWh
+        return reserve
 
     def _expected_solar_kwh(self, from_ms: int, to_ms: int) -> float:
         """Forecast PV energy (kWh) over (from_ms, to_ms] from the latest solar
@@ -576,15 +644,36 @@ class AutoController:
 
         # ── 4. Export arbitrage: sell stored energy high, rebuy cheaper ───────
         # Force-discharge to grid when the current export price beats the cheapest
-        # upcoming import by a margin and the battery has spare charge. Guarded to
-        # cheap-import periods — when import is expensive, self-consuming the stored
-        # energy saves more than the export round-trip earns.
+        # upcoming import by a margin AND the battery holds more energy than it
+        # needs for upcoming self-consumption (the "excess").
+        #
+        # The gate is an opportunity-cost test, not the old blunt import<1.50
+        # ceiling. Self-consuming the marginal kWh avoids the CURRENT import; that
+        # only beats exporting when the battery is actually needed for an expensive
+        # upcoming slot. _reserve_energy_kwh sizes that need (deficit energy in
+        # slots pricier than today's export); anything above it (and above the
+        # MIN_SOC_ARBIT floor) has no better use than export-now / rebuy-cheap —
+        # especially in summer when solar refills the pack tomorrow for free — so
+        # we sell it. As SoC falls to the reserve the gate closes on its own,
+        # leaving exactly enough to ride the peak via self-consumption. When no
+        # load forecast is available, fall back to the old cheap-import guard.
         arbit_window = _window(_ARBIT_HORIZON_H)
-        if (arbit_window
-                and batt_soc > _MIN_SOC_ARBIT
-                and import_dkk < _MAX_HOLD_IMPORT_DKK):
+        if arbit_window and batt_soc > _MIN_SOC_ARBIT:
             future_min_import = min(p['import'] for p in arbit_window)
-            if export_dkk > future_min_import + _ARBIT_MARGIN_DKK:
+            profitable = export_dkk > future_min_import + _ARBIT_MARGIN_DKK
+            if self._load_fc:
+                cap_kwh       = data.get('batt_rated_capacity') or 5.0
+                available_kwh = max(0.0, (batt_soc - _MIN_SOC_ARBIT) / 100.0 * cap_kwh)
+                reserve_kwh   = self._reserve_energy_kwh(
+                    now_ms, now_ms + _ARBIT_HORIZON_H * 3_600_000, export_dkk, prices)
+                excess_kwh    = available_kwh - reserve_kwh
+                do_export     = profitable and excess_kwh > _ARBIT_MIN_EXCESS_KWH
+                gate_lbl      = (f'excess {excess_kwh:.1f} kWh '
+                                 f'(avail {available_kwh:.1f} − reserve {reserve_kwh:.1f})')
+            else:
+                do_export = profitable and import_dkk < _MAX_HOLD_IMPORT_DKK
+                gate_lbl  = f'import {import_dkk:.3f} < {_MAX_HOLD_IMPORT_DKK} (no load fc)'
+            if do_export:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # MUST export to grid
                 self._apply(worker, [
@@ -594,7 +683,8 @@ class AutoController:
                     (16, 47100, 2,              'AutoCtrl: force DISCHARGE'),
                 ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
-                          f'future min import {future_min_import:.3f} DKK (SoC {batt_soc:.0f}%)')
+                          f'future min import {future_min_import:.3f} DKK, '
+                          f'{gate_lbl} (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='arbit_discharge', detail=detail)
 
         # ── 5. Default: self-consumption ──────────────────────────────────────
