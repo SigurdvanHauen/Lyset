@@ -4,15 +4,16 @@ Danish electricity prices — Strømligning API (stromligning.dk).
 Fetches all-in electricity prices for the correct DSO tariff zone via postal
 code lookup. Returns 15-minute resolution for current/historical data and
 1-hour resolution for forecasts. Import price includes spot, network tariffs,
-electricity tax, and VAT. Export price = the electricity component
-(electricity.value = spot + elafgift, excl. VAT), matching Huawei IntelliCharge
-and Danish hourly net settlement; an optional PRICE_EXPORT_FEE is deducted.
+electricity tax, and VAT. Export payout = bare Nord Pool spot (electricity.value
+minus elafgift) minus small feed-in/balance tariffs — matching Vindstød's surplus
+settlement, where elafgift and VAT do NOT apply.
 
 Environment variables:
   STROMLIGNING_API_KEY       — API key, Bearer scheme (required)
   STROMLIGNING_POSTAL_CODE   — Danish postal code for DSO auto-lookup (default: 5500)
   STROMLIGNING_SUPPLIER_ID   — Override DSO lookup with a known supplier ID
-  PRICE_EXPORT_FEE           — DKK/kWh balancing/trading fee deducted from export (default: 0.0)
+  PRICE_ELAFGIFT             — Elafgift DKK/kWh excl. VAT, stripped to recover spot (default: 0.763)
+  PRICE_EXPORT_FEE           — DKK/kWh feed-in/balance tariffs deducted from export (default: 0.033375)
   PRICE_POLL_INTERVAL        — Seconds between refreshes (default: 1800)
 """
 from __future__ import annotations
@@ -111,7 +112,13 @@ def fetch_prices(api_key: str, supplier_id: str) -> list[dict]:
 
 def _parse_records(records: list[dict]) -> list[dict]:
     """Convert raw API records to the internal price format."""
-    export_fee = _env_float('PRICE_EXPORT_FEE', 0.0)
+    # electricity.value bundles the raw spot + elafgift (excl. VAT); strip elafgift
+    # to recover the bare Nord Pool spot that the export payout is based on.
+    elafgift = _env_float('PRICE_ELAFGIFT', 0.763)
+    # Vindstød "salg af overskydende el": spot minus small feed-in/balance tariffs
+    # (Energinet indfødning 0.00625 + balance 0.006625 + netselskab indfødning
+    # 0.0105 + Vindstød balance 0.01 ≈ 0.033375). Netselskab tariff varies by area.
+    export_fee = _env_float('PRICE_EXPORT_FEE', 0.033375)
     out = []
     for rec in records:
         date_str = rec.get('date', '')
@@ -131,13 +138,14 @@ def _parse_records(records: list[dict]) -> list[dict]:
         if import_price is None or elec_value is None:
             continue
 
-        # Export price = the electricity component (spot + elafgift, excl. VAT) —
-        # this matches Huawei IntelliCharge and Danish hourly net settlement, where
-        # exported energy is valued at the electricity component, NOT the bare spot.
-        # (We previously subtracted elafgift, which pushed export ~0.76 DKK too low
-        # and often negative.) PRICE_EXPORT_FEE optionally deducts a small
-        # balancing/trading fee to match the supplier's exact figure.
-        export_price = round(elec_value - export_fee, 4)
+        # Export payout (what Vindstød actually pays): the bare Nord Pool spot
+        # minus the small feed-in/balance tariffs. Elafgift and VAT are NOT part
+        # of export settlement (Vindstød: "Netydelse og elafgift er ikke en del af
+        # afregning med salg af strøm"). IntelliCharge's higher number includes
+        # elafgift — that's the net-settlement self-consumption value, not the
+        # export cash. Can be negative when the spot is negative.
+        spot_price   = elec_value - elafgift
+        export_price = round(spot_price - export_fee, 4)
 
         out.append({
             'ts':         ts_ms,
