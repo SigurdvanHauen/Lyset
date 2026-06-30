@@ -480,7 +480,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
         <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
         <div style="display:flex;gap:8px;flex-shrink:0">
-          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Bands: On</button>
+          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
           <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
           <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
         </div>
@@ -2059,7 +2059,7 @@ const PLAN_SMOOTH_ITEMS = [
 // Solar P10/P90 confidence band — toggled by its own button (default on),
 // persisted like the smoothing toggle. No legend entry; no mean line (the
 // existing "Solar" trace already is the median).
-let _planBandsEnabled = true;
+let _planBandsEnabled = false;
 try { const v = localStorage.getItem('planBandsEnabled'); if (v !== null) _planBandsEnabled = v === '1'; } catch (e) {}
 
 function updatePlanBandsBtn() {
