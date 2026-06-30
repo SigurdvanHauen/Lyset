@@ -492,25 +492,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
         Plan combines Solcast solar, the learned consumption model, electricity prices and the
         auto-mode controller's decision logic. Battery SOC is on the right axis.
-        Click any legend item to show/hide that line &mdash; import/export price are hidden by default.
-      </div>
-    </div>
-
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-top:16px">
-      <div style="display:flex;flex-wrap:wrap;gap:12px 18px;margin-bottom:12px;font-size:11px">
-        <span style="display:flex;align-items:center;gap:6px">
-          <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>Import (all-in incl. VAT)
-        </span>
-        <span style="display:flex;align-items:center;gap:6px">
-          <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>Export est. (spot only)
-        </span>
-      </div>
-      <div style="position:relative;height:200px">
-        <canvas id="plan-price-chart"></canvas>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
-        DKK/kWh &middot; solid = actual prices, dashed = forecast. The time axis follows the
-        plan chart above — zoom or pan the top chart and this one matches its window.
+        Click any legend item to show/hide that line.
       </div>
     </div>
   </div>
@@ -2029,10 +2011,6 @@ function openAutoChart() {
 // ── Plan tab (IntelliCharge-style: actuals + AI plan on one chart) ────────────
 let _planChart = null;
 
-// Fixed y-axis widths (px) shared by the plan chart and the price chart below it
-// so their plot areas line up in x no matter which axes are toggled on.
-const _PLAN_AXIS_W = { left: 50, soc: 46, price: 54 };
-
 // Colours matching the IntelliCharge legend
 const PLAN_SERIES = [
   { key: 'solar',   label: 'Solar',        color: '#F59E0B', fill: true  },
@@ -2055,14 +2033,16 @@ const _planVisible = (() => {
   const def = {};
   for (const s of PLAN_SERIES) def[s.key] = true;
   def.soc = true;
-  for (const s of PLAN_PRICE_SERIES) def[s.key] = false;
-  try { Object.assign(def, JSON.parse(localStorage.getItem('planVisible') || '{}')); } catch (e) {}
+  for (const s of PLAN_PRICE_SERIES) def[s.key] = true;
+  // Storage key bumped to v2 when price overlays became default-on, so older
+  // saved state (prices off) doesn't override the new default.
+  try { Object.assign(def, JSON.parse(localStorage.getItem('planVisible2') || '{}')); } catch (e) {}
   return def;
 })();
 
 function setPlanVisible(key, vis) {
   _planVisible[key] = vis;
-  try { localStorage.setItem('planVisible', JSON.stringify(_planVisible)); } catch (e) {}
+  try { localStorage.setItem('planVisible2', JSON.stringify(_planVisible)); } catch (e) {}
   refreshPlanChart();
   renderPlanLegend();
 }
@@ -2494,9 +2474,8 @@ function renderPlanChart() {
         zoom: {
           zoom: {
             wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x',
-            onZoomComplete: syncPlanPriceX,
           },
-          pan: { enabled: true, mode: 'x', onPanComplete: syncPlanPriceX },
+          pan: { enabled: true, mode: 'x' },
         },
       },
       scales: {
@@ -2514,10 +2493,6 @@ function renderPlanChart() {
         },
         y: {
           position: 'left',
-          // Fixed widths on every y-axis so the plot area stays put regardless of
-          // which axes/labels are shown — this keeps the price chart below in x
-          // alignment even when the price axis is toggled on. See _PLAN_AXIS_W.
-          afterFit: s => { s.width = _PLAN_AXIS_W.left; },
           title: { display: true, text: 'kW', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { color: '#2D3555' },
@@ -2525,117 +2500,20 @@ function renderPlanChart() {
         ySoc: {
           position: 'right',
           min: 0, max: 100,
-          afterFit: s => { s.width = _PLAN_AXIS_W.soc; },
           title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { drawOnChartArea: false },
         },
         yPrice: {
           position: 'right',
-          // Always present (reserves its space) so toggling prices never shifts the
-          // plot area; ticks/title are blanked when no price line is visible.
-          display: true,
-          afterFit: s => { s.width = _PLAN_AXIS_W.price; },
-          title: {
-            display: () => _planVisible.priceImp || _planVisible.priceExp,
-            text: 'DKK/kWh', color: '#8892AA', font: { size: 10 },
-          },
-          ticks: {
-            color: '#8892AA', font: { size: 10 },
-            callback: v => (_planVisible.priceImp || _planVisible.priceExp) ? v : '',
-          },
+          display: () => _planVisible.priceImp || _planVisible.priceExp,
+          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
           grid: { drawOnChartArea: false },
         },
       },
     },
   });
-
-  renderPlanPriceChart();
-  syncPlanPriceX();
-}
-
-// ── Price chart under the plan chart (x-axis slaved to the plan chart) ─────────
-let _planPriceChart = null;
-
-function buildPlanPriceDatasets() {
-  const nowMs = Date.now();
-  const planDash = ctx => (ctx.p0.parsed.x >= nowMs ? [5, 4] : undefined);
-  const imp = _pricesData.map(p => ({ x: p.ts, y: p.import }));
-  const exp = _pricesData.map(p => ({ x: p.ts, y: p.export }));
-  const base = {
-    borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
-    stepped: 'before', tension: 0, fill: false, spanGaps: true,
-    segment: { borderDash: planDash },
-  };
-  return [
-    { label: 'Import', data: imp, borderColor: '#F59E0B', backgroundColor: '#F59E0B20', ...base },
-    { label: 'Export', data: exp, borderColor: '#34D399', backgroundColor: 'transparent', ...base },
-  ];
-}
-
-function renderPlanPriceChart() {
-  const canvas = document.getElementById('plan-price-chart');
-  if (!canvas) return;
-  if (_planPriceChart) { _planPriceChart.destroy(); _planPriceChart = null; }
-
-  _planPriceChart = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: { datasets: buildPlanPriceDatasets() },
-    plugins: [_planNowLine],
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1C2032', titleColor: '#8892AA',
-          bodyColor: '#E2E8F4', borderColor: '#2D3555', borderWidth: 1, padding: 10,
-          callbacks: {
-            title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }),
-            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} DKK/kWh`,
-          },
-        },
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          ticks: {
-            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 12,
-            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          },
-          grid: { color: '#2D3555' },
-        },
-        y: {
-          position: 'left',
-          afterFit: s => { s.width = _PLAN_AXIS_W.left; },
-          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 } },
-          grid: { color: '#2D3555' },
-        },
-        // Invisible right-side spacer reserving the same width as the plan chart's
-        // ySoc + yPrice axes, so both charts share an identical plot area in x.
-        yRightSpacer: {
-          position: 'right',
-          afterFit: s => { s.width = _PLAN_AXIS_W.soc + _PLAN_AXIS_W.price; },
-          ticks: { display: false },
-          grid: { drawOnChartArea: false, drawTicks: false },
-          border: { display: false },
-        },
-      },
-    },
-  });
-}
-
-// Slave the price chart's x-window to the plan chart's current (possibly zoomed) view.
-function syncPlanPriceX() {
-  if (!_planChart || !_planPriceChart) return;
-  const xs = _planChart.scales.x;
-  if (xs == null || xs.min == null || xs.max == null) return;
-  _planPriceChart.options.scales.x.min = xs.min;
-  _planPriceChart.options.scales.x.max = xs.max;
-  _planPriceChart.update('none');
 }
 
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
@@ -2644,11 +2522,6 @@ function refreshPlanChart() {
   if (!document.getElementById('panel-plan').classList.contains('active')) return;
   _planChart.data.datasets = buildPlanDatasets();
   _planChart.update('none');
-  if (_planPriceChart) {
-    _planPriceChart.data.datasets = buildPlanPriceDatasets();
-    _planPriceChart.update('none');
-  }
-  syncPlanPriceX();
 }
 
 function onSolarForecast(data) {
@@ -2724,11 +2597,8 @@ function onPrices(prices) {
   document.getElementById('pr-status').textContent = '';
   const prPanel = document.getElementById('panel-prices');
   if (prPanel.classList.contains('active')) { renderPriceChart(); renderPriceLineChart(); }
-  if (_planPriceChart && document.getElementById('panel-plan').classList.contains('active')) {
-    _planPriceChart.data.datasets = buildPlanPriceDatasets();
-    _planPriceChart.update('none');
-    syncPlanPriceX();
-  }
+  // The plan chart draws the price overlays itself — refresh it if it's showing.
+  refreshPlanChart();
 }
 
 function _fmtTime(ts) {
