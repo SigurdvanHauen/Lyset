@@ -2033,6 +2033,7 @@ const _planVisible = (() => {
   const def = {};
   for (const s of PLAN_SERIES) def[s.key] = true;
   def.soc = true;
+  def.solarFc = true;            // Solcast forecast mean + P10/P90 band — default on
   for (const s of PLAN_PRICE_SERIES) def[s.key] = true;
   // Storage key bumped to v2 when price overlays became default-on, so older
   // saved state (prices off) doesn't override the new default.
@@ -2052,6 +2053,7 @@ function togglePlanSeries(key) { setPlanVisible(key, !_planVisible[key]); }
 // on for every line except the two price overlays. ───────────────────────────
 const PLAN_SMOOTH_ITEMS = [
   ...PLAN_SERIES,
+  { key: 'solarFc', label: 'Solar forecast', color: '#FCD34D' },
   { key: 'soc', label: 'Battery SOC', color: '#9CA3AF' },
   ...PLAN_PRICE_SERIES,
 ];
@@ -2173,6 +2175,30 @@ function _planFutSolarKW() {
   return out;
 }
 
+// Solcast solar forecast (kW): mean line + P10/P90 confidence band. This is the
+// raw predicted potential straight from Solcast — distinct from the `solar` line,
+// whose future part is the curtailed *planned* generation. Future periods only,
+// so it lines up with the dashed "plan" region.
+const PLAN_SOLAR_FC = { key: 'solarFc', label: 'Solar forecast', color: '#FCD34D' };
+function _planSolarFcSeries() {
+  const now = Date.now();
+  const mean = [], p10 = [], p90 = [];
+  for (const r of _solcastData) {
+    if (r.ts_ms < now || r.pv_w == null) continue;
+    mean.push({ x: r.ts_ms, y: r.pv_w / 1000 });
+    p10.push({ x: r.ts_ms, y: r.p10_w != null ? r.p10_w / 1000 : null });
+    p90.push({ x: r.ts_ms, y: r.p90_w != null ? r.p90_w / 1000 : null });
+  }
+  if (planSmoothOn('solarFc')) {
+    return {
+      mean: smoothPoints(mean, 30, false),
+      p10:  smoothPoints(p10,  30, false),
+      p90:  smoothPoints(p90,  30, false),
+    };
+  }
+  return { mean, p10, p90 };
+}
+
 // Assemble the {x,y} arrays for every plan series (past actual ⨝ future plan).
 function buildPlanSeries() {
   const W = {
@@ -2260,17 +2286,26 @@ function buildPlanDatasets() {
   if (planSmoothOn('priceImp')) impPx = smoothPoints(impPx, 30, false);
   if (planSmoothOn('priceExp')) expPx = smoothPoints(expPx, 30, false);
 
+  // Solcast solar forecast (mean + P10/P90 band), future only.
+  const sfc = _planSolarFcSeries();
+
   // One shared 5-min grid for every line → aligned tooltips, no between-point holes.
   const STEP      = 5 * 60 * 1000;
   const POWER_GAP = 75 * 60 * 1000;    // bridges 30-min forecast steps; breaks real outages
   const PRICE_GAP = 130 * 60 * 1000;   // bridges hourly price steps
-  const grid = _planGridFrom([...Object.values(series), impPx, expPx], STEP);
+  const grid = _planGridFrom(
+    [...Object.values(series), impPx, expPx, sfc.mean, sfc.p10, sfc.p90], STEP);
 
   const R = {};
   for (const k in series) R[k] = _planResample(series[k], grid, false, POWER_GAP);
   const pxData = {
     priceImp: _planResample(impPx, grid, true, PRICE_GAP),
     priceExp: _planResample(expPx, grid, true, PRICE_GAP),
+  };
+  const sfcR = {
+    mean: _planResample(sfc.mean, grid, false, POWER_GAP),
+    p10:  _planResample(sfc.p10,  grid, false, POWER_GAP),
+    p90:  _planResample(sfc.p90,  grid, false, POWER_GAP),
   };
 
   // Solid past, dashed future (plan) — split on the "now" boundary.
@@ -2327,6 +2362,58 @@ function buildPlanDatasets() {
       segment: { borderDash: planDash },
     });
   }
+
+  // Solar forecast: prepend the P10/P90 band (filled) + dashed mean line so the
+  // shaded band sits behind every power line. Order matters — the P10 dataset's
+  // fill:'-1' references the P90 dataset immediately before it. All three share
+  // one visibility flag so the legend toggles them together.
+  const fcHidden = !_planVisible.solarFc;
+  const fcCol = PLAN_SOLAR_FC.color;
+  datasets.unshift(
+    {
+      label: 'Solar forecast P90',
+      data: sfcR.p90,
+      borderColor: 'transparent',
+      backgroundColor: fcCol + '22',
+      borderWidth: 0,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      fill: false,
+      tension: 0.3,
+      spanGaps: false,
+      yAxisID: 'y',
+      hidden: fcHidden,
+    },
+    {
+      label: 'Solar forecast P10',
+      data: sfcR.p10,
+      borderColor: 'transparent',
+      backgroundColor: fcCol + '22',
+      borderWidth: 0,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      fill: '-1',                 // fill up to the P90 dataset → confidence band
+      tension: 0.3,
+      spanGaps: false,
+      yAxisID: 'y',
+      hidden: fcHidden,
+    },
+    {
+      label: 'Solar forecast',
+      data: sfcR.mean,
+      borderColor: fcCol,
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      borderDash: [5, 4],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
+      tension: 0.3,
+      spanGaps: false,
+      yAxisID: 'y',
+      hidden: fcHidden,
+    },
+  );
   return datasets;
 }
 
@@ -2335,6 +2422,7 @@ function renderPlanLegend() {
   if (!el) return;
   const items = [
     ...PLAN_SERIES,
+    PLAN_SOLAR_FC,
     { key: 'soc', label: 'Battery SOC', color: '#9CA3AF' },
     ...PLAN_PRICE_SERIES,
   ];
@@ -2459,8 +2547,11 @@ function renderPlanChart() {
           enabled: false,
           external: planExternalTooltip,
           // Skip the null gap-break points so hovering the forecast region doesn't
-          // produce empty/jumpy rows (and never calls toFixed on null).
-          filter: item => item.parsed && item.parsed.y != null,
+          // produce empty/jumpy rows (and never calls toFixed on null). Also drop
+          // the P10/P90 band bounds — only the "Solar forecast" mean gets a row.
+          filter: item => item.parsed && item.parsed.y != null
+            && item.dataset.label !== 'Solar forecast P10'
+            && item.dataset.label !== 'Solar forecast P90',
           callbacks: {
             title: ctx => ctx.length ? new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '',
             label: ctx => {
