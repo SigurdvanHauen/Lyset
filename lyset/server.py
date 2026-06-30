@@ -782,12 +782,18 @@ async def lifespan(app: FastAPI):
     if _last_power_forecast:
         log.info('PowerForecast: restored %d stored periods from DB', len(_last_power_forecast))
 
-    # Start auto controller — disabled by default, user enables via UI
+    # Start auto controller — ON by default on (re)start. Override with env
+    # AUTO_CONTROLLER_AUTOSTART=0. The run loop only acts once the worker is
+    # connected and prices/data are available, and _applied is empty so the
+    # first decision re-asserts every register.
     _auto_controller.set_command_callback(_on_auto_command)
+    autostart = os.getenv('AUTO_CONTROLLER_AUTOSTART', '1').strip().lower() \
+        not in ('0', 'false', 'no', 'off')
+    _auto_controller.enabled = autostart
     asyncio.create_task(_auto_controller.run(
         lambda: _worker, lambda: _last_prices, lambda: _last_data,
     ))
-    log.info('AutoCtrl: task started (disabled by default — enable via UI)')
+    log.info('AutoCtrl: task started (autostart=%s)', autostart)
 
     yield
 
