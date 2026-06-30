@@ -718,7 +718,10 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <div id="panel-log" class="panel">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <button id="btn-pymodbus" onclick="togglePymodbus()" style="font-size:11px;padding:4px 14px;border-color:#6B7280;color:#9CA3AF">Pymodbus logs: OFF</button>
-      <button onclick="clearHistory()" style="font-size:11px;padding:4px 14px;background:#7F1D1D;border-color:#991B1B;color:#FCA5A5">Clear logged data</button>
+      <div style="display:flex;gap:8px">
+        <a href="/api/download/db" download style="font-size:11px;padding:4px 14px;border:1px solid var(--accent);border-radius:6px;color:var(--accent);text-decoration:none">&#11015; Download data (.db)</a>
+        <button onclick="clearHistory()" style="font-size:11px;padding:4px 14px;background:#7F1D1D;border-color:#991B1B;color:#FCA5A5">Clear logged data</button>
+      </div>
     </div>
     <div id="log-out"></div>
   </div>

@@ -118,6 +118,11 @@ HOLD_DELTA_DKK      = 0.80   # hold battery if a future slot is at least this mu
 HOLD_HORIZON_H      = 6      # hours ahead to scan for an expensive upcoming slot
 MAX_HOLD_IMPORT_DKK = 1.50   # only hold battery when current import is below this
 MIN_SOC_HOLD        = 20.0   # minimum SoC required to bother holding
+# Solar-aware hold suppression: don't hoard charge for a peak that the sun will
+# refill the battery for anyway. If forecast PV energy before the peak is at least
+# this multiple of the battery's capacity, skip the hold and discharge now —
+# solar will top the pack back up before the expensive slot arrives.
+HOLD_SOLAR_REFILL_FACTOR = 1.0
 
 _EVAL_INTERVAL_S = 15
 
@@ -144,6 +149,7 @@ _HOLD_DELTA_DKK       = HOLD_DELTA_DKK
 _HOLD_HORIZON_H       = HOLD_HORIZON_H
 _MAX_HOLD_IMPORT_DKK  = MAX_HOLD_IMPORT_DKK
 _MIN_SOC_HOLD         = MIN_SOC_HOLD
+_HOLD_SOLAR_REFILL_FACTOR = HOLD_SOLAR_REFILL_FACTOR
 
 
 @dataclass
@@ -171,9 +177,29 @@ class AutoController:
         self._grid_charging:  bool            = False  # hysteresis state
         self._applied:        dict[int, int]  = {}     # addr → last value written
         self._tick:           int             = 0
+        self._solar_fc:       list[dict]      = []     # latest Solcast forecast
 
     def set_command_callback(self, cb: Callable[[str, str], None]):
         self._on_command = cb
+
+    def set_solar_forecast(self, fc: list[dict]):
+        """Latest Solcast forecast ([{ts_ms, pv_w}, ...], 30-min period_end UTC).
+        Used by the hold branch to tell whether the sun will refill the battery
+        before an upcoming price peak."""
+        self._solar_fc = fc or []
+
+    def _expected_solar_kwh(self, from_ms: int, to_ms: int) -> float:
+        """Forecast PV energy (kWh) over (from_ms, to_ms] from the latest solar
+        forecast (30-min period_end records)."""
+        if to_ms <= from_ms:
+            return 0.0
+        total = 0.0
+        for r in self._solar_fc:
+            ts = r.get('ts_ms')
+            if ts is None or ts <= from_ms or ts > to_ms:
+                continue
+            total += (r.get('pv_w') or 0.0) / 1000.0 * 0.5  # 30-min slot → kWh
+        return total
 
     # ── State-gated register writes ───────────────────────────────────────────
 
@@ -509,8 +535,16 @@ class AutoController:
                 and hold_window
                 and import_dkk < _MAX_HOLD_IMPORT_DKK
                 and batt_soc > _MIN_SOC_HOLD):
-            max_upcoming = max(p['import'] for p in hold_window)
-            if max_upcoming > import_dkk + _HOLD_DELTA_DKK:
+            peak_p       = max(hold_window, key=lambda p: p['import'])
+            max_upcoming = peak_p['import']
+            # Solar-aware suppression: if enough PV is forecast before the peak to
+            # recharge the pack, don't hoard — discharge now and let the sun refill
+            # the battery before the expensive slot. (Refilled charge is free; the
+            # cheap import we'd otherwise pay overnight is pure loss.)
+            cap_kwh   = data.get('batt_rated_capacity') or 5.0
+            solar_kwh = self._expected_solar_kwh(now_ms, peak_p['ts'])
+            solar_will_refill = solar_kwh >= cap_kwh * _HOLD_SOLAR_REFILL_FACTOR
+            if max_upcoming > import_dkk + _HOLD_DELTA_DKK and not solar_will_refill:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # battery idle, no export
                 self._apply(worker, [
@@ -519,8 +553,15 @@ class AutoController:
                     (16, 47100, 0, 'AutoCtrl: force IDLE'),
                 ])
                 detail = (f'Holding battery: peak {max_upcoming:.3f} DKK in ≤{_HOLD_HORIZON_H}h '
-                          f'(now {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%)')
+                          f'(now {import_dkk:.3f} DKK, SoC {batt_soc:.0f}%, '
+                          f'solar before peak {solar_kwh:.1f}/{cap_kwh:.1f} kWh)')
                 return _Cmd(mode='hold_battery', detail=detail)
+            if max_upcoming > import_dkk + _HOLD_DELTA_DKK and solar_will_refill:
+                log.info(
+                    'AutoCtrl: hold suppressed — %.1f kWh PV forecast before peak '
+                    '%.3f DKK refills the %.1f kWh pack; discharging instead',
+                    solar_kwh, max_upcoming, cap_kwh,
+                )
 
         # ── 4. Export arbitrage: sell stored energy high, rebuy cheaper ───────
         # Force-discharge to grid when the current export price beats the cheapest

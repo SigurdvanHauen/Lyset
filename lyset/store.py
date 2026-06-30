@@ -71,6 +71,19 @@ def init():
         _get_con()
 
 
+def backup_to(dest_path: str):
+    """Write a consistent snapshot of the live DB to dest_path using SQLite's
+    online backup API — safe to call while polls are still being written (the
+    WAL is checkpointed into the copy). Used by the data-download endpoint."""
+    with _lock:
+        src = _get_con()
+        dst = sqlite3.connect(dest_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+
+
 def save(ts: float, data: dict):
     with _lock:
         con = _get_con()

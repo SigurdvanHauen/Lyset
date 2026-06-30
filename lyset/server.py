@@ -27,7 +27,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
 from pymodbus.client import ModbusTcpClient
@@ -43,6 +43,7 @@ from .auto_controller import (
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
     CHARGE_MARGIN_DKK, CHARGE_HORIZON_H,
     HOLD_DELTA_DKK, HOLD_HORIZON_H, MAX_HOLD_IMPORT_DKK, MIN_SOC_HOLD,
+    HOLD_SOLAR_REFILL_FACTOR,
     ARBIT_MARGIN_DKK, MIN_SOC_ARBIT, ARBIT_HORIZON_H,
 )
 from . import store
@@ -271,12 +272,22 @@ def _simulate_soc(
                 if not do_gc and net_kw < 0:
                     hold_end = ts_ms + HOLD_HORIZON_H * 3_600_000
                     h_win = [p for p in future_from_here if p['ts'] <= hold_end]
-                    do_hold = (
-                        bool(h_win)
-                        and import_dkk < MAX_HOLD_IMPORT_DKK
-                        and soc > MIN_SOC_HOLD
-                        and max(p['import'] for p in h_win) > import_dkk + HOLD_DELTA_DKK
-                    )
+                    if (h_win
+                            and import_dkk < MAX_HOLD_IMPORT_DKK
+                            and soc > MIN_SOC_HOLD):
+                        peak_p = max(h_win, key=lambda p: p['import'])
+                        # Solar-aware: don't hoard for a peak the sun will refill the
+                        # pack for. Sum forecast PV between now and the peak; suppress
+                        # the hold when it covers the battery (mirrors AutoController).
+                        solar_kwh = sum(
+                            (solar_by_ts.get(t, 0.0)) / 1000.0 * 0.5
+                            for t in range(ts_ms + SLOT_MS, peak_p['ts'] + 1, SLOT_MS)
+                        )
+                        solar_will_refill = solar_kwh >= capacity_kwh * HOLD_SOLAR_REFILL_FACTOR
+                        do_hold = (
+                            peak_p['import'] > import_dkk + HOLD_DELTA_DKK
+                            and not solar_will_refill
+                        )
 
                 # Arbitrage: export now beats cheapest upcoming import by a margin
                 if not do_gc and not do_hold and soc > MIN_SOC_ARBIT and import_dkk < MAX_HOLD_IMPORT_DKK:
@@ -591,6 +602,7 @@ def _on_solar_forecast(records: list[dict]):
     now_ms = int(time.time() * 1000)
     full = store.load_solar_forecast(now_ms - 86_400_000, now_ms + 2 * 86_400_000)
     _last_solar_forecast = full or records
+    _auto_controller.set_solar_forecast(_last_solar_forecast)
     _push({'type': 'solar_forecast', 'payload': _last_solar_forecast})
 
     # Log today's full-day Solcast total to the daily_solar table
@@ -696,6 +708,7 @@ async def lifespan(app: FastAPI):
     cached_fc = store.load_solar_forecast(now_ms - 86_400_000, now_ms + 2 * 86_400_000)
     if cached_fc:
         _last_solar_forecast = cached_fc
+        _auto_controller.set_solar_forecast(_last_solar_forecast)
         log.info('Solcast: restored %d cached forecast periods from DB', len(cached_fc))
         # Persist today's Solcast total so /api/daily-solar has it before the next fetch
         now_local   = datetime.now(_TZ_LOCAL)
@@ -1003,6 +1016,23 @@ async def api_history_series(key: str, from_ms: int | None = None):
     loop = asyncio.get_running_loop()
     points = await loop.run_in_executor(None, store.load_series, key, from_ts)
     return {'key': key, 'points': points}
+
+
+@app.get('/api/download/db')
+async def api_download_db():
+    """Download a consistent snapshot of the full history DB (polls, prices,
+    solar/consumption/power forecasts, daily_solar, auto_commands). The snapshot
+    is taken via SQLite's online backup so it's safe while polling continues.
+    Open it with any SQLite tool — handy for offline sanity checks."""
+    import tempfile
+    ts  = datetime.now(_TZ_LOCAL).strftime('%Y%m%d-%H%M%S')
+    tmp = Path(tempfile.gettempdir()) / f'lyset_history_{ts}.db'
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, store.backup_to, str(tmp))
+    return FileResponse(
+        str(tmp), media_type='application/octet-stream',
+        filename=f'lyset_history_{ts}.db',
+    )
 
 
 @app.get('/api/prices')
