@@ -2053,7 +2053,6 @@ function togglePlanSeries(key) { setPlanVisible(key, !_planVisible[key]); }
 // on for every line except the two price overlays. ───────────────────────────
 const PLAN_SMOOTH_ITEMS = [
   ...PLAN_SERIES,
-  { key: 'solarFc', label: 'Solar forecast', color: '#FCD34D' },
   { key: 'soc', label: 'Battery SOC', color: '#9CA3AF' },
   ...PLAN_PRICE_SERIES,
 ];
@@ -2181,6 +2180,10 @@ function _planFutSolarKW() {
 // so it lines up with the dashed "plan" region.
 const PLAN_SOLAR_FC = { key: 'solarFc', label: 'Solar forecast', color: '#FCD34D' };
 function _planSolarFcSeries() {
+  // No smoothing: Solcast is already coarse (30-min slots) and smooth. The
+  // history smoother's ±30-point window assumes 10-s data; applied here it would
+  // span ±15 h and flatten the curve, so it must NOT run. This keeps the forecast
+  // shape identical to the `solar` line's future part (which is also raw).
   const now = Date.now();
   const mean = [], p10 = [], p90 = [];
   for (const r of _solcastData) {
@@ -2188,13 +2191,6 @@ function _planSolarFcSeries() {
     mean.push({ x: r.ts_ms, y: r.pv_w / 1000 });
     p10.push({ x: r.ts_ms, y: r.p10_w != null ? r.p10_w / 1000 : null });
     p90.push({ x: r.ts_ms, y: r.p90_w != null ? r.p90_w / 1000 : null });
-  }
-  if (planSmoothOn('solarFc')) {
-    return {
-      mean: smoothPoints(mean, 30, false),
-      p10:  smoothPoints(p10,  30, false),
-      p90:  smoothPoints(p90,  30, false),
-    };
   }
   return { mean, p10, p90 };
 }
