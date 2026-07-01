@@ -94,6 +94,24 @@ def arbitrage_enabled() -> bool:
     strategy — grid charge, hold, self-consumption — is unaffected."""
     return os.getenv('ARBITRAGE_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off', '')
 
+
+def arbitrage_min_gain() -> float:
+    """Minimum predicted round-trip gain (as a fraction — 0.05 = 5 %) required
+    before the planner will discharge the battery to the grid for arbitrage.
+
+    The gain is measured against the OPPORTUNITY COST of the stored energy: the
+    most expensive upcoming import that same energy could otherwise offset via
+    self-consumption. Requiring export_now ≥ opportunity_cost × (1 + gain) means
+    the trade can never lose money to self-consumption — because import always
+    exceeds export for a given hour, dumping the pack into an evening peak and
+    re-importing the house load at a higher price is exactly what this blocks.
+    Settings → Auto controller; read live so a save applies without a restart."""
+    try:
+        pct = float(os.getenv('ARBITRAGE_MIN_GAIN_PCT', '5'))
+    except (TypeError, ValueError):
+        pct = 5.0
+    return max(pct, 0.0) / 100.0
+
 # ── Thresholds (also imported by server.py for the SoC simulation) ────────────
 NEGATIVE_EXPORT_DKK   = 0.0     # export below 0 → curtail PV feed-in and force-charge
                                 # (any negative export means we'd PAY to export — never
@@ -687,37 +705,37 @@ class AutoController:
                     solar_kwh, max_upcoming, cap_kwh,
                 )
 
-        # ── 4. Export arbitrage: sell stored energy high, rebuy cheaper ───────
-        # Force-discharge to grid when the current export price beats the cheapest
-        # upcoming import by a margin AND the battery holds more energy than it
-        # needs for upcoming self-consumption (the "excess").
+        # ── 4. Export arbitrage: sell stored energy high — the BUSINESS CASE ──
+        # A discharge to grid only makes sense if it beats the best alternative use
+        # of that same stored kWh: self-consuming it at the most expensive upcoming
+        # slot (which would otherwise be imported). So the bar is the OPPORTUNITY
+        # COST — the max import price over the look-ahead window — not the cheapest
+        # future import. Because import > export for a given hour, comparing against
+        # the cheapest rebuy (the old gate) let the pack dump into an evening peak
+        # and then re-import the house load at an even higher price — a guaranteed
+        # loss (observed 2026-07-01: sold ~3 kWh at ~1.6 while the 21–22h load
+        # imported at ~2.65). Requiring export_now ≥ opportunity_cost × (1 + gain)
+        # makes the round trip provably non-losing; the gain % is user-set.
         #
-        # The gate is an opportunity-cost test, not the old blunt import<1.50
-        # ceiling. Self-consuming the marginal kWh avoids the CURRENT import; that
-        # only beats exporting when the battery is actually needed for an expensive
-        # upcoming slot. _reserve_energy_kwh sizes that need (deficit energy in
-        # slots pricier than today's export); anything above it (and above the
-        # MIN_SOC_ARBIT floor) has no better use than export-now / rebuy-cheap —
-        # especially in summer when solar refills the pack tomorrow for free — so
-        # we sell it. As SoC falls to the reserve the gate closes on its own,
-        # leaving exactly enough to ride the peak via self-consumption. When no
-        # load forecast is available, fall back to the old cheap-import guard.
+        # The reserve/excess check is kept as a secondary SoC guard. With the new
+        # bar there is by construction no upcoming slot pricier than export_now, so
+        # the reserve is ~0 and this just prevents deep-cycling for a marginal gain.
         arbit_window = _window(_ARBIT_HORIZON_H)
         if arbitrage_enabled() and arbit_window and batt_soc > _MIN_SOC_ARBIT:
-            future_min_import = min(p['import'] for p in arbit_window)
-            profitable = export_dkk > future_min_import + _ARBIT_MARGIN_DKK
-            if self._load_fc:
-                cap_kwh       = data.get('batt_rated_capacity') or 5.0
-                available_kwh = max(0.0, (batt_soc - _MIN_SOC_ARBIT) / 100.0 * cap_kwh)
-                reserve_kwh   = self._reserve_energy_kwh(
-                    now_ms, now_ms + _ARBIT_HORIZON_H * 3_600_000, export_dkk, prices)
-                excess_kwh    = available_kwh - reserve_kwh
-                do_export     = profitable and excess_kwh > _ARBIT_MIN_EXCESS_KWH
-                gate_lbl      = (f'excess {excess_kwh:.1f} kWh '
-                                 f'(avail {available_kwh:.1f} − reserve {reserve_kwh:.1f})')
-            else:
-                do_export = profitable and import_dkk < _MAX_HOLD_IMPORT_DKK
-                gate_lbl  = f'import {import_dkk:.3f} < {_MAX_HOLD_IMPORT_DKK} (no load fc)'
+            opportunity_cost   = max(p['import'] for p in arbit_window)  # best self-consumption value
+            min_gain           = arbitrage_min_gain()
+            threshold          = opportunity_cost * (1.0 + min_gain)
+            gain_pct           = (export_dkk / opportunity_cost - 1.0) * 100.0 if opportunity_cost > 0 else -100.0
+            profitable         = export_dkk >= threshold
+            cap_kwh       = data.get('batt_rated_capacity') or 5.0
+            available_kwh = max(0.0, (batt_soc - _MIN_SOC_ARBIT) / 100.0 * cap_kwh)
+            reserve_kwh   = (self._reserve_energy_kwh(
+                now_ms, now_ms + _ARBIT_HORIZON_H * 3_600_000, export_dkk, prices)
+                if self._load_fc else 0.0)
+            excess_kwh    = available_kwh - reserve_kwh
+            do_export     = profitable and excess_kwh > _ARBIT_MIN_EXCESS_KWH
+            gate_lbl      = (f'gain {gain_pct:+.0f}% vs need {min_gain * 100:.0f}%, '
+                             f'excess {excess_kwh:.1f} kWh')
             if do_export:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # MUST export to grid
@@ -738,8 +756,8 @@ class AutoController:
                     (16, 47086, 1, 'AutoCtrl: mode=forced'),
                     (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
                 ])
-                detail = (f'Arb. discharge: export {export_dkk:.3f} DKK > '
-                          f'future min import {future_min_import:.3f} DKK, '
+                detail = (f'Arb. discharge: export {export_dkk:.3f} DKK ≥ '
+                          f'opportunity cost {opportunity_cost:.3f} DKK ×{1 + min_gain:.2f}, '
                           f'{gate_lbl} (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='arbit_discharge', detail=detail)
 

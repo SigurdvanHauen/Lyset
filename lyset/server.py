@@ -40,7 +40,7 @@ from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
 from .auto_controller import (
-    AutoController, arbitrage_enabled,
+    AutoController, arbitrage_enabled, arbitrage_min_gain,
     NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_SOC_START, GRID_CHARGE_SOC_MAX, GRID_CHARGE_W,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
@@ -225,6 +225,7 @@ def _simulate_soc(
     prices_sorted = sorted(prices, key=lambda p: p['ts']) if prices else []
     price_ptr     = 0
     arb_enabled   = arbitrage_enabled()  # Settings toggle; mirrors _decide's gate
+    arb_min_gain  = arbitrage_min_gain()  # required % gain vs opportunity cost
 
     end_ms        = max(r['ts_ms'] for r in solar_fc)
     first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
@@ -305,18 +306,18 @@ def _simulate_soc(
                             and not solar_will_refill
                         )
 
-                # Arbitrage: export now beats cheapest upcoming import by a margin
-                # AND the battery holds more energy than its upcoming
-                # self-consumption reserve (mirrors AutoController._decide branch 4's
-                # opportunity-cost gate — not the old blunt import<MAX_HOLD ceiling,
-                # which kept this discharge from showing during expensive evenings).
+                # Arbitrage business case (mirrors AutoController._decide branch 4):
+                # export only makes sense if it beats the OPPORTUNITY COST of the
+                # stored energy — self-consuming it at the most expensive upcoming
+                # import. Require export_now ≥ max_upcoming_import × (1 + min_gain);
+                # since import > export for a given hour, this can never lose money by
+                # dumping the pack into a peak and re-importing the house load higher.
                 if arb_enabled and not do_gc and not do_hold and soc > MIN_SOC_ARBIT:
                     arbit_end = ts_ms + ARBIT_HORIZON_H * 3_600_000
                     a_win = [p for p in future_from_here if p['ts'] <= arbit_end]
-                    if a_win and export_dkk > min(p['import'] for p in a_win) + ARBIT_MARGIN_DKK:
-                        # Reserve = deficit energy (load − solar) in future slots
-                        # pricier than today's export — energy worth keeping for
-                        # self-consumption rather than exporting now.
+                    if a_win and export_dkk >= max(p['import'] for p in a_win) * (1.0 + arb_min_gain):
+                        # Secondary SoC guard: keep any energy still needed for future
+                        # slots pricier than today's export (≈0 under the gate above).
                         available_kwh = max(0.0, (soc - MIN_SOC_ARBIT) / 100.0 * capacity_kwh)
                         reserve_kwh   = 0.0
                         for lt, lw in load_by_ts.items():

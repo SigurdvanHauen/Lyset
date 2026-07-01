@@ -109,6 +109,11 @@ SCHEMA: list[dict] = [
              'default': '1', 'help': 'Let the planner force-discharge the battery to the grid when '
              'the export price beats the cheapest upcoming import. Turn off to keep stored energy '
              'for self-consumption only. Takes effect immediately.'},
+            {'key': 'ARBITRAGE_MIN_GAIN_PCT', 'label': 'Min. arbitrage gain (%)', 'type': 'number',
+             'default': '5', 'help': 'Required predicted round-trip gain before the planner will '
+             'discharge to the grid for arbitrage. Measured against the most expensive upcoming '
+             'import the stored energy could otherwise offset, so the trade can never lose money to '
+             'self-consumption. 0 = break-even allowed; higher = more conservative. Takes effect immediately.'},
         ],
     },
 ]
