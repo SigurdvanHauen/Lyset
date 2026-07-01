@@ -2198,8 +2198,19 @@ function buildPlanPredPast() {
       pts.push({ x: now, y: pts[pts.length - 1].y });
     return pts;
   };
+  // Solar past-forecast ends at the interpolated in-progress-slot value at `now`
+  // (not the flat-held slot value) so it meets the future-forecast anchor exactly
+  // — otherwise the two dashes step across the slot the cursor sits in.
+  const solarPast = pastFc(_solcastData, r => r.pv_w != null ? r.pv_w / 1000 : null);
+  const solarNow = _solcastPvKwAt(now);
+  if (solarNow != null) {
+    if (solarPast.length && solarPast[solarPast.length - 1].x === now)
+      solarPast[solarPast.length - 1].y = solarNow;
+    else
+      solarPast.push({ x: now, y: solarNow });
+  }
   return {
-    solar: pastFc(_solcastData,         r => r.pv_w   != null ? r.pv_w   / 1000 : null),
+    solar: solarPast,
     load:  pastFc(_consumptionForecast, r => r.w      != null ? r.w      / 1000 : null),
     chg:   pastFc(_powerForecast,       r => r.batt_w != null ? Math.max(r.batt_w, 0)  / 1000 : null),
     dis:   pastFc(_powerForecast,       r => r.batt_w != null ? Math.max(-r.batt_w, 0) / 1000 : null),
@@ -2222,26 +2233,47 @@ function _lookupHold(arr, tsKey, valKey, t) {
   return best;
 }
 
-// Future solar in kW, curtailed for negative export prices. When export is
-// negative the controller runs zero-export (mode 5): PV is capped to what the
-// house draws plus whatever the battery can soak up, so actual generation is
-// min(Solcast potential, load + battery charge) — the surplus is never produced.
-// Outside negative-price slots the raw Solcast potential stands.
+// Raw Solcast potential (kW) at negative-export slots is curtailed: the controller
+// runs zero-export (mode 5), capping PV to what the house draws plus whatever the
+// battery can soak up (min(potential, load + charge)) — the surplus is never
+// produced. Outside negative-price slots the raw potential stands.
+function _curtailSolarKw(pvKw, tsMs) {
+  const exp = _lookupHold(_pricesData, 'ts', 'export', tsMs);
+  if (exp == null || exp >= 0) return pvKw;
+  const loadW = _lookupHold(_consumptionForecast, 'ts_ms', 'w', tsMs);
+  const chgW  = _lookupHold(_powerForecast,       'ts_ms', 'batt_w', tsMs);
+  const capKw = (loadW != null ? loadW / 1000 : 0)
+              + (chgW  != null ? Math.max(chgW, 0) / 1000 : 0);
+  return Math.min(pvKw, capKw);
+}
+
+// Interpolate the raw Solcast potential (kW) at time t by blending across the
+// 30-min slot t falls in. Slots are stamped at slot-start, so `now` almost always
+// sits mid-slot; interpolating here lets the plan's solar line be anchored exactly
+// at the cursor. Returns null outside the forecast range.
+function _solcastPvKwAt(t) {
+  let prev = null;
+  for (const r of _solcastData) {
+    if (r.pv_w == null) continue;
+    if (r.ts_ms <= t) { prev = r; continue; }
+    if (!prev) return r.pv_w / 1000;
+    const f = (t - prev.ts_ms) / (r.ts_ms - prev.ts_ms);
+    return (prev.pv_w + (r.pv_w - prev.pv_w) * f) / 1000;
+  }
+  return prev ? prev.pv_w / 1000 : null;
+}
+
+// Future solar (kW). Anchored at `now` with the interpolated in-progress-slot value
+// so the dashed future line joins the dashed past-forecast (which ends at the same
+// value) instead of stepping up to the next 30-min slot boundary.
 function _planFutSolarKW() {
   const now = Date.now();
   const out = [];
+  const anchorKw = _solcastPvKwAt(now);
+  if (anchorKw != null) out.push({ x: now, y: _curtailSolarKw(anchorKw, now) });
   for (const r of _solcastData) {
-    if (r.ts_ms < now || r.pv_w == null) continue;
-    let pvKw = r.pv_w / 1000;
-    const exp = _lookupHold(_pricesData, 'ts', 'export', r.ts_ms);
-    if (exp != null && exp < 0) {
-      const loadW = _lookupHold(_consumptionForecast, 'ts_ms', 'w', r.ts_ms);
-      const chgW  = _lookupHold(_powerForecast,       'ts_ms', 'batt_w', r.ts_ms);
-      const capKw = (loadW != null ? loadW / 1000 : 0)
-                  + (chgW  != null ? Math.max(chgW, 0) / 1000 : 0);
-      pvKw = Math.min(pvKw, capKw);
-    }
-    out.push({ x: r.ts_ms, y: pvKw });
+    if (r.ts_ms <= now || r.pv_w == null) continue;
+    out.push({ x: r.ts_ms, y: _curtailSolarKw(r.pv_w / 1000, r.ts_ms) });
   }
   return out;
 }
