@@ -374,8 +374,8 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   #plan-buttons { display: grid !important; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
   #plan-buttons button { font-size: 10px !important; padding: 5px 4px !important; }
 
-  /* Plan chart: fill available viewport height */
-  #plan-chart-wrap { height: calc(100dvh - 265px) !important; }
+  /* Plan chart: fill available viewport height (badge removed, so ~240px overhead) */
+  #plan-chart-wrap { height: calc(100dvh - 245px) !important; }
 
   /* Plan footer text: hide to save space */
   #plan-footer-text { display: none !important; }
@@ -541,10 +541,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Plan (auto-mode behaviour: actuals + AI plan) -->
   <div id="panel-plan" class="panel">
-    <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
-      <span id="plan-auto-badge" style="font-size:10px;padding:2px 10px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);text-transform:none;font-weight:600;letter-spacing:0">Auto OFF</span>
-    </div>
-
     <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
       <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
         <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
@@ -1745,15 +1741,6 @@ function onAutoMode(msg) {
     setText('plan-action', msg.last_action);
   }
 
-  // Plan-tab auto badge
-  const planBadge = document.getElementById('plan-auto-badge');
-  if (planBadge) {
-    planBadge.textContent = msg.enabled ? 'Auto ON' : 'Auto OFF';
-    planBadge.style.color       = msg.enabled ? 'var(--success)' : 'var(--muted)';
-    planBadge.style.borderColor = msg.enabled ? 'var(--success)' : 'var(--border)';
-    planBadge.style.background   = msg.enabled ? '#0d2e1a' : 'var(--surf2)';
-  }
-
   // Append new command to local history if this message carries one
   if (msg.cmd) {
     _autoCommands.push(msg.cmd);
@@ -2559,16 +2546,20 @@ function renderPlanChart() {
         ySoc: {
           position: 'right',
           min: 0, max: 100,
-          title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 } },
+          title: { display: window.innerWidth > 640, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: window.innerWidth > 640 ? 10 : 8 },
+                   maxTicksLimit: window.innerWidth > 640 ? undefined : 5 },
           grid: { drawOnChartArea: false },
+          afterFit: window.innerWidth <= 640 ? (s => { s.width = 30; }) : undefined,
         },
         yPrice: {
           position: 'right',
           display: () => _planVisible.priceImp || _planVisible.priceExp,
-          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 } },
+          title: { display: window.innerWidth > 640, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: window.innerWidth > 640 ? 10 : 8 },
+                   maxTicksLimit: window.innerWidth > 640 ? undefined : 5 },
           grid: { drawOnChartArea: false },
+          afterFit: window.innerWidth <= 640 ? (s => { s.width = 36; }) : undefined,
         },
       },
     },
