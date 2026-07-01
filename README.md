@@ -34,7 +34,10 @@ It is an open replacement for paid optimisation services (e.g. IntelliCharge), w
 - **Solar forecast** — pulls a PV production forecast (mean + P10/P90 confidence band) from [Solcast](https://solcast.com).
 - **Consumption forecast** — learns a weekly household-load profile online from your own meter data.
 - **Plan view** — overlays past actuals with a forward plan (solar, load, battery charge/discharge, grid, SoC) plus the price curve, IntelliCharge-style.
+- **Savings tracking** — measures the DKK you've saved vs. buying every kWh from the grid at the import price (solar self-consumption + battery time-shift + arbitrage, folded into one figure). Cards for today / this week / this month / this year, each opening a cumulative or per-bucket chart with **actual vs. predicted** series.
+- **Payback / ROI** — enter your system cost and install date and it estimates the break-even date from your realised average daily savings.
 - **Auto-controller** — decides each cycle whether to grid-charge, hold, arbitrage-discharge, force-charge from surplus, or run plain self-consumption, and writes the battery-control registers to make it happen.
+- **Settings dialog** — a gear-icon modal configures the inverter, API keys, and every tunable, writing them back to `.env`. No file editing or restart for most changes.
 - **Home Assistant feed** — a single flat-JSON endpoint exposes everything for HA REST sensors (see below).
 
 > There is also a legacy **PySide6 desktop GUI** (`lyset/gui/`) from the project's first phase. It is no longer the primary interface; the web server is. The two share the same `register_map.py` and `modbus_client.py`.
@@ -102,10 +105,14 @@ pip install -r requirements.txt
 
 ### Configure
 
-Create a `.env` file in the project root (see [Configuration](#configuration-env) for all keys):
+Two options, and you can mix them:
+
+- **In the browser (easiest):** start the server and click the **gear icon** (top-right) to open **Settings**. Every option below is editable there — inverter address, API keys, prices, ROI inputs, auto-controller tunables — and is written back to `.env`. Most take effect immediately (the relevant worker restarts on save).
+- **By hand:** create a `.env` file in the project root before first start (see [Configuration](#configuration-env) for all keys):
 
 ```ini
 # Minimal — prices + solar forecast. Leave out to run as a pure monitor.
+INVERTER_HOST=192.168.1.185
 STROMLIGNING_API_KEY=your-key-here
 STROMLIGNING_POSTAL_CODE=5500
 SOLCAST_API_KEY=your-key-here
@@ -125,7 +132,18 @@ On startup the server auto-connects to the inverter, starts the price/solar/cons
 
 ## Configuration (`.env`)
 
-All configuration is via environment variables, loaded from `.env` at startup (`python-dotenv`). Everything has a default; only the API keys are really required to unlock the paid features.
+All configuration is via environment variables, loaded from `.env` at startup (`python-dotenv`), and most keys below are also editable live from the in-app **Settings** dialog (which writes the same `.env`). Everything has a default; only the API keys are really required to unlock the paid features.
+
+### Inverter (Modbus TCP)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INVERTER_HOST` | `192.168.1.185` | LAN address of the inverter's SDongle. |
+| `INVERTER_PORT` | `502` | Modbus TCP port. |
+| `INVERTER_SLAVE_ID` | `1` | Modbus unit / slave ID. |
+| `INVERTER_POLL_INTERVAL` | `10` | Seconds between inverter reads. |
+
+> Changing any of these (in `.env` or via Settings) reconnects the poller. Find the inverter's IP in your router's DHCP table or the FusionSolar app under the SDongle's network settings.
 
 ### Electricity prices (Strømligning)
 
@@ -157,22 +175,29 @@ All configuration is via environment variables, loaded from `.env` at startup (`
 | `CONSUMPTION_HISTORY_PATH` | — | Path to a meter-data Excel file (Eloverblik `MeterData.xlsx`) used to seed the weekly load profile on first run. Without it the model learns from scratch from live polls. |
 | `CONSUMPTION_MIN_STANDBY_W` | `300` | Floor (W) applied to load predictions so empty/overnight slots never read as 0 W. |
 
+### PV system (payback / ROI)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PV_SYSTEM_COST` | — | Total installed cost of your PV + battery system in DKK. Drives the payback card on the Plan tab. |
+| `PV_INSTALL_DATE` | — | Commissioning date (`YYYY-MM-DD`). Break-even is measured from here using your average daily savings so far. |
+
 ### Auto-controller
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTO_CONTROLLER_AUTOSTART` | `1` | `0`/`false`/`no`/`off` to start with the controller **disabled** (monitor only — never writes to the battery). You can also toggle it live in the Control tab. |
-
-> **Inverter connection** is not an env var. The startup default is `192.168.1.185:502`, slave `1`, 10 s poll, defined in `ConnectRequest` ([server.py](lyset/server.py)). Either edit that default for your inverter or set it at runtime from the Control tab (see next section).
+| `AUTO_CONTROLLER_AUTOSTART` | `1` | `0`/`false`/`no`/`off` to start with the controller **disabled** (monitor only — never writes to the battery). You can also toggle it live from the dashboard. |
+| `ARBITRAGE_ENABLED` | `1` | Allow the controller to force-discharge the battery to the grid for arbitrage. `0` keeps all stored energy for self-consumption. Takes effect immediately. |
+| `ARBITRAGE_MIN_GAIN_PCT` | `5` | Required predicted round-trip gain (%) before an arbitrage discharge fires, measured against the most expensive upcoming import the same energy could otherwise offset. `0` = break-even allowed; higher = more conservative. Takes effect immediately. See [the auto-controller](#the-battery-auto-controller). |
 
 ---
 
 ## Connecting to your inverter
 
-The server auto-connects on startup using the `ConnectRequest` defaults. If your inverter lives at a different IP:
+The server auto-connects on startup using `INVERTER_HOST` / `INVERTER_PORT` / `INVERTER_SLAVE_ID` / `INVERTER_POLL_INTERVAL` (defaults `192.168.1.185:502`, slave `1`, 10 s). If your inverter lives at a different IP:
 
-- **At runtime:** open the **Control** tab in the web UI and enter your inverter's host / port (`502`) / slave ID (`1`), then connect. This calls `POST /api/connect`.
-- **Persistently:** edit the defaults in `ConnectRequest` in [`lyset/server.py`](lyset/server.py) so they survive restarts.
+- **In the browser:** open **Settings** (gear icon) → *Inverter (Modbus TCP)*, set the host, and save. The poller reconnects immediately, and the value persists in `.env`.
+- **By hand:** set `INVERTER_HOST` (etc.) in `.env` before starting.
 
 Find the inverter's IP from your router's DHCP table, or in the FusionSolar app under the SDongle's network settings.
 
@@ -189,13 +214,22 @@ Every 15 s the controller looks at the current/next price slots, PV, load, and S
 | **Negative-export force-charge** | export price < threshold | Cap feed-in to 0 W (APC zero-export) and soak surplus PV into the battery so nothing is dumped to grid at a loss. |
 | **Grid charge** | now is near the cheapest of the next *N* h **and** a materially pricier slot is coming **and** there's room | Force-charge from grid to bank cheap energy. |
 | **Hold** | drawing from battery, with a much pricier slot ahead and no solar to refill it | Force-idle; let cheap grid cover the load now and save the battery for the peak. |
-| **Arbitrage discharge** | export price beats the cheapest upcoming import by a margin and SoC is high | Force-discharge to grid. |
+| **Arbitrage discharge** | export now clears the opportunity-cost gate (below) and SoC is high | Force-discharge to grid. |
 | **Self-consumption** (default) | none of the above | Surplus → charge from surplus; deficit → max self-consumption with zero export. |
 
+**Arbitrage that can't lose money.** The discharge gate compares the current export price against the **opportunity cost** of the stored energy — the *most expensive* upcoming import that same energy could otherwise offset by self-consumption — not against the cheapest rebuy. It fires only when
+
+```
+export_now  ≥  max_upcoming_import × (1 + ARBITRAGE_MIN_GAIN_PCT/100)
+```
+
+Because import always exceeds export for the same hour (Danish spot ± fees), clearing this bar guarantees that re-importing your load later is cheaper than what you sold at — so the trade is structurally non-losing. The Plan-tab simulation runs the *identical* gate, so the projected SoC curve matches what the controller will actually do.
+
 Design notes:
-- Writes are **read-back gated** where the register can be polled (re-issued only until the inverter confirms, then stopped) and **deduped** otherwise — so the single-client SDongle is never flooded with redundant writes.
-- Disabling the controller (Control tab, or `AUTO_CONTROLLER_AUTOSTART=0`) restores safe defaults and **stops all writes** — Lyset becomes a pure monitor.
-- The thresholds and horizons live as constants at the top of [`lyset/auto_controller.py`](lyset/auto_controller.py).
+- **Surplus force-charge is meter-fed:** the charge target is sized from the meter's own feedback (`batt_w − grid_w`), not the raw PV-minus-load estimate, so glitchy PV reads can't make it over-charge and pull power from the grid.
+- Writes are **read-back gated** where the register can be polled (re-issued only until the inverter confirms, then stopped) and **deduped** otherwise — so the single-client SDongle is never flooded with redundant writes. (The forcible-charge power register `47247` doesn't read back on this firmware, so it's re-asserted each tick.)
+- Disabling the controller (from the dashboard, or `AUTO_CONTROLLER_AUTOSTART=0`) restores safe defaults and **stops all writes** — Lyset becomes a pure monitor.
+- The thresholds and horizons live as constants at the top of [`lyset/auto_controller.py`](lyset/auto_controller.py); `ARBITRAGE_ENABLED` and `ARBITRAGE_MIN_GAIN_PCT` are live settings.
 
 > The control logic was tuned for one specific SUN2000/LUNA2000 firmware. **If you reuse it, watch the logs and verify the battery behaves before trusting it unattended** — some registers don't read back on every firmware, and battery-mode semantics differ.
 
@@ -212,13 +246,18 @@ Base URL `http://<server>:8000`. JSON in/out.
 | `POST` | `/api/disconnect` | Stop the worker. |
 | `GET` | `/api/state` | Connection state + last snapshot + recent log lines. |
 | `POST` | `/api/write` | Queue a register write. Body: `{type: "u16"\|"u32"\|"i32", address, value, description}`. |
-| `GET` | `/api/read?address=&type=` | Synchronous single-register read (Control-tab prefill). |
+| `GET` | `/api/read?address=&type=` | Synchronous single-register read. |
+| `GET` | `/api/settings` | Settings schema with current values (powers the Settings dialog). |
+| `POST` | `/api/settings` | Persist settings to `.env` and apply live. Body: `{KEY: value, …}`. |
 | `GET` | `/api/prices` | Stored price series (past 24 h → +7 days). |
 | `GET` | `/api/solar-forecast?full=` | Solcast forecast series. |
 | `POST` | `/api/solar-forecast/refresh` | Force an immediate Solcast fetch. |
 | `GET` | `/api/consumption-forecast?full=` | Consumption forecast + model coverage. |
 | `POST` | `/api/consumption/import-excel` | Seed the consumption model from an Excel file. Body: `{path}`. |
 | `GET` | `/api/power-forecast?full=` | Simulated forward SoC / battery / grid plan. |
+| `GET` | `/api/savings/daily?date=YYYY-MM-DD` | Cumulative DKK saved for one day — actual + predicted series. |
+| `GET` | `/api/savings/buckets?period=week\|month\|year` | Per-bucket savings (day/week/month) for the current calendar period, actual + predicted. |
+| `GET` | `/api/roi` | Payback estimate: realised avg daily savings, break-even date, years/months/days remaining. |
 | `GET` | `/api/daily-solar` | Per-day produced vs. forecast kWh (last 30 days). |
 | `GET` | `/api/history/series?key=&from_ms=` | Full downsampled history for one metric. |
 | `GET` | `/api/automode` | Auto-controller state + recent command log. |
