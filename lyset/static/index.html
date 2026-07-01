@@ -2043,10 +2043,21 @@ function _planFutKW(arr, pick) {
 // ~24 h of past records), but filtered to ts ≤ now. kW for power lines, % for SOC.
 function buildPlanPredPast() {
   const now = Date.now();
-  const pastFc = (arr, pick) => arr
-    .filter(r => r.ts_ms <= now)
-    .map(r => ({ x: r.ts_ms, y: pick(r) }))
-    .filter(p => p.y != null);
+  const pastFc = (arr, pick) => {
+    const pts = arr
+      .filter(r => r.ts_ms <= now)
+      .map(r => ({ x: r.ts_ms, y: pick(r) }))
+      .filter(p => p.y != null)
+      .sort((a, b) => a.x - b.x);
+    // Extend the latest past-forecast slot flat to the "now" line. Slots are
+    // stamped at their start, so the last one can sit 15–30 min behind now,
+    // leaving the dashed predicted trace ending short of the live cursor. A
+    // forecast value is constant across its slot, so holding it to `now` closes
+    // the gap without inventing data.
+    if (pts.length && pts[pts.length - 1].x < now)
+      pts.push({ x: now, y: pts[pts.length - 1].y });
+    return pts;
+  };
   return {
     solar: pastFc(_solcastData,         r => r.pv_w   != null ? r.pv_w   / 1000 : null),
     load:  pastFc(_consumptionForecast, r => r.w      != null ? r.w      / 1000 : null),
