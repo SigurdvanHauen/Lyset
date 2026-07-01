@@ -2560,7 +2560,8 @@ function buildPlanDatasets() {
       spanGaps: false,
       yAxisID: 'yPrice',
       hidden: !_planVisible[s.key],
-      segment: { borderDash: planDash },
+      // Prices are solid across past AND future (they're the known day-ahead
+      // schedule, not a forecast) — no now-boundary dashing like the power lines.
     });
   }
 
