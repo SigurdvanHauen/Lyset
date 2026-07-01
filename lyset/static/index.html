@@ -412,6 +412,11 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Dashboard -->
   <div id="panel-dashboard" class="panel active">
+    <div class="sec">Live (24 h)</div>
+    <div id="dash-chart-wrap" style="position:relative;height:300px;margin-bottom:6px">
+      <canvas id="dash-chart"></canvas>
+    </div>
+
     <div class="sec">Power Flow</div>
     <div class="cards">
       <div class="card pv clickable"   onclick="openChart('active_power','PV Power','W','#F59E0B')">
@@ -452,10 +457,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-top"><div class="card-lbl">SOC</div><div class="card-times" id="t-d-soc"></div></div>
         <div class="card-val" id="d-soc">&#8212;<span class="unit">%</span></div>
       </div>
-      <div class="card batt clickable" onclick="openChart('batt_soh','Battery SOH','%','#34D399')">
-        <div class="card-top"><div class="card-lbl">SOH</div><div class="card-times" id="t-d-soh"></div></div>
-        <div class="card-val" id="d-soh">&#8212;<span class="unit">%</span></div>
-      </div>
       <div class="card acc clickable"  onclick="openChart('batt_temperature','Batt Temperature','°C','#4F8EF7')">
         <div class="card-top"><div class="card-lbl">Temperature</div><div class="card-times" id="t-d-btemp"></div></div>
         <div class="card-val" id="d-btemp">&#8212;<span class="unit">&#176;C</span></div>
@@ -465,16 +466,8 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-val" id="d-bvolt">&#8212;<span class="unit">V</span></div>
       </div>
       <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Status</div><div class="card-times" id="t-d-bstat"></div></div>
-        <div class="card-val" style="font-size:14px" id="d-bstat">&#8212;</div>
-      </div>
-      <div class="card acc">
         <div class="card-top"><div class="card-lbl">Working Mode</div><div class="card-times" id="t-d-bmode"></div></div>
         <div class="card-val" style="font-size:13px" id="d-bmode">&#8212;</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Forced Cmd</div><div class="card-times" id="t-d-bforced"></div></div>
-        <div class="card-val" style="font-size:14px" id="d-bforced">&#8212;</div>
       </div>
     </div>
 
@@ -973,6 +966,7 @@ function onHistory(points) {
     historyMap['_cstate_idx'].ts.push(pt.ts);
     historyMap['_cstate_idx'].val.push(computeState(pt.data));
   }
+  renderDashChart();
 }
 
 // ── Data display ──────────────────────────────────────────────────────────────
@@ -1035,12 +1029,9 @@ function onData(d) {
 
   setCard('d-soc',   d.batt_soc,         1);
   setCard('plan-soc', d.batt_soc,        1);
-  setCard('d-soh',   d.batt_soh,         1);
   setCard('d-btemp', d.batt_temperature, 1);
   setCard('d-bvolt', d.batt_bus_voltage, 1);
-  setText('d-bstat',   d.batt_status_label);
   setText('d-bmode',   d.batt_working_mode_label);
-  setText('d-bforced', d.batt_forced_label);
 
   setCard('d-pv1v', d.pv1_voltage, 1);
   setCard('d-pv1a', d.pv1_current, 2);
@@ -1058,7 +1049,98 @@ function onData(d) {
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
 
+  if (!_dashChart) renderDashChart(); else refreshDashChart();
   refreshPlanChart();
+}
+
+// ── Dashboard live chart ──────────────────────────────────────────────────────
+// Always-visible 24 h overview of the five headline metrics, sourced from the
+// live historyMap. Powers left axis (W) for the four power series and a right
+// axis (%) for SoC. Legend items toggle series on click (Chart.js built-in).
+let _dashChart = null;
+const DASH_SERIES = [
+  { key: 'active_power',       label: 'PV Power',      color: '#F59E0B', axis: 'y'    },
+  { key: 'meter_active_power', label: 'Grid Power',    color: '#4F8EF7', axis: 'y'    },
+  { key: 'batt_power',         label: 'Battery Power', color: '#34D399', axis: 'y'    },
+  { key: 'house_load',         label: 'House Load',    color: '#F87171', axis: 'y'    },
+  { key: 'batt_soc',           label: 'Battery SoC',   color: '#A78BFA', axis: 'ySoc' },
+];
+
+function buildDashDatasets() {
+  return DASH_SERIES.map(s => {
+    const h = historyMap[s.key] || { ts: [], val: [] };
+    return {
+      label: s.label,
+      data: applySmooth(makeChartPoints(h.ts, h.val, autoGap(h.ts))),
+      borderColor: s.color,
+      backgroundColor: s.color + '22',
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
+      tension: 0.3,
+      yAxisID: s.axis,
+    };
+  });
+}
+
+function renderDashChart() {
+  const canvas = document.getElementById('dash-chart');
+  if (!canvas) return;
+  if (_dashChart) { _dashChart.destroy(); _dashChart = null; }
+  _dashChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { datasets: buildDashDatasets() },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false, axis: 'x' },
+      plugins: {
+        legend: {
+          display: true, position: 'top',
+          labels: { color: '#8892AA', font: { size: 11 }, boxWidth: 12, usePointStyle: true },
+        },
+        tooltip: {
+          callbacks: {
+            title: ctx => ctx.length ? new Date(ctx[0].parsed.x).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+            label: ctx => ctx.dataset.yAxisID === 'ySoc'
+              ? `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)} %`
+              : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y)} W`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 8,
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          position: 'left',
+          title: { display: true, text: 'W', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid: { color: '#2D3555' },
+        },
+        ySoc: {
+          position: 'right', min: 0, max: 100,
+          title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 }, maxTicksLimit: 5 },
+          grid: { drawOnChartArea: false },
+        },
+      },
+    },
+  });
+}
+
+function refreshDashChart() {
+  if (!_dashChart) return;
+  const ds = buildDashDatasets();
+  _dashChart.data.datasets.forEach((d, i) => { if (ds[i]) d.data = ds[i].data; });
+  _dashChart.update('none');
 }
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
