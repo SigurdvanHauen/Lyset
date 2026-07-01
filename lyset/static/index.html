@@ -192,6 +192,31 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 .card-sub  { font-size: 10px; color: var(--muted); margin-top: 4px; min-height: 13px; }
 .unit      { font-size: 12px; color: var(--muted); margin-left: 2px; }
 
+/* ── Dashboard inline charts ── */
+#dash-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.dash-chart-cell {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px 12px;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+.dash-chart-cell:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+.dash-chart-title {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--muted); margin-bottom: 6px;
+}
+.dash-chart-box { position: relative; height: 190px; }
+
 /* ── Chart modal ── */
 #modal-overlay {
   display: none;
@@ -412,10 +437,8 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Dashboard -->
   <div id="panel-dashboard" class="panel active">
-    <div class="sec">Live (24 h)</div>
-    <div id="dash-chart-wrap" style="position:relative;height:300px;margin-bottom:6px">
-      <canvas id="dash-chart"></canvas>
-    </div>
+    <div class="sec">Trends (24 h)</div>
+    <div id="dash-charts"></div>
 
     <div class="sec">Power Flow</div>
     <div class="cards">
@@ -966,7 +989,7 @@ function onHistory(points) {
     historyMap['_cstate_idx'].ts.push(pt.ts);
     historyMap['_cstate_idx'].val.push(computeState(pt.data));
   }
-  renderDashChart();
+  renderDashCharts();
 }
 
 // ── Data display ──────────────────────────────────────────────────────────────
@@ -1049,110 +1072,121 @@ function onData(d) {
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
 
-  if (!_dashChart) renderDashChart(); else refreshDashChart();
+  refreshDashCharts();
   refreshPlanChart();
 }
 
-// ── Dashboard live chart ──────────────────────────────────────────────────────
-// Always-visible 24 h overview of the five headline metrics, sourced from the
-// live historyMap. Powers left axis (W) for the four power series and a right
-// axis (%) for SoC. Legend items toggle series on click (Chart.js built-in).
-let _dashChart = null;
-const DASH_SERIES = [
-  { key: 'active_power',       label: 'PV Power',      color: '#F59E0B', axis: 'y'    },
-  { key: 'meter_active_power', label: 'Grid Power',    color: '#4F8EF7', axis: 'y'    },
-  { key: 'batt_power',         label: 'Battery Power', color: '#34D399', axis: 'y'    },
-  { key: 'house_load',         label: 'House Load',    color: '#F87171', axis: 'y'    },
-  { key: 'batt_soc',           label: 'Battery SoC',   color: '#A78BFA', axis: 'ySoc' },
+// ── Dashboard inline charts ───────────────────────────────────────────────────
+// One chart per headline metric, each rendered exactly like the entity-card
+// modal (same datasets via buildMetricDatasets, same styling) but embedded in a
+// grid on the Dashboard tab. Zoom/pan is off so page scrolling isn't hijacked;
+// clicking a chart opens the full modal for that metric.
+const DASH_CHARTS = [
+  { key: 'active_power',       label: 'PV Power',      unit: 'W', color: '#F59E0B' },
+  { key: 'meter_active_power', label: 'Grid Power',    unit: 'W', color: '#4F8EF7' },
+  { key: 'batt_power',         label: 'Battery Power', unit: 'W', color: '#34D399' },
+  { key: 'house_load',         label: 'House Load',    unit: 'W', color: '#F87171' },
+  { key: 'batt_soc',           label: 'Battery SoC',   unit: '%', color: '#34D399' },
 ];
+const _dashCharts = {};  // key → Chart instance
 
-function buildDashDatasets() {
-  return DASH_SERIES.map(s => {
-    const h = historyMap[s.key] || { ts: [], val: [] };
-    return {
-      label: s.label,
-      data: applySmooth(makeChartPoints(h.ts, h.val, autoGap(h.ts))),
-      borderColor: s.color,
-      backgroundColor: s.color + '22',
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: false,
-      tension: 0.3,
-      yAxisID: s.axis,
-    };
-  });
+// Build the DOM cells (once) for every dashboard chart.
+function buildDashChartCells() {
+  const wrap = document.getElementById('dash-charts');
+  if (!wrap || wrap.childElementCount) return;
+  for (const c of DASH_CHARTS) {
+    const cell = document.createElement('div');
+    cell.className = 'dash-chart-cell';
+    cell.onclick = () => openChart(c.key, c.label, c.unit, c.color);
+    const head = document.createElement('div');
+    head.className = 'dash-chart-title';
+    head.textContent = c.label + (c.unit ? ' (' + c.unit + ')' : '');
+    const box = document.createElement('div');
+    box.className = 'dash-chart-box';
+    const canvas = document.createElement('canvas');
+    canvas.id = 'dc-' + c.key;
+    box.appendChild(canvas);
+    cell.appendChild(head);
+    cell.appendChild(box);
+    wrap.appendChild(cell);
+  }
 }
 
-function renderDashChart() {
-  const canvas = document.getElementById('dash-chart');
-  if (!canvas) return;
-  if (_dashChart) { _dashChart.destroy(); _dashChart = null; }
-  _dashChart = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: { datasets: buildDashDatasets() },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      interaction: { mode: 'index', intersect: false, axis: 'x' },
-      plugins: {
-        legend: {
-          display: true, position: 'top',
-          labels: { color: '#8892AA', font: { size: 11 }, boxWidth: 12, usePointStyle: true },
+function renderDashCharts() {
+  buildDashChartCells();
+  for (const c of DASH_CHARTS) {
+    const canvas = document.getElementById('dc-' + c.key);
+    if (!canvas) continue;
+    if (_dashCharts[c.key]) { _dashCharts[c.key].destroy(); delete _dashCharts[c.key]; }
+    const datasets = buildMetricDatasets(
+      c.key, c.label, c.unit, c.color, _solcastData, _consumptionForecast, _powerForecast);
+    const hasOverlay = datasets.length > 1;
+    _dashCharts[c.key] = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: {
+            type: 'linear',
+            ticks: {
+              color: '#8892AA', maxTicksLimit: 6, font: { size: 9 },
+              callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+            grid: { color: '#2D3555' },
+          },
+          y: {
+            grace: '10%',
+            ticks: { color: '#8892AA', font: { size: 9 }, maxTicksLimit: 6 },
+            grid:  { color: '#2D3555' },
+          },
         },
-        tooltip: {
-          callbacks: {
-            title: ctx => ctx.length ? new Date(ctx[0].parsed.x).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
-            label: ctx => ctx.dataset.yAxisID === 'ySoc'
-              ? `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)} %`
-              : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y)} W`,
+        plugins: {
+          legend: {
+            display: hasOverlay,
+            labels: {
+              color: '#8892AA', font: { size: 9 }, boxWidth: 16,
+              filter: item => item.text !== 'P90' && item.text !== 'P10',
+            },
+          },
+          tooltip: {
+            backgroundColor: '#1C2032',
+            titleColor: '#8892AA', bodyColor: '#E2E8F4',
+            borderColor: '#2D3555', borderWidth: 1, padding: 8,
+            callbacks: {
+              title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
+              label: ctx => {
+                if (ctx.dataset.label === 'P90' || ctx.dataset.label === 'P10') return null;
+                return ctx.dataset.label + ': ' + ctx.formattedValue + (c.unit ? ' ' + c.unit : '');
+              },
+            },
           },
         },
       },
-      scales: {
-        x: {
-          type: 'linear',
-          ticks: {
-            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 8,
-            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          },
-          grid: { color: '#2D3555' },
-        },
-        y: {
-          position: 'left',
-          title: { display: true, text: 'W', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 } },
-          grid: { color: '#2D3555' },
-        },
-        ySoc: {
-          position: 'right', min: 0, max: 100,
-          title: { display: true, text: 'SOC %', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 }, maxTicksLimit: 5 },
-          grid: { drawOnChartArea: false },
-        },
-      },
-    },
-  });
+    });
+  }
 }
 
-function refreshDashChart() {
-  if (!_dashChart) return;
-  const ds = buildDashDatasets();
-  _dashChart.data.datasets.forEach((d, i) => { if (ds[i]) d.data = ds[i].data; });
-  _dashChart.update('none');
+// Cheap in-place refresh of the actual series (datasets[0]) on each poll; a full
+// re-render (picking up new/removed forecast overlays) happens on history load.
+function refreshDashCharts() {
+  if (!Object.keys(_dashCharts).length) { renderDashCharts(); return; }
+  for (const c of DASH_CHARTS) {
+    const ch = _dashCharts[c.key];
+    if (!ch) continue;
+    ch.data.datasets[0].data = modalSeriesData(c.key);
+    ch.update('none');
+  }
 }
 
-// ── Chart modal ───────────────────────────────────────────────────────────────
-function openChart(key, label, unit, color) {
-  _modalLabel = label; _modalUnit = unit; _modalColor = color;
-  if (_modalFullKey !== key) { _modalFull = null; _modalFullKey = null; }
-  if (_modalFcKey !== key) { _modalFcSolar = _modalFcCons = _modalFcPower = null; }
-  // Forecast sources: full retained history once fetched for this key, else the
-  // live ±24–48 h globals.
-  const solcastSrc = (_modalFcKey === key && _modalFcSolar) ? _modalFcSolar : _solcastData;
-  const consSrc    = (_modalFcKey === key && _modalFcCons)  ? _modalFcCons  : _consumptionForecast;
-  const powerSrc   = (_modalFcKey === key && _modalFcPower) ? _modalFcPower : _powerForecast;
+// ── Metric chart datasets (shared by the modal + the inline dashboard charts) ──
+// Pure builder: given the metric and the forecast sources, returns the Chart.js
+// dataset array (actual series + any Solcast/predicted overlays). datasets[0] is
+// always the live actual series, so callers can hot-swap datasets[0].data.
+function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, powerSrc) {
   const hist  = mergedSeries(key);
   const pts   = hist.val.length;
   const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)));
@@ -1161,18 +1195,6 @@ function openChart(key, label, unit, color) {
   const hasSocFc  = key === 'batt_soc'            && powerSrc.length > 1;
   const hasBattFc = key === 'batt_power'          && powerSrc.length > 1;
   const hasGridFc = key === 'meter_active_power'  && powerSrc.length > 1;
-
-  document.getElementById('modal-title').textContent =
-    label + (unit ? ' (' + unit + ')' : '')
-    + (hasFc                         ? ' + Solcast forecast' : '')
-    + (hasCons || hasSocFc || hasBattFc || hasGridFc ? ' + predicted' : '');
-  document.getElementById('modal-fc-btn').style.display     = (key === 'active_power') ? '' : 'none';
-  document.getElementById('modal-bands-btn').style.display   = (key === 'active_power') ? '' : 'none';
-  document.getElementById('modal-smooth-btn').style.display  = '';
-  document.getElementById('modal-overlay').classList.add('active');
-
-  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
-  _modalKey = key;
 
   // Main actual-data dataset
   const datasets = [{
@@ -1342,6 +1364,42 @@ function openChart(key, label, unit, color) {
       order: 1,
     });
   }
+
+  return datasets;
+}
+
+// ── Chart modal ───────────────────────────────────────────────────────────────
+function openChart(key, label, unit, color) {
+  _modalLabel = label; _modalUnit = unit; _modalColor = color;
+  if (_modalFullKey !== key) { _modalFull = null; _modalFullKey = null; }
+  if (_modalFcKey !== key) { _modalFcSolar = _modalFcCons = _modalFcPower = null; }
+  // Forecast sources: full retained history once fetched for this key, else the
+  // live ±24–48 h globals.
+  const solcastSrc = (_modalFcKey === key && _modalFcSolar) ? _modalFcSolar : _solcastData;
+  const consSrc    = (_modalFcKey === key && _modalFcCons)  ? _modalFcCons  : _consumptionForecast;
+  const powerSrc   = (_modalFcKey === key && _modalFcPower) ? _modalFcPower : _powerForecast;
+  const hist  = mergedSeries(key);
+  const pts   = hist.val.length;
+  const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)));
+  const hasFc     = key === 'active_power'        && solcastSrc.length > 0;
+  const hasCons   = key === 'house_load'          && consSrc.some(r => r.w != null);
+  const hasSocFc  = key === 'batt_soc'            && powerSrc.length > 1;
+  const hasBattFc = key === 'batt_power'          && powerSrc.length > 1;
+  const hasGridFc = key === 'meter_active_power'  && powerSrc.length > 1;
+
+  document.getElementById('modal-title').textContent =
+    label + (unit ? ' (' + unit + ')' : '')
+    + (hasFc                         ? ' + Solcast forecast' : '')
+    + (hasCons || hasSocFc || hasBattFc || hasGridFc ? ' + predicted' : '');
+  document.getElementById('modal-fc-btn').style.display     = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-bands-btn').style.display   = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-smooth-btn').style.display  = '';
+  document.getElementById('modal-overlay').classList.add('active');
+
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = key;
+
+  const datasets = buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, powerSrc);
 
   // Show date in x-axis ticks when the range spans more than 18 h
   const allTs = [
@@ -2675,6 +2733,7 @@ function onSolarForecast(data) {
   if (_modalChart && _modalKey === 'active_power') {
     openChart('active_power', 'PV Power', 'W', '#F59E0B');
   }
+  renderDashCharts();
 }
 
 // ── Consumption forecast ──────────────────────────────────────────────────────
@@ -2686,6 +2745,7 @@ function onConsumptionForecast(data) {
     openChart('house_load', 'House Load', 'W', '#F87171');
   }
   refreshPlanChart();
+  renderDashCharts();
 }
 
 // ── Power forecast (SoC + battery + grid) ────────────────────────────────────
@@ -2702,6 +2762,7 @@ function onPowerForecast(data) {
   const nextFc = _powerForecast.find(r => r.ts_ms >= Date.now() && r.soc != null);
   if (nextFc) setCard('plan-soc-fc', nextFc.soc, 0);
   refreshPlanChart();
+  renderDashCharts();
 }
 
 // ── Grid sub-label (direction + current price) ────────────────────────────────
