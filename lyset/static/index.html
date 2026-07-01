@@ -346,6 +346,46 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 #toast.tok  { background: var(--success); color: #0a1a10; }
 #toast.terr { background: var(--danger);  color: #fff; }
 #toast.twarn{ background: var(--warning); color: #1a0f00; }
+
+/* ── Mobile responsive ── */
+@media (max-width: 640px) {
+  body { font-size: 12px; }
+
+  /* Topbar: compact, hide timestamp */
+  #topbar { padding: 5px 10px; gap: 6px; }
+  #topbar h1 { font-size: 14px; }
+  #last-update { display: none; }
+
+  /* Tab bar: equal-width, smaller text */
+  .tab-btn { padding: 8px 0; font-size: 11px; flex: 1; text-align: center; }
+
+  /* Cards grid: two-column minimum so they don't get too tall */
+  .cards { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+  .card  { padding: 10px 12px; }
+  .card-val { font-size: 19px; }
+
+  /* Plan panel card: tighter padding */
+  #plan-card { padding: 10px 8px !important; }
+
+  /* Plan header: stack legend above button row */
+  #plan-header { flex-direction: column !important; gap: 8px !important; }
+
+  /* Plan buttons: 2-column grid so they don't overflow */
+  #plan-buttons { display: grid !important; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
+  #plan-buttons button { font-size: 10px !important; padding: 5px 4px !important; }
+
+  /* Plan chart: fill available viewport height */
+  #plan-chart-wrap { height: calc(100dvh - 265px) !important; }
+
+  /* Plan footer text: hide to save space */
+  #plan-footer-text { display: none !important; }
+
+  /* Modal: full-width on narrow screens */
+  .modal-box { width: 98vw !important; height: min(90dvh, 520px) !important; }
+
+  /* Log: shorter height so it fits */
+  #log-out { height: calc(100dvh - 150px); }
+}
 </style>
 </head>
 <body>
@@ -505,21 +545,21 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <span id="plan-auto-badge" style="font-size:10px;padding:2px 10px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);text-transform:none;font-weight:600;letter-spacing:0">Auto OFF</span>
     </div>
 
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+    <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+      <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
         <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
-        <div style="display:flex;gap:8px;flex-shrink:0">
+        <div id="plan-buttons" style="display:flex;gap:8px;flex-shrink:0">
           <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
           <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
           <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
           <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
         </div>
       </div>
-      <div style="position:relative;height:420px">
+      <div id="plan-chart-wrap" style="position:relative;height:420px">
         <canvas id="plan-chart"></canvas>
         <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
+      <div id="plan-footer-text" style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
         Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
         Plan combines Solcast solar, the learned consumption model, electricity prices and the
         auto-mode controller's decision logic. Battery SOC is on the right axis.
