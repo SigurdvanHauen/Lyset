@@ -91,7 +91,8 @@ REGISTERS: list[Register] = [
     # that cap the battery in EVERY mode incl. mode 4 — a low max-discharge-power pins
     # self-consumption discharge (e.g. -400 W while the deficit is 600 W). Polled so the
     # controller can read them back and re-assert the full rate. (47098 = forced power is
-    # NOT accessible — Illegal Data Address; use 47247 instead.)
+    # NOT accessible — Illegal Data Address.) Forcible setpoints are split by direction:
+    # 47247 = forcible CHARGE power, 47249 = forcible DISCHARGE power (U32 each).
     Register(47086,  1, 'U16',  1,    '',    'Battery working mode',     'Control', 'batt_working_mode'),
     Register(47087,  1, 'U16',  1,    '',    'Grid charge enable',       'Control', 'grid_charge_enable'),
     Register(47100,  1, 'U16',  1,    '',    'Forced charge/discharge',  'Control', 'batt_forced_mode'),

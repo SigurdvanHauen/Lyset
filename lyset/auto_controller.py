@@ -60,8 +60,10 @@ Register notes for this SDongle firmware:
   • Charge/discharge POWER registers are U32 — write as two words (write_u32),
     never one (write_u16 → Illegal Data Address):
       47075 max charge power, 47077 max discharge power,
-      47247 forcible charge/discharge power (the setpoint for 47100=1 charge;
-      NOT used for discharge — 47100=2 caps at ~1634 W regardless of 47247).
+      47247 forcible CHARGE power (setpoint for 47100=1 charge),
+      47249 forcible DISCHARGE power (setpoint for 47100=2 discharge). 47247 and
+      47249 are DISTINCT — writing 47247 does NOT set the discharge rate; the
+      discharge setpoint 47249 must be written or the inverter defaults to ~1634 W.
   • Forced control is U16: 47086 mode (1=forced, 4=self-consumption),
       47087 grid-charge enable, 47100 forced command (0=stop,1=charge,2=discharge).
 
@@ -395,15 +397,16 @@ class AutoController:
         # Keep the optimistic _apply cache (used by the forced branches, which share
         # these registers) coherent with the intended state, so a later forced branch
         # never skips a write believing the register is still forced.
-        # 47247 (forcible power setpoint) is cleared from cache so that re-entering
-        # forced discharge always sends a fresh write — the inverter resets 47247 to
-        # an internal default (~1634 W observed) when leaving forced mode, and without
-        # this the cache would suppress the 2500 W re-write, leaving arbitrage locked
-        # at 1634 W instead of the full rate.
+        # 47247 (forcible CHARGE power) and 47249 (forcible DISCHARGE power) are
+        # cleared from cache so that re-entering a forced charge/discharge always
+        # sends a fresh write — the inverter resets both to internal defaults
+        # (~1634 W discharge observed) when leaving forced mode, and without this the
+        # cache would suppress the 2500 W re-write, capping the rate.
         self._applied[47087] = 0
         self._applied[47100] = 0
         self._applied[47086] = 4
         self._applied.pop(47247, None)
+        self._applied.pop(47249, None)
 
         gce = data.get('grid_charge_enable')
         if gce is not None and int(round(gce)) != 0:
@@ -683,14 +686,18 @@ class AutoController:
             if do_export:
                 self._grid_charging = False
                 self._set_export_limit(worker, False, data)   # MUST export to grid
-                # Write 47247 unconditionally every tick (bypasses _apply cache).
-                # cmd=0 only self-consumes; cmd=2 forces export but caps at ~1634 W
-                # on this firmware (47247 is ignored in discharge mode). 1634 W is
-                # still better than no export, so we use cmd=2 until a better
-                # mechanism is found.
-                worker.write_u32(47247, _BATT_MAX_DISCHARGE_W,
-                                 f'AutoCtrl: forced discharge power {_BATT_MAX_DISCHARGE_W} W')
-                self._applied[47247] = _BATT_MAX_DISCHARGE_W
+                # Write 47249 (forcible DISCHARGE power) unconditionally every tick,
+                # bypassing the _apply cache. THIS is the discharge setpoint. The
+                # earlier code wrote 47247 — the forcible CHARGE power — so the
+                # discharge rate was never set and the inverter fell back to its
+                # internal default (~1634 W), which is exactly the cap we kept hitting.
+                # 47247 and 47249 are distinct registers (verified against
+                # wlcrs/huawei-solar-lib: STORAGE_FORCIBLE_CHARGE_POWER=47247,
+                # STORAGE_FORCIBLE_DISCHARGE_POWER=47249). The inverter resets 47249 to
+                # its ~1634 W default when leaving forced mode, so re-assert every tick.
+                worker.write_u32(47249, _BATT_MAX_DISCHARGE_W,
+                                 f'AutoCtrl: forcible discharge power {_BATT_MAX_DISCHARGE_W} W')
+                self._applied[47249] = _BATT_MAX_DISCHARGE_W
                 self._apply(worker, [
                     (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1, 'AutoCtrl: mode=forced'),
