@@ -71,6 +71,7 @@ On disable → restore: 47100=0, 47087=0, 47086=4 (self-consumption).
 """
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -83,6 +84,15 @@ except Exception:  # pragma: no cover — fallback if tz database is unavailable
     _TZ_LOCAL = None
 
 log = logging.getLogger(__name__)
+
+
+def arbitrage_enabled() -> bool:
+    """Whether the planner may use export/discharge arbitrage (sell stored energy
+    high, rebuy cheaper). Toggled from Settings → Auto controller; default ON.
+    Read live from the env each call so the Settings save (which reloads ``.env``
+    into the process env) takes effect without a restart. Every other battery
+    strategy — grid charge, hold, self-consumption — is unaffected."""
+    return os.getenv('ARBITRAGE_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off', '')
 
 # ── Thresholds (also imported by server.py for the SoC simulation) ────────────
 NEGATIVE_EXPORT_DKK   = 0.0     # export below 0 → curtail PV feed-in and force-charge
@@ -668,7 +678,7 @@ class AutoController:
         # leaving exactly enough to ride the peak via self-consumption. When no
         # load forecast is available, fall back to the old cheap-import guard.
         arbit_window = _window(_ARBIT_HORIZON_H)
-        if arbit_window and batt_soc > _MIN_SOC_ARBIT:
+        if arbitrage_enabled() and arbit_window and batt_soc > _MIN_SOC_ARBIT:
             future_min_import = min(p['import'] for p in arbit_window)
             profitable = export_dkk > future_min_import + _ARBIT_MARGIN_DKK
             if self._load_fc:

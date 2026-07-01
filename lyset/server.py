@@ -39,7 +39,7 @@ from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
 from .auto_controller import (
-    AutoController,
+    AutoController, arbitrage_enabled,
     NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_SOC_START, GRID_CHARGE_SOC_MAX, GRID_CHARGE_W,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
@@ -223,6 +223,7 @@ def _simulate_soc(
     # Price lookup: sorted ascending so we can walk a pointer forward
     prices_sorted = sorted(prices, key=lambda p: p['ts']) if prices else []
     price_ptr     = 0
+    arb_enabled   = arbitrage_enabled()  # Settings toggle; mirrors _decide's gate
 
     end_ms        = max(r['ts_ms'] for r in solar_fc)
     first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
@@ -308,7 +309,7 @@ def _simulate_soc(
                 # self-consumption reserve (mirrors AutoController._decide branch 4's
                 # opportunity-cost gate — not the old blunt import<MAX_HOLD ceiling,
                 # which kept this discharge from showing during expensive evenings).
-                if not do_gc and not do_hold and soc > MIN_SOC_ARBIT:
+                if arb_enabled and not do_gc and not do_hold and soc > MIN_SOC_ARBIT:
                     arbit_end = ts_ms + ARBIT_HORIZON_H * 3_600_000
                     a_win = [p for p in future_from_here if p['ts'] <= arbit_end]
                     if a_win and export_dkk > min(p['import'] for p in a_win) + ARBIT_MARGIN_DKK:

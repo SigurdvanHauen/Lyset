@@ -88,10 +88,14 @@ SCHEMA: list[dict] = [
     },
     {
         'group': 'Auto controller',
-        'note': 'Applied on next server restart.',
+        'note': 'Auto-start applies on next server restart; arbitrage applies immediately.',
         'fields': [
             {'key': 'AUTO_CONTROLLER_AUTOSTART', 'label': 'Auto-start controller', 'type': 'bool',
              'default': '1', 'help': 'Start the battery auto-controller when the server launches.'},
+            {'key': 'ARBITRAGE_ENABLED', 'label': 'Allow discharge arbitrage', 'type': 'bool',
+             'default': '1', 'help': 'Let the planner force-discharge the battery to the grid when '
+             'the export price beats the cheapest upcoming import. Turn off to keep stored energy '
+             'for self-consumption only. Takes effect immediately.'},
         ],
     },
 ]
