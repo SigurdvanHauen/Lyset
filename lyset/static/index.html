@@ -621,6 +621,15 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar year so far &middot; click: monthly bars</div>
       </div>
     </div>
+
+    <div class="sec" style="margin-top:18px">Payback</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">PV System Payback</div></div>
+        <div class="card-val" id="plan-roi-main" style="font-size:20px">&#8212;</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-roi-sub">Set system cost &amp; installation date in Settings.</div>
+      </div>
+    </div>
   </div>
 
   <!-- Prices -->
@@ -2800,6 +2809,7 @@ function renderPlanChart() {
   });
   updateSavingsCards();
   updateSavingsOverviewCards();
+  updateRoiCard();
 }
 
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
@@ -3074,6 +3084,46 @@ async function updateSavingsOverviewCards() {
       const j = await r.json();
       setCard(id, j.actual_total, 2);
     } catch (e) { /* keep last value */ }
+  }
+}
+
+// PV payback / ROI entity card. Estimated break-even from the configured system
+// cost + install date and the measured average daily savings.
+async function updateRoiCard() {
+  const mainEl = document.getElementById('plan-roi-main');
+  const subEl  = document.getElementById('plan-roi-sub');
+  if (!mainEl) return;
+  let j;
+  try {
+    const r = await fetch('/api/roi');
+    if (!r.ok) throw new Error('http ' + r.status);
+    j = await r.json();
+  } catch (e) { return; }
+
+  const fmtDKK  = n => Math.round(n).toLocaleString('da-DK') + ' DKK';
+  const fmtDate = iso => new Date(iso + 'T00:00:00').toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+  const ymd = o => [o.years && o.years + 'y', o.months && o.months + 'm', o.days + 'd'].filter(Boolean).join(' ');
+
+  if (!j.configured) {
+    mainEl.textContent = '—';
+    subEl.innerHTML = 'Set system cost &amp; installation date in Settings → PV system.';
+    return;
+  }
+  const rate = `avg ${j.avg_daily.toFixed(2)} DKK/day over ${j.measured_days} d measured`;
+  if (j.status === 'never') {
+    mainEl.textContent = 'n/a';
+    subEl.innerHTML = `Average daily savings ≤ 0 so far — can't project payback yet.<br>${rate}`;
+  } else if (j.status === 'reached') {
+    mainEl.textContent = 'Recouped ✓';
+    subEl.innerHTML =
+      `Broke even ${fmtDate(j.break_even_date)} (${ymd(j.ymd)} ago)<br>` +
+      `Est. saved ${fmtDKK(j.est_saved)} of ${fmtDKK(j.cost)} · ${rate}`;
+  } else {
+    mainEl.textContent = ymd(j.ymd) + ' to break-even';
+    subEl.innerHTML =
+      `Break-even ≈ ${fmtDate(j.break_even_date)}<br>` +
+      `${j.recouped_pct}% recouped — est. ${fmtDKK(j.est_saved)} of ${fmtDKK(j.cost)}<br>` +
+      `${rate}`;
   }
 }
 

@@ -400,6 +400,15 @@ def load_power_avg_buckets(from_ts: float, to_ts: float,
     return {int(b) * step_s * 1000: (hl, gp) for b, hl, gp in rows}
 
 
+def poll_ts_range() -> tuple[float, float] | None:
+    """Return (earliest_ts, latest_ts) Unix seconds of stored polls, or None."""
+    with _lock:
+        row = _get_con().execute('SELECT MIN(ts), MAX(ts) FROM polls').fetchone()
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), float(row[1])
+
+
 def clear_history():
     """Delete all inverter poll records."""
     with _lock:

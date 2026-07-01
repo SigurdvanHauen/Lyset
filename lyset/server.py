@@ -1373,6 +1373,123 @@ async def api_savings_buckets(period: str = 'week'):
             'actual_total': actual_total, 'predicted_total': pred_total}
 
 
+def _total_actual_savings(from_s: int, to_s: int, step_s: int = 900) -> float:
+    """Total measured DKK saved over [from_s, to_s), summed from the 15-min
+    SQL-averaged polls priced against the stored import/export rates. Lighter than
+    _savings_steps — no forecast lookups, and it visits only the buckets that exist
+    (so downtime gaps contribute nothing)."""
+    actual_map = store.load_power_avg_buckets(from_s, to_s, step_s)
+    if not actual_map:
+        return 0.0
+    prices = store.load_prices(from_s * 1000 - 3_600_000, to_s * 1000 + 3_600_000)
+    imp_at = _step_lookup([(p['ts'], p['import']) for p in prices], 2 * 3_600_000)
+    exp_at = _step_lookup([(p['ts'], p['export']) for p in prices], 2 * 3_600_000)
+    hours  = step_s / 3600.0
+    total  = 0.0
+    for ms, (load, grid) in actual_map.items():
+        imp = imp_at(ms)
+        if imp is None:
+            continue
+        total += _saving_increment(load, grid, imp, exp_at(ms), hours)
+    return total
+
+
+def _ymd_between(d0, d1):
+    """Calendar (years, months, days) from date d0 to date d1.
+
+    Borrowing uses d0's own month length, which keeps every component
+    non-negative (d0.day ≤ that length) and reads as the intuitive
+    "N months M days" — e.g. 31 Jan → 1 Mar = (0, 1, 1)."""
+    import calendar
+    if d1 <= d0:
+        return 0, 0, 0
+    years  = d1.year - d0.year
+    months = d1.month - d0.month
+    days   = d1.day - d0.day
+    if days < 0:
+        months -= 1
+        days += calendar.monthrange(d0.year, d0.month)[1]
+    if months < 0:
+        years -= 1
+        months += 12
+    return years, months, days
+
+
+@app.get('/api/roi')
+async def api_roi():
+    """Payback / ROI estimate for the PV system.
+
+    Uses the total measured savings so far to derive an average DKK/day rate, then
+    projects when cumulative savings recoup the configured system cost, counting
+    from the installation date. Everything is an estimate — the rate is whatever
+    the (short) measured history has averaged, extrapolated forward."""
+    settings = config.read_settings()
+    cost_raw    = (settings.get('PV_SYSTEM_COST') or '').strip()
+    install_raw = (settings.get('PV_INSTALL_DATE') or '').strip()
+    try:
+        cost = float(cost_raw)
+    except ValueError:
+        cost = None
+    install_date = None
+    if install_raw:
+        try:
+            install_date = datetime.strptime(install_raw, '%Y-%m-%d').date()
+        except ValueError:
+            install_date = None
+
+    if not cost or cost <= 0 or install_date is None:
+        return {'configured': False}
+
+    now_local = datetime.now(_TZ_LOCAL)
+    today = now_local.date()
+    days_since_install = max((today - install_date).days, 0)
+
+    rng = await asyncio.get_running_loop().run_in_executor(None, store.poll_ts_range)
+    now_s = time.time()
+
+    def _rate():
+        if not rng:
+            return 0.0, 0.0
+        earliest_s = rng[0]
+        total = _total_actual_savings(int(earliest_s), int(now_s))
+        span_days = max((now_s - earliest_s) / 86400.0, 0.5)
+        return total, span_days
+
+    total_saved, span_days = await asyncio.get_running_loop().run_in_executor(None, _rate)
+    avg_daily = (total_saved / span_days) if span_days else 0.0
+
+    est_saved = avg_daily * days_since_install
+    recouped_pct = (est_saved / cost * 100.0) if cost else 0.0
+
+    result = {
+        'configured': True,
+        'cost': round(cost, 2),
+        'install_date': install_date.isoformat(),
+        'days_since_install': days_since_install,
+        'avg_daily': round(avg_daily, 4),
+        'est_saved': round(est_saved, 2),
+        'recouped_pct': round(recouped_pct, 1),
+        'measured_days': round(span_days, 1),
+    }
+
+    if avg_daily <= 0:
+        result.update(status='never', break_even_date=None, ymd=None)
+        return result
+
+    total_days = cost / avg_daily
+    break_even_date = install_date + timedelta(days=round(total_days))
+    result['break_even_date'] = break_even_date.isoformat()
+    if break_even_date <= today:
+        result['status'] = 'reached'
+        result['ymd'] = dict(zip(('years', 'months', 'days'),
+                                 _ymd_between(break_even_date, today)))
+    else:
+        result['status'] = 'projected'
+        result['ymd'] = dict(zip(('years', 'months', 'days'),
+                                 _ymd_between(today, break_even_date)))
+    return result
+
+
 @app.delete('/api/history')
 async def api_clear_history():
     loop = asyncio.get_running_loop()

@@ -87,6 +87,19 @@ SCHEMA: list[dict] = [
         ],
     },
     {
+        'group': 'PV system (payback / ROI)',
+        'note': 'Drives the payback estimate card on the Plan tab. Applied immediately.',
+        'fields': [
+            {'key': 'PV_SYSTEM_COST', 'label': 'System cost (DKK)', 'type': 'number',
+             'default': '', 'placeholder': 'e.g. 120000',
+             'help': 'Total installed cost of your PV + battery system, in DKK.'},
+            {'key': 'PV_INSTALL_DATE', 'label': 'Installation date', 'type': 'text',
+             'default': '', 'placeholder': 'YYYY-MM-DD',
+             'help': 'Commissioning date. Break-even is measured from here using your '
+             'average daily savings so far.'},
+        ],
+    },
+    {
         'group': 'Auto controller',
         'note': 'Auto-start applies on next server restart; arbitrage applies immediately.',
         'fields': [
