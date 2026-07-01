@@ -578,6 +578,30 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         Click any legend item to show/hide that line.
       </div>
     </div>
+
+    <div class="sec" style="margin-top:18px">Savings Today</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
+      <div class="card acc clickable" onclick="openSavingsChart()">
+        <div class="card-top"><div class="card-lbl">Saved So Far</div></div>
+        <div class="card-val" id="plan-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">vs. buying all power from grid &middot; click for chart</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Forecast Today</div></div>
+        <div class="card-val" id="plan-saved-fc">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">predicted end-of-day total</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Would've Paid</div></div>
+        <div class="card-val" id="plan-would-pay">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">all household load at import price</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Net Grid Cost</div></div>
+        <div class="card-val" id="plan-did-pay">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">import cost &minus; export earnings</div>
+      </div>
+    </div>
   </div>
 
   <!-- Prices -->
@@ -1074,6 +1098,7 @@ function onData(d) {
 
   refreshDashCharts();
   refreshPlanChart();
+  if (_savingsOpen) refreshSavingsModal();
 }
 
 // ── Dashboard inline charts ───────────────────────────────────────────────────
@@ -1513,6 +1538,7 @@ function closeModal() {
   document.getElementById('modal-overlay').classList.remove('active');
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
   _modalKey = null;
+  _savingsOpen = false;
   _modalFull = null; _modalFullKey = null;
   _modalFcKey = null; _modalFcSolar = _modalFcCons = _modalFcPower = null;
 }
@@ -2747,6 +2773,7 @@ function renderPlanChart() {
       },
     },
   });
+  updateSavingsCards();
 }
 
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
@@ -2755,6 +2782,168 @@ function refreshPlanChart() {
   if (!document.getElementById('panel-plan').classList.contains('active')) return;
   _planChart.data.datasets = buildPlanDatasets();
   _planChart.update('none');
+  updateSavingsCards();
+}
+
+// ── Savings today (money saved vs. an all-grid baseline) ──────────────────────
+// "Saved" = what we'd have paid buying ALL household consumption from the grid at
+// the import price, minus what we actually paid (grid import cost net of export
+// earnings). One figure that folds together solar self-consumption, battery
+// time-shifting and arbitrage export. Past uses measured house-load + grid power;
+// the prediction uses the consumption model + the plan's forecast grid power.
+const _SAVINGS_STEP = 5 * 60 * 1000;     // 5-min integration grid
+const _SAVINGS_GAP  = 30 * 60 * 1000;    // break the integral across gaps > 30 min
+let _savingsOpen = false;
+
+function _dayBounds() {
+  const s = new Date(); s.setHours(0, 0, 0, 0);
+  const e = new Date(); e.setHours(24, 0, 0, 0);
+  return { start: s.getTime(), end: e.getTime() };
+}
+
+// {ts,val} history (W) → {x,y} points in kW.
+function _histKwPoints(key) {
+  const h = historyMap[key] || { ts: [], val: [] };
+  const out = [];
+  for (let i = 0; i < h.ts.length; i++) out.push({ x: h.ts[i], y: h.val[i] / 1000 });
+  return out;
+}
+
+// Integrate cumulative savings (DKK) over `grid`, given load(kW) and grid-power(kW)
+// resampled arrays aligned to the same grid (grid power > 0 = import). Trapezoidal
+// per interval, prices held from the interval start. Emits a cumulative point at
+// every grid step up to `stopAt` (null = whole day); flat across data gaps.
+function _cumSavings(grid, loadR, gridR, stopAt) {
+  const points = [];
+  let baseTot = 0, actTot = 0;
+  for (let i = 0; i < grid.length; i++) {
+    const t = grid[i];
+    if (stopAt != null && t > stopAt) break;
+    if (i > 0) {
+      const a = loadR[i - 1], b = loadR[i], ga = gridR[i - 1], gb = gridR[i];
+      if (a && b && ga && gb && a.y != null && b.y != null && ga.y != null && gb.y != null) {
+        const impPx = _lookupHold(_pricesData, 'ts', 'import', grid[i - 1]);
+        if (impPx != null) {
+          const expPx  = _lookupHold(_pricesData, 'ts', 'export', grid[i - 1]);
+          const dtH    = (grid[i] - grid[i - 1]) / 3600000;
+          const loadKw = (a.y + b.y) / 2;
+          const gridKw = (ga.y + gb.y) / 2;
+          const impKw  = Math.max(gridKw, 0), expKw = Math.max(-gridKw, 0);
+          baseTot += (loadKw * impPx) * dtH;
+          actTot  += (impKw * impPx - expKw * (expPx != null ? expPx : 0)) * dtH;
+        }
+      }
+    }
+    points.push({ x: t, y: baseTot - actTot });
+  }
+  return { points, baseline: baseTot, actual: actTot, saved: baseTot - actTot };
+}
+
+// Build both cumulative series for today: measured (up to now) and forecast (full day).
+function buildSavingsSeries() {
+  const { start, end } = _dayBounds();
+  const now = Date.now();
+  const grid = [];
+  for (let t = start; t <= end; t += _SAVINGS_STEP) grid.push(t);
+
+  const loadAct = _planResample(_histKwPoints('house_load'),         grid, false, _SAVINGS_GAP);
+  const gridAct = _planResample(_histKwPoints('meter_active_power'), grid, false, _SAVINGS_GAP);
+  const actual  = _cumSavings(grid, loadAct, gridAct, now);
+
+  const loadFc = _planResample(
+    _consumptionForecast.filter(r => r.w != null).map(r => ({ x: r.ts_ms, y: r.w / 1000 })),
+    grid, false, _SAVINGS_GAP);
+  const gridFc = _planResample(
+    _powerForecast.filter(r => r.grid_w != null).map(r => ({ x: r.ts_ms, y: r.grid_w / 1000 })),
+    grid, false, _SAVINGS_GAP);
+  const predicted = _cumSavings(grid, loadFc, gridFc, null);
+
+  return { actual, predicted };
+}
+
+function updateSavingsCards() {
+  if (!document.getElementById('plan-saved')) return;
+  const { actual, predicted } = buildSavingsSeries();
+  setCard('plan-saved',     actual.saved,     2);
+  setCard('plan-saved-fc',  predicted.saved,  2);
+  setCard('plan-would-pay', actual.baseline,  2);
+  setCard('plan-did-pay',   actual.actual,    2);
+}
+
+function openSavingsChart() {
+  const { actual, predicted } = buildSavingsSeries();
+  const { start, end } = _dayBounds();
+
+  document.getElementById('modal-title').textContent = 'Money saved today (DKK, cumulative)';
+  document.getElementById('modal-fc-btn').style.display     = 'none';
+  document.getElementById('modal-bands-btn').style.display  = 'none';
+  document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-overlay').classList.add('active');
+
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = null;          // keep the live-data update path from touching this chart
+  _savingsOpen = true;
+
+  const gold = '#F5C542';
+  _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+    type: 'line',
+    data: { datasets: [
+      { label: 'Saved (actual)', data: actual.points, borderColor: gold,
+        backgroundColor: gold + '1E', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+        fill: true, tension: 0.25 },
+      { label: 'Predicted', data: predicted.points, borderColor: gold + 'AA',
+        backgroundColor: 'transparent', borderWidth: 2, borderDash: [6, 4],
+        pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.25 },
+    ] },
+    plugins: [_planNowLine],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          type: 'linear',
+          min: start, max: end,
+          ticks: {
+            color: '#8892AA', maxTicksLimit: 12, font: { size: 10 },
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          grace: '10%',
+          title: { display: true, text: 'DKK', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid:  { color: '#2D3555' },
+        },
+      },
+      plugins: {
+        legend: { labels: { color: '#8892AA', font: { size: 10 }, boxWidth: 20 } },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA', bodyColor: '#E2E8F4',
+          borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          callbacks: {
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
+            label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' DKK',
+          },
+        },
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+    },
+  });
+}
+
+// Rebuild the open savings modal in place as fresh polls arrive.
+function refreshSavingsModal() {
+  if (!_savingsOpen || !_modalChart) return;
+  const { actual, predicted } = buildSavingsSeries();
+  _modalChart.data.datasets[0].data = actual.points;
+  _modalChart.data.datasets[1].data = predicted.points;
+  _modalChart.update('none');
 }
 
 function onSolarForecast(data) {
