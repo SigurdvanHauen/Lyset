@@ -349,7 +349,8 @@ class AutoController:
             # register the inverter already confirms is correct.
             self._applied[47415] = target
 
-    def _charge_from_surplus(self, worker, surplus_w: float, batt_soc: float) -> str:
+    def _charge_from_surplus(self, worker, surplus_w: float, batt_soc: float,
+                             grid_w=None, batt_w=None) -> str:
         """
         Force-charge the battery from the PV surplus (never from grid), or idle it
         when full / when there is no surplus. Returns a human-readable detail string.
@@ -364,17 +365,41 @@ class AutoController:
         rate exports normally, or is curtailed by the export-limit overlay when the
         export price is negative.
 
-        Charge power tracks the surplus (capped to the battery's max rate) so we
-        never pull from the grid, quantised to 100 W so small PV jitter doesn't
-        rewrite 47247 every tick.
+        Charge power is sized from METER FEEDBACK, not the computed pv−load surplus:
+        the surplus actually reaching the grid tie is (current battery charge) −
+        (current net import) = ``batt_w − grid_w`` (grid_w > 0 = importing). The raw
+        PV/load reads glitch badly on this SDongle — adjacent polls swung PV
+        1.6↔6.2 kW — and an open-loop pv−load surplus let a single glitched spike
+        command a 2500 W force-charge that then stuck, pulling ~1957 W from the grid
+        at 1.21 DKK/kWh while the real surplus was ~540 W. The battery + meter
+        readings are physical and can't be inflated by a bad PV read, so sizing off
+        them can never command more charge than the real surplus. It's also a
+        deadbeat loop — grid settles to ≈0 in one tick regardless of the current
+        setpoint. Falls back to the computed surplus only when a meter read is
+        missing. Quantised to 100 W to damp jitter.
+
+        47247 (forcible charge power) does NOT read back, so a dropped write can't be
+        detected; the state-gated cache would then mark a stale HIGH setpoint as
+        applied and leave the battery stuck importing (the failure above). So the
+        setpoint is re-asserted EVERY tick, bypassing the cache — the same
+        self-healing pattern used for 47249 in the arbitrage branch — rather than
+        gated through _apply.
         """
-        if batt_soc < _FORCE_CHARGE_SOC_MAX and surplus_w > 100:
-            charge_w = min(int(round(surplus_w / 100.0)) * 100, _BATT_MAX_CHARGE_W)
+        if grid_w is not None and batt_w is not None:
+            real_surplus = batt_w - grid_w   # batt_w > 0 charging, grid_w > 0 importing
+        else:
+            real_surplus = surplus_w
+        if batt_soc < _FORCE_CHARGE_SOC_MAX and real_surplus > 100:
+            charge_w = min(int(round(real_surplus / 100.0)) * 100, _BATT_MAX_CHARGE_W)
+            charge_w = max(charge_w, 0)
             self._apply(worker, [
-                (16, 47087, 0,        'AutoCtrl: grid charge OFF'),
-                (16, 47086, 1,        'AutoCtrl: mode=forced'),
-                (32, 47247, charge_w, f'AutoCtrl: forced charge power {charge_w} W'),
-                (16, 47100, 1,        'AutoCtrl: force CHARGE'),
+                (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                (16, 47086, 1, 'AutoCtrl: mode=forced'),
+            ])
+            worker.write_u32(47247, charge_w, f'AutoCtrl: forced charge power {charge_w} W')
+            self._applied[47247] = charge_w
+            self._apply(worker, [
+                (16, 47100, 1, 'AutoCtrl: force CHARGE'),
             ])
             return f'charging {charge_w} W from surplus'
         self._apply(worker, [
@@ -595,7 +620,7 @@ class AutoController:
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
             self._set_export_limit(worker, True, data)   # cap feed-in to 0 W
-            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc)
+            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc, grid_w, batt_w)
             detail = (f'Negative export {export_dkk:.3f} DKK — battery {batt_detail} '
                       f'(SoC {batt_soc:.0f}%, PV {pv_w:.0f} W, load {house_load:.0f} W)')
             return _Cmd(mode='export_limited', detail=detail)
@@ -735,7 +760,7 @@ class AutoController:
         self._grid_charging = False
         if surplus_w > 100 and pv_w > _MIN_PV_W:
             self._set_export_limit(worker, False, data)   # let excess PV export
-            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc)
+            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc, grid_w, batt_w)
             detail = (f'Self-consumption: battery {batt_detail} '
                       f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
