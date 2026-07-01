@@ -378,6 +378,28 @@ def load_house_load_history(from_ts: float = 0.0) -> list[tuple[float, float]]:
     return [(ts, w) for ts, w in rows]
 
 
+def load_power_avg_buckets(from_ts: float, to_ts: float,
+                           step_s: int = 900) -> dict[int, tuple[float, float]]:
+    """Average house_load and meter_active_power (W) over fixed step_s windows.
+
+    Returns {bucket_start_ms: (house_load_w, grid_w)} for the savings calculation.
+    Grouping in SQLite keeps a year of 10-s polls fast to aggregate. Only buckets
+    with both fields present are returned; gaps (downtime) are simply absent.
+    """
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT CAST(ts / ? AS INTEGER) AS b, '
+            '       AVG(json_extract(data, "$.house_load")), '
+            '       AVG(json_extract(data, "$.meter_active_power")) '
+            'FROM polls WHERE ts >= ? AND ts < ? '
+            '  AND json_extract(data, "$.house_load")       IS NOT NULL '
+            '  AND json_extract(data, "$.meter_active_power") IS NOT NULL '
+            'GROUP BY b ORDER BY b',
+            (step_s, from_ts, to_ts),
+        ).fetchall()
+    return {int(b) * step_s * 1000: (hl, gp) for b, hl, gp in rows}
+
+
 def clear_history():
     """Delete all inverter poll records."""
     with _lock:

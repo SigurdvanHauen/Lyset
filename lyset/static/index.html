@@ -602,6 +602,25 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div style="font-size:10px;color:var(--muted);margin-top:4px">import cost &minus; export earnings</div>
       </div>
     </div>
+
+    <div class="sec" style="margin-top:18px">Savings Overview</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
+      <div class="card acc clickable" onclick="openSavingsBars('week', 'Savings this week — per day')">
+        <div class="card-top"><div class="card-lbl">This Week</div></div>
+        <div class="card-val" id="plan-week-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar week so far &middot; click: daily bars</div>
+      </div>
+      <div class="card acc clickable" onclick="openSavingsBars('month', 'Savings this month — per week')">
+        <div class="card-top"><div class="card-lbl">This Month</div></div>
+        <div class="card-val" id="plan-month-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar month so far &middot; click: weekly bars</div>
+      </div>
+      <div class="card acc clickable" onclick="openSavingsBars('year', 'Savings this year — per month')">
+        <div class="card-top"><div class="card-lbl">This Year</div></div>
+        <div class="card-val" id="plan-year-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar year so far &middot; click: monthly bars</div>
+      </div>
+    </div>
   </div>
 
   <!-- Prices -->
@@ -705,6 +724,9 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="modal-hdr-hint">Scroll to zoom &middot; Drag to pan</div>
       </div>
       <div class="modal-actions">
+        <button id="modal-day-prev" onclick="savingsDayStep(-1)" title="Previous day" style="font-size:14px;padding:4px 11px;display:none">&#8249;</button>
+        <span id="modal-day-label" style="font-size:12px;color:var(--text);align-self:center;min-width:130px;text-align:center;display:none"></span>
+        <button id="modal-day-next" onclick="savingsDayStep(1)" title="Next day" style="font-size:14px;padding:4px 11px;display:none">&#8250;</button>
         <button id="modal-fc-btn" onclick="refreshForecast()" style="font-size:11px;padding:4px 10px;display:none">Refresh forecast</button>
         <button id="modal-bands-btn" onclick="toggleBands()" style="font-size:11px;padding:4px 10px;display:none;border-color:var(--accent)">Bands: On</button>
         <button id="modal-smooth-btn" onclick="toggleSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
@@ -1098,7 +1120,6 @@ function onData(d) {
 
   refreshDashCharts();
   refreshPlanChart();
-  if (_savingsOpen) refreshSavingsModal();
 }
 
 // ── Dashboard inline charts ───────────────────────────────────────────────────
@@ -1419,6 +1440,8 @@ function openChart(key, label, unit, color) {
   document.getElementById('modal-fc-btn').style.display     = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-bands-btn').style.display   = (key === 'active_power') ? '' : 'none';
   document.getElementById('modal-smooth-btn').style.display  = '';
+  _hideSavingsNav();
+  _savingsOpen = false;
   document.getElementById('modal-overlay').classList.add('active');
 
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
@@ -1539,6 +1562,7 @@ function closeModal() {
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
   _modalKey = null;
   _savingsOpen = false;
+  _hideSavingsNav();
   _modalFull = null; _modalFullKey = null;
   _modalFcKey = null; _modalFcSolar = _modalFcCons = _modalFcPower = null;
 }
@@ -2774,6 +2798,7 @@ function renderPlanChart() {
     },
   });
   updateSavingsCards();
+  updateSavingsOverviewCards();
 }
 
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
@@ -2870,41 +2895,85 @@ function updateSavingsCards() {
   setCard('plan-did-pay',   actual.actual,    2);
 }
 
-function openSavingsChart() {
-  const { actual, predicted } = buildSavingsSeries();
-  const { start, end } = _dayBounds();
+// Hide the day-navigation controls (used by the daily savings chart only).
+function _hideSavingsNav() {
+  document.getElementById('modal-day-prev').style.display  = 'none';
+  document.getElementById('modal-day-next').style.display  = 'none';
+  document.getElementById('modal-day-label').style.display = 'none';
+}
 
-  document.getElementById('modal-title').textContent = 'Money saved today (DKK, cumulative)';
+// ── Daily cumulative-savings chart (server-backed, day-navigable) ─────────────
+// The browser only holds 24 h live, so this pulls each day from the history DB.
+// Prev/next arrows walk calendar days; forward is capped at tomorrow (+1), the
+// only future day with a prediction.
+let _savingsDayOffset = 0;   // 0 = today, negative = past, +1 = tomorrow
+
+function openSavingsChart() {
+  _savingsDayOffset = 0;
+  _savingsOpen = true;
+  _renderSavingsDay();
+}
+
+function savingsDayStep(delta) {
+  _savingsDayOffset = Math.min(_savingsDayOffset + delta, 1);
+  _renderSavingsDay();
+}
+
+function _offsetDate(offset) {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + offset);
+  return d;
+}
+
+async function _renderSavingsDay() {
+  const offset  = _savingsDayOffset;
+  const day     = _offsetDate(offset);
+  const dateStr = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+
   document.getElementById('modal-fc-btn').style.display     = 'none';
   document.getElementById('modal-bands-btn').style.display  = 'none';
   document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-day-prev').style.display   = '';
+  document.getElementById('modal-day-next').style.display   = offset >= 1 ? 'none' : '';
+  document.getElementById('modal-day-label').style.display  = '';
+  const rel = offset === 0 ? 'Today · ' : offset === 1 ? 'Tomorrow · '
+            : offset === -1 ? 'Yesterday · ' : '';
+  document.getElementById('modal-day-label').textContent =
+    rel + day.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+  document.getElementById('modal-title').textContent = 'Money saved (DKK, cumulative)';
   document.getElementById('modal-overlay').classList.add('active');
+  _modalKey = null;
+
+  let j;
+  try {
+    const r = await fetch('/api/savings/daily?date=' + dateStr);
+    if (!r.ok) throw new Error('http ' + r.status);
+    j = await r.json();
+  } catch (e) { return; }                         // leave current chart on failure
+  if (_savingsDayOffset !== offset || !_savingsOpen) return;  // navigated away mid-fetch
+
+  const dayStart = day.getTime();
+  const actual = j.actual.map(p => ({ x: p.ts_ms, y: p.y }));
+  const pred   = j.predicted.map(p => ({ x: p.ts_ms, y: p.y }));
 
   if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
-  _modalKey = null;          // keep the live-data update path from touching this chart
-  _savingsOpen = true;
-
   const gold = '#F5C542';
   _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
     type: 'line',
     data: { datasets: [
-      { label: 'Saved (actual)', data: actual.points, borderColor: gold,
+      { label: 'Saved (actual)', data: actual, borderColor: gold,
         backgroundColor: gold + '1E', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
         fill: true, tension: 0.25 },
-      { label: 'Predicted', data: predicted.points, borderColor: gold + 'AA',
+      { label: 'Predicted', data: pred, borderColor: gold + 'AA',
         backgroundColor: 'transparent', borderWidth: 2, borderDash: [6, 4],
         pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.25 },
     ] },
-    plugins: [_planNowLine],
+    plugins: [_planNowLine],   // self-hides when "now" falls outside the day
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
+      responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: {
-          type: 'linear',
-          min: start, max: end,
+          type: 'linear', min: dayStart, max: dayStart + 86400000,
           ticks: {
             color: '#8892AA', maxTicksLimit: 12, font: { size: 10 },
             callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -2937,13 +3006,74 @@ function openSavingsChart() {
   });
 }
 
-// Rebuild the open savings modal in place as fresh polls arrive.
-function refreshSavingsModal() {
-  if (!_savingsOpen || !_modalChart) return;
-  const { actual, predicted } = buildSavingsSeries();
-  _modalChart.data.datasets[0].data = actual.points;
-  _modalChart.data.datasets[1].data = predicted.points;
-  _modalChart.update('none');
+// ── Savings breakdown bar charts (week/month/year) ────────────────────────────
+async function openSavingsBars(period, title) {
+  _savingsOpen = false;
+  _hideSavingsNav();
+  document.getElementById('modal-fc-btn').style.display     = 'none';
+  document.getElementById('modal-bands-btn').style.display  = 'none';
+  document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-overlay').classList.add('active');
+  _modalKey = null;
+
+  let j;
+  try {
+    const r = await fetch('/api/savings/buckets?period=' + period);
+    if (!r.ok) throw new Error('http ' + r.status);
+    j = await r.json();
+  } catch (e) { return; }
+
+  const labels = j.buckets.map(b => b.label);
+  const gold = '#F5C542', blue = '#4F8EF7';
+
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [
+      { label: 'Actual',    data: j.buckets.map(b => b.actual),    backgroundColor: gold, borderRadius: 3 },
+      { label: 'Predicted', data: j.buckets.map(b => b.predicted), backgroundColor: blue + 'B3', borderRadius: 3 },
+    ] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { color: '#8892AA', font: { size: 10 } }, grid: { display: false } },
+        y: {
+          grace: '8%',
+          title: { display: true, text: 'DKK', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid:  { color: '#2D3555' },
+        },
+      },
+      plugins: {
+        legend: { labels: { color: '#8892AA', font: { size: 10 }, boxWidth: 20 } },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA', bodyColor: '#E2E8F4',
+          borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          callbacks: {
+            label: ctx => ctx.parsed.y == null ? null
+              : ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' DKK',
+          },
+        },
+      },
+    },
+  });
+}
+
+// Headline totals for the Week/Month/Year cards (fetched when the Plan tab opens).
+async function updateSavingsOverviewCards() {
+  if (!document.getElementById('plan-week-saved')) return;
+  for (const [period, id] of [['week', 'plan-week-saved'],
+                              ['month', 'plan-month-saved'],
+                              ['year', 'plan-year-saved']]) {
+    try {
+      const r = await fetch('/api/savings/buckets?period=' + period);
+      if (!r.ok) continue;
+      const j = await r.json();
+      setCard(id, j.actual_total, 2);
+    } catch (e) { /* keep last value */ }
+  }
 }
 
 function onSolarForecast(data) {

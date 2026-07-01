@@ -15,13 +15,14 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import logging
 import os
 import statistics
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -1173,6 +1174,203 @@ async def api_prices():
         None, store.load_prices, now_ms - 86_400_000, now_ms + 7 * 86_400_000
     )
     return {'prices': data if data else _last_prices, 'status': _price_status}
+
+
+# ── Savings (money saved vs. buying all household power from the grid) ─────────
+# "Saved" over an interval = what buying ALL house load from the grid at the
+# import price would cost, minus what we actually paid (import cost net of export
+# earnings). This folds solar self-consumption, battery time-shift and arbitrage
+# export into one DKK figure. Actual uses measured house_load + grid power; the
+# prediction uses the persisted consumption model + power-forecast grid power
+# (past forecast slots keep their earliest prediction, so past days compare).
+
+def _step_lookup(pairs: list[tuple[int, float]], max_hold_ms: int):
+    """Build a hold/step lookup over (ts_ms, value) pairs (must be sorted).
+
+    Returns f(t_ms) = the value of the latest record at or before t, or None when
+    t precedes all records or sits more than max_hold_ms past the last one (so a
+    forecast that has run out isn't extrapolated indefinitely)."""
+    ts   = [p[0] for p in pairs]
+    vals = [p[1] for p in pairs]
+
+    def at(t_ms: int):
+        i = bisect.bisect_right(ts, t_ms) - 1
+        if i < 0 or (t_ms - ts[i]) > max_hold_ms:
+            return None
+        return vals[i]
+    return at
+
+
+def _saving_increment(load_w, grid_w, imp, exp, hours) -> float:
+    """DKK saved over `hours` given load & grid power (W; grid > 0 = import)."""
+    load_kw = load_w / 1000.0
+    grid_kw = grid_w / 1000.0
+    imp_kw  = grid_kw if grid_kw > 0 else 0.0
+    exp_kw  = -grid_kw if grid_kw < 0 else 0.0
+    baseline = load_kw * imp * hours
+    actual   = (imp_kw * imp - exp_kw * (exp or 0.0)) * hours
+    return baseline - actual
+
+
+def _savings_steps(start_s: int, end_s: int, step_s: int):
+    """Yield (t_s, actual_dkk, pred_dkk) for each step in [start_s, end_s).
+
+    actual_dkk/pred_dkk are the DKK saved during that step, or None when the
+    respective source has no data there. Runs entirely off the history DB so it
+    covers any past day, not just the browser's live 24 h window."""
+    hours    = step_s / 3600.0
+    start_ms = start_s * 1000
+    end_ms   = end_s * 1000
+
+    actual_map = store.load_power_avg_buckets(start_s, end_s, step_s)
+    prices     = store.load_prices(start_ms - 3_600_000, end_ms + 3_600_000)
+    imp_at = _step_lookup([(p['ts'], p['import']) for p in prices], 2 * 3_600_000)
+    exp_at = _step_lookup([(p['ts'], p['export']) for p in prices], 2 * 3_600_000)
+
+    cons = store.load_consumption_forecast(start_ms, end_ms)
+    powf = store.load_power_forecast(start_ms, end_ms)
+    load_at = _step_lookup([(r['ts_ms'], r['w'])      for r in cons if r['w']      is not None], 30 * 60_000)
+    grid_at = _step_lookup([(r['ts_ms'], r['grid_w']) for r in powf if r['grid_w'] is not None], 45 * 60_000)
+
+    t = start_s
+    while t < end_s:
+        t_ms = t * 1000
+        imp  = imp_at(t_ms)
+        if imp is None:
+            yield t, None, None
+            t += step_s
+            continue
+        exp = exp_at(t_ms)
+        a   = actual_map.get(t_ms)
+        act = (_saving_increment(a[0], a[1], imp, exp, hours)
+               if a and a[0] is not None and a[1] is not None else None)
+        pl, pg = load_at(t_ms), grid_at(t_ms)
+        prd = (_saving_increment(pl, pg, imp, exp, hours)
+               if pl is not None and pg is not None else None)
+        yield t, act, prd
+        t += step_s
+
+
+@app.get('/api/savings/daily')
+async def api_savings_daily(date: str | None = None):
+    """Cumulative savings (DKK) across one local calendar day.
+
+    `date` = YYYY-MM-DD (local); defaults to today. Returns the measured cumulative
+    curve up to now (or the whole day, if past) and the predicted cumulative curve
+    for the full day, at 5-min resolution."""
+    now_local = datetime.now(_TZ_LOCAL)
+    if date:
+        try:
+            day = datetime.strptime(date, '%Y-%m-%d').replace(tzinfo=_TZ_LOCAL)
+        except ValueError:
+            raise HTTPException(status_code=400, detail='date must be YYYY-MM-DD')
+    else:
+        day = now_local
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end   = start + timedelta(days=1)
+    start_s, end_s = int(start.timestamp()), int(end.timestamp())
+    now_s = time.time()
+
+    def _build():
+        actual, pred = [], []
+        ca = cp = 0.0
+        have_actual = False
+        for t, act, prd in _savings_steps(start_s, end_s, 300):
+            t_ms = t * 1000
+            if prd is not None:
+                cp += prd
+            pred.append({'ts_ms': t_ms, 'y': round(cp, 4)})
+            if t <= now_s:
+                if act is not None:
+                    ca += act
+                    have_actual = True
+                actual.append({'ts_ms': t_ms, 'y': round(ca, 4)})
+        return actual, pred, ca, cp, have_actual
+
+    loop = asyncio.get_running_loop()
+    actual, pred, ca, cp, have_actual = await loop.run_in_executor(None, _build)
+    return {
+        'date': start.strftime('%Y-%m-%d'),
+        'is_today': start.date() == now_local.date(),
+        'actual': actual, 'predicted': pred,
+        'actual_total': round(ca, 4) if have_actual else None,
+        'predicted_total': round(cp, 4),
+    }
+
+
+def _bucket_plan(period: str, now_local: datetime):
+    """Return (period_start, period_end, key_of, ordered_buckets) for a period.
+
+    ordered_buckets is a list of {'key', 'label'} defining the bars in order;
+    key_of(local_dt) maps a timestamp to one of those keys (or a key absent from
+    the set, which the caller skips)."""
+    _DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    _MONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+             'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if period == 'week':
+        start = midnight - timedelta(days=midnight.weekday())
+        end   = start + timedelta(days=7)
+        buckets = [{'key': k, 'label': _DAYS[k]} for k in range(7)]
+        return start, end, (lambda d: d.weekday()), buckets
+
+    if period == 'month':
+        start = midnight.replace(day=1)
+        end   = (start.replace(year=start.year + 1, month=1) if start.month == 12
+                 else start.replace(month=start.month + 1))
+        buckets, cur = [], start - timedelta(days=start.weekday())  # Monday of week 1
+        while cur < end:
+            lab = cur if cur >= start else start          # first in-month day of the week
+            buckets.append({'key': cur.date().isoformat(), 'label': f'{lab.day}/{lab.month}'})
+            cur += timedelta(days=7)
+        return start, end, (lambda d: (d - timedelta(days=d.weekday())).date().isoformat()), buckets
+
+    # year
+    start = midnight.replace(month=1, day=1)
+    end   = start.replace(year=start.year + 1)
+    buckets = [{'key': m, 'label': _MONS[m]} for m in range(now_local.month)]  # Jan..current
+    return start, end, (lambda d: d.month - 1), buckets
+
+
+@app.get('/api/savings/buckets')
+async def api_savings_buckets(period: str = 'week'):
+    """Per-bucket actual & predicted savings for the current calendar period.
+
+    period=week → one bar per day (Mon–Sun); month → one bar per calendar week;
+    year → one bar per month (Jan–current)."""
+    if period not in ('week', 'month', 'year'):
+        raise HTTPException(status_code=400, detail='period must be week|month|year')
+    now_local = datetime.now(_TZ_LOCAL)
+    start, end, key_of, buckets = _bucket_plan(period, now_local)
+    # Nothing is measured or forecast beyond ~2 days out — cap the walk there.
+    walk_end = min(end, now_local + timedelta(days=2))
+    start_s, walk_end_s = int(start.timestamp()), int(walk_end.timestamp())
+
+    def _build():
+        acc = {b['key']: [0.0, 0.0, False] for b in buckets}   # [actual, pred, had_actual]
+        for t, act, prd in _savings_steps(start_s, walk_end_s, 900):
+            k = key_of(datetime.fromtimestamp(t, _TZ_LOCAL))
+            slot = acc.get(k)
+            if slot is None:
+                continue
+            if act is not None:
+                slot[0] += act
+                slot[2] = True
+            if prd is not None:
+                slot[1] += prd
+        return acc
+
+    loop = asyncio.get_running_loop()
+    acc = await loop.run_in_executor(None, _build)
+    out = [{'label': b['label'],
+            'actual': round(acc[b['key']][0], 4) if acc[b['key']][2] else None,
+            'predicted': round(acc[b['key']][1], 4)} for b in buckets]
+    actual_total = round(sum(acc[b['key']][0] for b in buckets
+                             if acc[b['key']][2]), 4)
+    pred_total   = round(sum(acc[b['key']][1] for b in buckets), 4)
+    return {'period': period, 'buckets': out,
+            'actual_total': actual_total, 'predicted_total': pred_total}
 
 
 @app.delete('/api/history')
