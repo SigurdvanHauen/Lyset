@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import json
+import re
 import logging
 import os
 import statistics
@@ -1328,9 +1329,14 @@ async def api_ev_probe_start():
     progress. Skips cleanly (all tests 'skipped') if no FusionSolar
     credentials are configured yet."""
     settings = config.read_settings()
-    username  = (settings.get('FUSIONSOLAR_USERNAME') or '').strip()
-    password  = settings.get('FUSIONSOLAR_PASSWORD') or ''
-    subdomain = (settings.get('FUSIONSOLAR_SUBDOMAIN') or 'region01eu5').strip()
+    username = (settings.get('FUSIONSOLAR_USERNAME') or '').strip()
+    password = settings.get('FUSIONSOLAR_PASSWORD') or ''
+    # Real Huawei subdomains are alphanumeric ("uni004eu5", "region01eu5") — strip
+    # anything else (stray comma/space/period from a copy-paste) so a fat-fingered
+    # Settings field fails with a clear login error instead of a cryptic DNS
+    # resolution failure ("uni004eu5," sliced a trailing comma into the hostname).
+    raw_subdomain = settings.get('FUSIONSOLAR_SUBDOMAIN') or 'region01eu5'
+    subdomain = re.sub(r'[^A-Za-z0-9-]', '', raw_subdomain) or 'region01eu5'
     if not _ev_probe.start(username, password, subdomain):
         raise HTTPException(409, 'A probe run is already in progress')
     return {'ok': True}
