@@ -100,6 +100,21 @@ SCHEMA: list[dict] = [
         ],
     },
     {
+        'group': 'EV charger (experimental)',
+        'note': 'Used by the EV Charger tab\'s Modbus probe. Applied immediately.',
+        'fields': [
+            {'key': 'EV_CHARGER_HOST', 'label': 'Charger IP', 'type': 'text',
+             'default': '192.168.1.97', 'placeholder': '192.168.1.97',
+             'help': 'Static LAN address of the SCharger (WiFi).'},
+            {'key': 'EV_CHARGER_PORT', 'label': 'Modbus port', 'type': 'number',
+             'default': '502', 'help': 'Modbus TCP port on the charger (usually 502).'},
+            {'key': 'CONSUMPTION_EV_SLOT_W', 'label': 'EV slot threshold (W)', 'type': 'number',
+             'default': '6000',
+             'help': '15-min house-load averages above this are assumed to contain EV '
+             'charging and are NOT learned into the consumption profile.'},
+        ],
+    },
+    {
         'group': 'Auto controller',
         'note': 'Auto-start applies on next server restart; arbitrage applies immediately.',
         'fields': [

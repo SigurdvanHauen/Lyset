@@ -40,6 +40,7 @@ from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
 from .solar_calibration import SolarCalibration
+from .ev_probe import EVProbe
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
     NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
@@ -84,6 +85,20 @@ _auto_controller: AutoController = AutoController()
 _MODEL_PATH = Path(__file__).parent.parent / 'lyset_model.json'
 _solar_cal: SolarCalibration = SolarCalibration()
 _SOLAR_CAL_PATH = Path(__file__).parent.parent / 'lyset_solar_cal.json'
+
+
+def _on_ev_probe_event(ev: dict):
+    """EVProbe callback (probe thread): persist + push to the EV Charger tab."""
+    store.save_ev_probe_event(
+        _ev_probe.run_ts, ev.get('t', time.time()), ev.get('kind', 'log'),
+        ev.get('level'), ev.get('test'),
+        ev.get('msg') or (f"{ev.get('status', '')}: {ev.get('detail', '')}"
+                          if ev.get('kind') == 'result' else None),
+    )
+    _push({'type': 'ev_probe', **ev})
+
+
+_ev_probe: EVProbe = EVProbe(on_event=_on_ev_probe_event)
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 
 # Accumulator: collect 10-s Modbus samples within the current 15-min slot
@@ -492,6 +507,16 @@ def _push_power_forecast(fc: list[dict]):
     _push({'type': 'power_forecast', 'payload': _last_power_forecast})
 
 
+def _ev_slot_threshold_w() -> float:
+    """House-load slot average above which a 15-min slot is assumed to contain
+    EV charging and is excluded from the consumption model. Read live from the
+    env so a Settings save applies without restart."""
+    try:
+        return float(os.getenv('CONSUMPTION_EV_SLOT_W', '6000'))
+    except (TypeError, ValueError):
+        return 6000.0
+
+
 # ── Worker callbacks (called from the Modbus daemon thread) ───────────────────
 
 def _on_data(data: dict):
@@ -544,8 +569,17 @@ def _on_data(data: dict):
                 kept = srt[trim:len(srt) - trim] if trim else srt
                 avg_w = sum(kept) / len(kept)
                 slot_ts = _slot_key * 900.0
-                _consumption_model.update(slot_ts, avg_w)
-                _save_model_and_regen()
+                # EV-charging slots are excluded from the HOUSE profile: the
+                # SCharger (22 kW) meters as house load, and one session would
+                # blow the slot's EWM (and every forecast/reserve computed from
+                # it) for weeks. Until the charger is metered separately, any
+                # slot above the threshold is treated as EV + house and skipped.
+                if avg_w > _ev_slot_threshold_w():
+                    log.info('ConsumptionModel: slot %.0f W > %.0f W — assumed EV '
+                             'charging, not learned', avg_w, _ev_slot_threshold_w())
+                else:
+                    _consumption_model.update(slot_ts, avg_w)
+                    _save_model_and_regen()
             _slot_samples = [grid_import_w]
             _slot_key = key
         else:
@@ -1282,6 +1316,49 @@ async def api_download_db():
     return FileResponse(
         str(tmp), media_type='application/octet-stream',
         filename=f'lyset_history_{ts}.db',
+    )
+
+
+# ── EV charger probe (EV Charger tab) ─────────────────────────────────────────
+
+@app.post('/api/ev/probe/start')
+async def api_ev_probe_start():
+    """Start the EV charger Modbus discovery sequence (probe A direct + probe B
+    via the SDongle). 409 if a run is already in progress."""
+    settings = config.read_settings()
+    host = (settings.get('EV_CHARGER_HOST') or '192.168.1.97').strip()
+    try:
+        port = int(settings.get('EV_CHARGER_PORT') or 502)
+    except (TypeError, ValueError):
+        port = 502
+    if not _ev_probe.start(host, port, worker=_worker):
+        raise HTTPException(409, 'A probe run is already in progress')
+    return {'ok': True, 'host': host, 'port': port}
+
+
+@app.get('/api/ev/probe/state')
+async def api_ev_probe_state():
+    """Current probe state: running flag, per-test results, recent log lines.
+    The tab calls this on load so a page refresh doesn't lose the view."""
+    settings = config.read_settings()
+    return {
+        'host': (settings.get('EV_CHARGER_HOST') or '192.168.1.97').strip(),
+        'port': settings.get('EV_CHARGER_PORT') or '502',
+        **_ev_probe.state(),
+    }
+
+
+@app.get('/api/ev/probe/db')
+async def api_ev_probe_db():
+    """Download all probe runs as a small standalone SQLite file for offline
+    analysis (table ev_probe_log: run_ts, ts, kind, level, test, msg)."""
+    ts  = datetime.now(_TZ_LOCAL).strftime('%Y%m%d-%H%M%S')
+    tmp = Path(tempfile.gettempdir()) / f'lyset_ev_probe_{ts}.db'
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, store.export_ev_probe_db, str(tmp))
+    return FileResponse(
+        str(tmp), media_type='application/octet-stream',
+        filename=f'lyset_ev_probe_{ts}.db',
     )
 
 

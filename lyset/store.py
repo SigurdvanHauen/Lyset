@@ -69,6 +69,12 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS auto_commands '
             '(ts REAL, mode TEXT, detail TEXT)'
         )
+        _con.execute(
+            # EV charger Modbus probe log: every event of every probe run.
+            # run_ts groups a run; kind is 'log' | 'result' | 'status'.
+            'CREATE TABLE IF NOT EXISTS ev_probe_log '
+            '(run_ts REAL, ts REAL, kind TEXT, level TEXT, test TEXT, msg TEXT)'
+        )
         _con.commit()
     return _con
 
@@ -260,6 +266,33 @@ def load_daily_solar(days: int = 30) -> list[dict]:
     return [{'date': d, 'yield_kwh': y, 'forecast_kwh': f} for d, y, f in reversed(rows)]
 
 
+def save_ev_probe_event(run_ts: float, ts: float, kind: str,
+                        level: str | None, test: str | None, msg: str | None):
+    """Append one EV-probe event (log line / result change / status)."""
+    with _lock:
+        con = _get_con()
+        con.execute('INSERT INTO ev_probe_log VALUES (?, ?, ?, ?, ?, ?)',
+                    (run_ts, ts, kind, level, test, msg))
+        con.commit()
+
+
+def export_ev_probe_db(dest_path: str):
+    """Write a small standalone SQLite file containing the full ev_probe_log —
+    the EV Charger tab's 'download for analysis' artifact."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT run_ts, ts, kind, level, test, msg FROM ev_probe_log ORDER BY ts'
+        ).fetchall()
+    dst = sqlite3.connect(dest_path)
+    try:
+        dst.execute('CREATE TABLE ev_probe_log '
+                    '(run_ts REAL, ts REAL, kind TEXT, level TEXT, test TEXT, msg TEXT)')
+        dst.executemany('INSERT INTO ev_probe_log VALUES (?, ?, ?, ?, ?, ?)', rows)
+        dst.commit()
+    finally:
+        dst.close()
+
+
 def save_auto_command(ts: float, mode: str, detail: str):
     """Append one auto-controller decision to the command log."""
     with _lock:
@@ -278,12 +311,14 @@ def load_auto_commands(from_ts: float) -> list[dict]:
     return [{'ts': ts, 'mode': mode, 'detail': detail} for ts, mode, detail in rows]
 
 
-def purge_power_outliers(threshold_w: float = 10_000) -> int:
+def purge_power_outliers(threshold_w: float = 35_000) -> int:
     """Delete poll rows where any power field exceeds threshold_w.
 
     I32 Modbus reads occasionally return garbage values in the millions of watts
-    (register word-order corruption).  10 kW is well above the 6.9 kWp system
-    peak while cleanly rejecting those glitches.  Returns the number of rows deleted.
+    (register word-order corruption). The threshold must clear the SCharger-22KT
+    EV charger (22 kW three-phase on the meter) plus house load — at 10 kW this
+    purge would erase every poll of a charging session — while still cleanly
+    rejecting the million-watt glitches.  Returns the number of rows deleted.
     """
     with _lock:
         con = _get_con()
