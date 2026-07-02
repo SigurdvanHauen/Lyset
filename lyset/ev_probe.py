@@ -38,6 +38,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+from . import ev_charger
+
 log = logging.getLogger(__name__)
 
 TESTS = [
@@ -210,43 +212,23 @@ class EVProbe:
             self._result('c2_plants', 'fail', f'{type(exc).__name__}: {exc}')
             self._log('error', f'C2: {type(exc).__name__}: {exc}')
 
-        # C3 — full device list, bypassing the library's narrow mocTypes filter
-        # (get_device_ids() hardcodes a set of type codes that may not include
-        # the SCharger) so an EV charger of any type code still shows up.
+        # C3 — full device list. Uses the same shared helper as the permanent
+        # polling worker (ev_charger.list_devices) so there's one source of
+        # truth for "how do we find the charger" — it bypasses fusion_solar_py's
+        # narrow get_device_ids() filter (hardcoded mocTypes that don't include
+        # 'Charging Pile', confirmed by testing) and falls back to it internally
+        # if the broad query fails.
         self._result('c3_devices', 'running')
         devices: list[dict] = []
         try:
-            r = client._session.get(
-                url=f'https://{client._huawei_subdomain}.fusionsolar.huawei.com'
-                    '/rest/neteco/web/config/device/v1/device-list',
-                params={'conditionParams.parentDn': client._company_id,
-                       '_': int(time.time() * 1000)},
-            )
-            r.raise_for_status()
-            data = r.json().get('data', [])
-            for d in data:
-                info = {
-                    'dn': d.get('dn'), 'mocType': d.get('mocType'),
-                    'mocTypeName': d.get('mocTypeName'),
-                    'name': d.get('name') or d.get('aliasName'),
-                }
-                devices.append(info)
-                self._log('ok', f"C3: dn={info['dn']} mocType={info['mocType']} "
-                                f"type='{info['mocTypeName']}' name='{info['name']}'")
+            devices = ev_charger.list_devices(client)
+            for d in devices:
+                self._log('ok', f"C3: dn={d['dn']} mocType={d['mocType']} "
+                                f"type='{d['mocTypeName']}' name='{d['name']}'")
             self._result('c3_devices', 'pass' if devices else 'fail', f'{len(devices)} device(s)')
         except Exception as exc:
-            self._log('warn', f'C3: broad device query failed ({type(exc).__name__}: {exc}), '
-                              'falling back to the library\'s narrow default query…')
-            try:
-                devices = [{'dn': d['deviceDn'], 'mocType': None, 'mocTypeName': d['type'], 'name': None}
-                          for d in client.get_device_ids()]
-                for d in devices:
-                    self._log('ok', f"C3 (fallback): dn={d['dn']} type='{d['mocTypeName']}'")
-                self._result('c3_devices', 'pass' if devices else 'fail',
-                             f'{len(devices)} device(s) (fallback query)')
-            except Exception as exc2:
-                self._result('c3_devices', 'fail', f'{type(exc2).__name__}: {exc2}')
-                self._log('error', f'C3: fallback query also failed — {exc2}')
+            self._result('c3_devices', 'fail', f'{type(exc).__name__}: {exc}')
+            self._log('error', f'C3: device query failed — {type(exc).__name__}: {exc}')
 
         # C4 — real-time data for anything that looks like the charger
         self._result('c4_charger_kpi', 'running')

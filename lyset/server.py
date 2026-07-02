@@ -43,6 +43,7 @@ from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
 from .solar_calibration import SolarCalibration
 from .ev_probe import EVProbe
+from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
     NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
@@ -101,6 +102,10 @@ def _on_ev_probe_event(ev: dict):
 
 
 _ev_probe: EVProbe = EVProbe(on_event=_on_ev_probe_event)
+_ev_charger_worker: Optional[EVChargerWorker] = None
+_last_ev_charger_data: dict = {}
+_ev_charger_status: str = 'Not configured'
+_ev_charger_status_ok: bool = False
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 
 # Accumulator: collect 10-s Modbus samples within the current 15-min slot
@@ -739,6 +744,21 @@ def _on_solcast_status(msg: str, ok: bool):
     _solcast_status_ok = ok
 
 
+def _on_ev_charger_data(data: dict):
+    global _last_ev_charger_data
+    ts = data.get('_timestamp', time.time())
+    _last_ev_charger_data = data
+    store.save_ev_charger_poll(ts, data)
+    _push({'type': 'ev_charger_data', 'payload': data})
+
+
+def _on_ev_charger_status(msg: str, ok: bool):
+    global _ev_charger_status, _ev_charger_status_ok
+    _ev_charger_status = msg
+    _ev_charger_status_ok = ok
+    _push({'type': 'ev_charger_status', 'msg': msg, 'ok': ok})
+
+
 def _on_auto_command(mode: str, detail: str):
     ts = time.time()
     store.save_auto_command(ts, mode, detail)
@@ -827,6 +847,23 @@ async def lifespan(app: FastAPI):
     _solcast_worker = solcast_from_env(on_forecast=_on_solar_forecast, on_status=_on_solcast_status)
     if _solcast_worker:
         _solcast_worker.start()
+
+    # Start the EV charger cloud poller if FusionSolar credentials are configured
+    global _ev_charger_worker
+    _ev_charger_worker = ev_charger_from_env(on_data=_on_ev_charger_data, on_status=_on_ev_charger_status)
+    if _ev_charger_worker:
+        _ev_charger_worker.start()
+
+    # Restore the last EV charger poll from DB so the tab has something immediately
+    global _last_ev_charger_data
+    ev_recent = store.load_ev_charger_history(time.time() - 86_400, time.time())
+    if ev_recent:
+        r = ev_recent[-1]
+        _last_ev_charger_data = {
+            'status': r['status'], 'total_energy_charged': r['total_energy_kwh'],
+            'model': r['model'], 'rated_power': r['rated_power_kw'],
+            'software_version': r['sw_version'], '_timestamp': r['ts'],
+        }
 
     # Restore last solar forecast from DB so it's available immediately after restart
     now_ms = int(time.time() * 1000)
@@ -1001,6 +1038,17 @@ def _restart_price_worker():
     return _price_worker is not None
 
 
+def _restart_ev_charger_worker():
+    global _ev_charger_worker
+    if _ev_charger_worker and _ev_charger_worker.is_alive():
+        _ev_charger_worker.stop()
+        _ev_charger_worker.join(timeout=5)
+    _ev_charger_worker = ev_charger_from_env(on_data=_on_ev_charger_data, on_status=_on_ev_charger_status)
+    if _ev_charger_worker:
+        _ev_charger_worker.start()
+    return _ev_charger_worker is not None
+
+
 def _restart_solcast_worker():
     global _solcast_worker
     if _solcast_worker and _solcast_worker.is_alive():
@@ -1046,6 +1094,11 @@ async def api_settings_post(body: SettingsRequest):
                       'SOLCAST_FETCH_HOURS', 'SOLCAST_POLL_INTERVAL'}:
         _restart_solcast_worker()
         restarted.append('solar')
+
+    if written_set & {'FUSIONSOLAR_USERNAME', 'FUSIONSOLAR_PASSWORD',
+                      'FUSIONSOLAR_SUBDOMAIN', 'FUSIONSOLAR_EV_POLL_INTERVAL'}:
+        _restart_ev_charger_worker()
+        restarted.append('ev_charger')
 
     # CONSUMPTION_HISTORY_PATH / AUTO_CONTROLLER_AUTOSTART only take effect at
     # startup; flag them so the UI can tell the user a restart is needed.
@@ -1361,6 +1414,38 @@ async def api_ev_probe_db():
         str(tmp), media_type='application/octet-stream',
         filename=f'lyset_ev_probe_{ts}.db',
     )
+
+
+# ── EV charger cloud polling (EVChargerWorker) ────────────────────────────────
+
+@app.get('/api/ev/charger/state')
+async def api_ev_charger_state():
+    """Latest EV charger snapshot plus today's charged energy (derived from
+    the day's min/max of the lifetime energy counter — the API doesn't serve
+    a daily figure directly). None until the worker's first successful poll."""
+    loop = asyncio.get_running_loop()
+    now = time.time()
+    day_start = datetime.now(_TZ_LOCAL).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    today = await loop.run_in_executor(None, store.load_ev_charger_history, day_start, now)
+    kwh_vals = [r['total_energy_kwh'] for r in today if r['total_energy_kwh'] is not None]
+    energy_today_kwh = round(max(kwh_vals) - min(kwh_vals), 3) if len(kwh_vals) >= 2 else None
+    return {
+        'configured': _ev_charger_worker is not None,
+        'status_msg': _ev_charger_status,
+        'status_ok':  _ev_charger_status_ok,
+        'current':    _last_ev_charger_data or None,
+        'energy_today_kwh': energy_today_kwh,
+    }
+
+
+@app.get('/api/ev/charger/history')
+async def api_ev_charger_history(hours: int = 48):
+    """Poll history for the EV Charger tab's chart. hours is clamped to 1-720 (30 d)."""
+    hours = max(1, min(720, hours))
+    now = time.time()
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, store.load_ev_charger_history, now - hours * 3600, now)
+    return {'history': data}
 
 
 @app.get('/api/prices')

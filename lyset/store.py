@@ -70,10 +70,22 @@ def _get_con() -> sqlite3.Connection:
             '(ts REAL, mode TEXT, detail TEXT)'
         )
         _con.execute(
-            # EV charger Modbus probe log: every event of every probe run.
+            # EV charger discovery probe log: every event of every probe run.
             # run_ts groups a run; kind is 'log' | 'result' | 'status'.
             'CREATE TABLE IF NOT EXISTS ev_probe_log '
             '(run_ts REAL, ts REAL, kind TEXT, level TEXT, test TEXT, msg TEXT)'
+        )
+        _con.execute(
+            # EV charger cloud-poll history (EVChargerWorker). status is the raw
+            # top-level FusionSolar device status code (meaning unconfirmed for
+            # this device type). total_energy_kwh is a LIFETIME cumulative
+            # counter, same semantics as the inverter's total_yield — "today's
+            # energy" is derived by the app from this table's daily min/max, not
+            # served directly. raw holds the full parsed signal dict as JSON so
+            # a field this app doesn't recognise yet is still visible.
+            'CREATE TABLE IF NOT EXISTS ev_charger_polls '
+            '(ts REAL PRIMARY KEY, status INTEGER, total_energy_kwh REAL, '
+            ' model TEXT, rated_power_kw REAL, sw_version TEXT, raw TEXT)'
         )
         _con.commit()
     return _con
@@ -277,20 +289,59 @@ def save_ev_probe_event(run_ts: float, ts: float, kind: str,
 
 
 def export_ev_probe_db(dest_path: str):
-    """Write a small standalone SQLite file containing the full ev_probe_log —
-    the EV Charger tab's 'download for analysis' artifact."""
+    """Write a small standalone SQLite file containing the full ev_probe_log
+    and ev_charger_polls tables — the EV Charger tab's 'download for
+    analysis' artifact. Includes charger poll history too, since once a real
+    session happens that's the more interesting data to analyze."""
     with _lock:
-        rows = _get_con().execute(
+        con = _get_con()
+        probe_rows = con.execute(
             'SELECT run_ts, ts, kind, level, test, msg FROM ev_probe_log ORDER BY ts'
+        ).fetchall()
+        poll_rows = con.execute(
+            'SELECT ts, status, total_energy_kwh, model, rated_power_kw, sw_version, raw '
+            'FROM ev_charger_polls ORDER BY ts'
         ).fetchall()
     dst = sqlite3.connect(dest_path)
     try:
         dst.execute('CREATE TABLE ev_probe_log '
                     '(run_ts REAL, ts REAL, kind TEXT, level TEXT, test TEXT, msg TEXT)')
-        dst.executemany('INSERT INTO ev_probe_log VALUES (?, ?, ?, ?, ?, ?)', rows)
+        dst.executemany('INSERT INTO ev_probe_log VALUES (?, ?, ?, ?, ?, ?)', probe_rows)
+        dst.execute('CREATE TABLE ev_charger_polls '
+                    '(ts REAL PRIMARY KEY, status INTEGER, total_energy_kwh REAL, '
+                    ' model TEXT, rated_power_kw REAL, sw_version TEXT, raw TEXT)')
+        dst.executemany('INSERT INTO ev_charger_polls VALUES (?, ?, ?, ?, ?, ?, ?)', poll_rows)
         dst.commit()
     finally:
         dst.close()
+
+
+def save_ev_charger_poll(ts: float, data: dict):
+    """Persist one EVChargerWorker poll (parse_realtime() output)."""
+    with _lock:
+        con = _get_con()
+        con.execute(
+            'INSERT OR REPLACE INTO ev_charger_polls VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (ts, data.get('status'), data.get('total_energy_charged'),
+             data.get('model'), data.get('rated_power'), data.get('software_version'),
+             json.dumps(data.get('raw'), default=str)),
+        )
+        con.commit()
+
+
+def load_ev_charger_history(from_ts: float, to_ts: float) -> list[dict]:
+    """Return EV charger poll history in [from_ts, to_ts] (Unix seconds)."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts, status, total_energy_kwh, model, rated_power_kw, sw_version '
+            'FROM ev_charger_polls WHERE ts >= ? AND ts <= ? ORDER BY ts',
+            (from_ts, to_ts),
+        ).fetchall()
+    return [
+        {'ts': ts, 'status': status, 'total_energy_kwh': kwh,
+         'model': model, 'rated_power_kw': rated_kw, 'sw_version': sw}
+        for ts, status, kwh, model, rated_kw, sw in rows
+    ]
 
 
 def save_auto_command(ts: float, mode: str, detail: str):

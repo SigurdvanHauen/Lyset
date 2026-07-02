@@ -101,7 +101,8 @@ SCHEMA: list[dict] = [
     },
     {
         'group': 'EV charger (experimental)',
-        'note': 'Used by the EV Charger tab\'s cloud probe. Applied immediately.',
+        'note': 'Cloud login used by the EV Charger tab\'s discovery probe AND the ongoing '
+        'polling worker. Applied immediately — the polling worker restarts on save.',
         'fields': [
             {'key': 'CONSUMPTION_EV_SLOT_W', 'label': 'EV slot threshold (W)', 'type': 'number',
              'default': '6000',
@@ -109,15 +110,23 @@ SCHEMA: list[dict] = [
              'charging and are NOT learned into the consumption profile.'},
             {'key': 'FUSIONSOLAR_USERNAME', 'label': 'FusionSolar username', 'type': 'text',
              'default': '', 'placeholder': 'same login as the FusionSolar app',
-             'help': 'Used by probe C (cloud fallback) since the charger refuses direct Modbus. '
-             'Read-only: only fetches data, never changes settings.'},
+             'help': 'The charger refuses direct Modbus, so this is the only working path: the '
+             'same reverse-engineered login the FusionSolar web app uses. Read-only — never '
+             'writes/changes anything. No official rate limit for this path, so polling is '
+             'deliberately slow (see interval below); logging in this way may also share a '
+             'session limit with your phone app.'},
             {'key': 'FUSIONSOLAR_PASSWORD', 'label': 'FusionSolar password', 'type': 'password',
              'default': '', 'placeholder': 'same login as the FusionSolar app',
              'help': 'Stored in clear in .env like the other API keys on this page (LAN-only dashboard, no auth).'},
             {'key': 'FUSIONSOLAR_SUBDOMAIN', 'label': 'FusionSolar subdomain', 'type': 'text',
              'default': 'region01eu5', 'placeholder': 'region01eu5',
              'help': 'The first part of the URL when you log into FusionSolar in a browser, '
-             'e.g. "region01eu5" from region01eu5.fusionsolar.huawei.com.'},
+             'e.g. "uni004eu5" from uni004eu5.fusionsolar.huawei.com.'},
+            {'key': 'FUSIONSOLAR_EV_POLL_INTERVAL', 'label': 'Charger poll interval (s)', 'type': 'number',
+             'default': '300',
+             'help': 'Seconds between charger polls (floor 60s). Kept conservative — this cloud '
+             'login has no documented rate limit and community reports describe occasional '
+             'CAPTCHA challenges on unusual login patterns.'},
         ],
     },
     {
