@@ -1,12 +1,11 @@
 """
-FusionSolar cloud polling for the EV charger (SCharger-22KT-S0) — the
-permanent worker built from what the EV Charger tab's probe discovered on
-2026-07-02 against the real account:
+FusionSolar cloud polling for the EV charger (SCharger-22KT-S0) — built from
+what was discovered on 2026-07-02 against the real account:
 
   Device: type 'Charging Pile', name 'EV Charger', dn e.g. 'NE=261777682'
-    (discovered dynamically each run via the same broad, unfiltered device
-    list query the probe uses — see find_charger_device() — rather than
-    hardcoded, since a factory-reset or re-pair could change the dn).
+    (discovered dynamically each run via a broad, unfiltered device list
+    query — see find_charger_device() — rather than hardcoded, since a
+    factory-reset or re-pair could change the dn).
 
   get_real_time_data(dn) on an IDLE charger (no EV connected) returns:
     {"data": [

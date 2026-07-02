@@ -101,8 +101,8 @@ SCHEMA: list[dict] = [
     },
     {
         'group': 'EV charger (experimental)',
-        'note': 'Cloud login used by the EV Charger tab\'s discovery probe AND the ongoing '
-        'polling worker. Applied immediately — the polling worker restarts on save.',
+        'note': 'FusionSolar cloud login used by the EV charger polling worker. '
+        'Applied immediately — the polling worker restarts on save.',
         'fields': [
             {'key': 'CONSUMPTION_EV_SLOT_W', 'label': 'EV slot threshold (W)', 'type': 'number',
              'default': '6000',

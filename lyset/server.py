@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import bisect
 import json
-import re
 import logging
 import os
 import statistics
@@ -42,7 +41,6 @@ from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
 from .solar_calibration import SolarCalibration
-from .ev_probe import EVProbe
 from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
@@ -90,18 +88,6 @@ _solar_cal: SolarCalibration = SolarCalibration()
 _SOLAR_CAL_PATH = Path(__file__).parent.parent / 'lyset_solar_cal.json'
 
 
-def _on_ev_probe_event(ev: dict):
-    """EVProbe callback (probe thread): persist + push to the EV Charger tab."""
-    store.save_ev_probe_event(
-        _ev_probe.run_ts, ev.get('t', time.time()), ev.get('kind', 'log'),
-        ev.get('level'), ev.get('test'),
-        ev.get('msg') or (f"{ev.get('status', '')}: {ev.get('detail', '')}"
-                          if ev.get('kind') == 'result' else None),
-    )
-    _push({'type': 'ev_probe', **ev})
-
-
-_ev_probe: EVProbe = EVProbe(on_event=_on_ev_probe_event)
 _ev_charger_worker: Optional[EVChargerWorker] = None
 _last_ev_charger_data: dict = {}
 _ev_charger_status: str = 'Not configured'
@@ -1370,49 +1356,6 @@ async def api_download_db():
     return FileResponse(
         str(tmp), media_type='application/octet-stream',
         filename=f'lyset_history_{ts}.db',
-    )
-
-
-# ── EV charger probe (EV Charger tab) ─────────────────────────────────────────
-
-@app.post('/api/ev/probe/start')
-async def api_ev_probe_start():
-    """Start the EV charger cloud discovery sequence (FusionSolar login, plant
-    list, device list, charger real-time data). 409 if a run is already in
-    progress. Skips cleanly (all tests 'skipped') if no FusionSolar
-    credentials are configured yet."""
-    settings = config.read_settings()
-    username = (settings.get('FUSIONSOLAR_USERNAME') or '').strip()
-    password = settings.get('FUSIONSOLAR_PASSWORD') or ''
-    # Real Huawei subdomains are alphanumeric ("uni004eu5", "region01eu5") — strip
-    # anything else (stray comma/space/period from a copy-paste) so a fat-fingered
-    # Settings field fails with a clear login error instead of a cryptic DNS
-    # resolution failure ("uni004eu5," sliced a trailing comma into the hostname).
-    raw_subdomain = settings.get('FUSIONSOLAR_SUBDOMAIN') or 'region01eu5'
-    subdomain = re.sub(r'[^A-Za-z0-9-]', '', raw_subdomain) or 'region01eu5'
-    if not _ev_probe.start(username, password, subdomain):
-        raise HTTPException(409, 'A probe run is already in progress')
-    return {'ok': True}
-
-
-@app.get('/api/ev/probe/state')
-async def api_ev_probe_state():
-    """Current probe state: running flag, per-test results, recent log lines.
-    The tab calls this on load so a page refresh doesn't lose the view."""
-    return _ev_probe.state()
-
-
-@app.get('/api/ev/probe/db')
-async def api_ev_probe_db():
-    """Download all probe runs as a small standalone SQLite file for offline
-    analysis (table ev_probe_log: run_ts, ts, kind, level, test, msg)."""
-    ts  = datetime.now(_TZ_LOCAL).strftime('%Y%m%d-%H%M%S')
-    tmp = Path(tempfile.gettempdir()) / f'lyset_ev_probe_{ts}.db'
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, store.export_ev_probe_db, str(tmp))
-    return FileResponse(
-        str(tmp), media_type='application/octet-stream',
-        filename=f'lyset_ev_probe_{ts}.db',
     )
 
 

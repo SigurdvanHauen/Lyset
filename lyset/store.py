@@ -70,12 +70,6 @@ def _get_con() -> sqlite3.Connection:
             '(ts REAL, mode TEXT, detail TEXT)'
         )
         _con.execute(
-            # EV charger discovery probe log: every event of every probe run.
-            # run_ts groups a run; kind is 'log' | 'result' | 'status'.
-            'CREATE TABLE IF NOT EXISTS ev_probe_log '
-            '(run_ts REAL, ts REAL, kind TEXT, level TEXT, test TEXT, msg TEXT)'
-        )
-        _con.execute(
             # EV charger cloud-poll history (EVChargerWorker). status is the raw
             # top-level FusionSolar device status code (meaning unconfirmed for
             # this device type). total_energy_kwh is a LIFETIME cumulative
@@ -276,44 +270,6 @@ def load_daily_solar(days: int = 30) -> list[dict]:
             (days,),
         ).fetchall()
     return [{'date': d, 'yield_kwh': y, 'forecast_kwh': f} for d, y, f in reversed(rows)]
-
-
-def save_ev_probe_event(run_ts: float, ts: float, kind: str,
-                        level: str | None, test: str | None, msg: str | None):
-    """Append one EV-probe event (log line / result change / status)."""
-    with _lock:
-        con = _get_con()
-        con.execute('INSERT INTO ev_probe_log VALUES (?, ?, ?, ?, ?, ?)',
-                    (run_ts, ts, kind, level, test, msg))
-        con.commit()
-
-
-def export_ev_probe_db(dest_path: str):
-    """Write a small standalone SQLite file containing the full ev_probe_log
-    and ev_charger_polls tables — the EV Charger tab's 'download for
-    analysis' artifact. Includes charger poll history too, since once a real
-    session happens that's the more interesting data to analyze."""
-    with _lock:
-        con = _get_con()
-        probe_rows = con.execute(
-            'SELECT run_ts, ts, kind, level, test, msg FROM ev_probe_log ORDER BY ts'
-        ).fetchall()
-        poll_rows = con.execute(
-            'SELECT ts, status, total_energy_kwh, model, rated_power_kw, sw_version, raw '
-            'FROM ev_charger_polls ORDER BY ts'
-        ).fetchall()
-    dst = sqlite3.connect(dest_path)
-    try:
-        dst.execute('CREATE TABLE ev_probe_log '
-                    '(run_ts REAL, ts REAL, kind TEXT, level TEXT, test TEXT, msg TEXT)')
-        dst.executemany('INSERT INTO ev_probe_log VALUES (?, ?, ?, ?, ?, ?)', probe_rows)
-        dst.execute('CREATE TABLE ev_charger_polls '
-                    '(ts REAL PRIMARY KEY, status INTEGER, total_energy_kwh REAL, '
-                    ' model TEXT, rated_power_kw REAL, sw_version TEXT, raw TEXT)')
-        dst.executemany('INSERT INTO ev_charger_polls VALUES (?, ?, ?, ?, ?, ?, ?)', poll_rows)
-        dst.commit()
-    finally:
-        dst.close()
 
 
 def save_ev_charger_poll(ts: float, data: dict):
