@@ -88,29 +88,11 @@ class ModbusWorker(threading.Thread):
         self._running = False
         self._client: Optional[ModbusTcpClient] = None
         self._write_queue: queue.Queue = queue.Queue()
-        self._paused = False
-        self._parked = threading.Event()   # set while the loop idles paused
 
     # ── Public control ────────────────────────────────────────────────────────
 
     def stop(self):
         self._running = False
-
-    def pause(self):
-        """Suspend polling after the current cycle completes and release the
-        TCP connection. The SDongle allows a single Modbus client — anything
-        that needs its own connection to the dongle (e.g. the EV charger
-        probe) must park the poller first or transaction ids desync."""
-        self._paused = True
-
-    def resume(self):
-        self._paused = False
-        self._parked.clear()
-
-    def wait_parked(self, timeout: float = 20.0) -> bool:
-        """Block until the poll loop has parked after pause() (connection
-        closed, no traffic). False if it didn't park within timeout."""
-        return self._parked.wait(timeout)
 
     # ── Public write API (thread-safe) ────────────────────────────────────────
 
@@ -323,14 +305,6 @@ class ModbusWorker(threading.Thread):
         reported_ok = False  # tracks last UI state so we only emit on changes
 
         while self._running:
-            # Parked state: pause() was called (EV probe borrowing the dongle's
-            # single Modbus slot). The client is already closed between polls;
-            # just idle until resume().
-            if self._paused:
-                self._parked.set()
-                time.sleep(0.2)
-                continue
-
             # Open a fresh TCP connection every cycle. The SUN2000 drops idle
             # connections after ~30 s, causing silent hangs on a half-open socket.
             # Reconnecting each poll is the only reliable pattern for this inverter.

@@ -715,14 +715,17 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   </div>
 
-  <!-- EV Charger (development / discovery) -->
+  <!-- EV Charger (development / experimentation) -->
   <div id="panel-ev" class="panel">
-    <div class="sec">Modbus Discovery Probe</div>
+    <div class="sec">Cloud Discovery Probe</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.6">
-      Tests whether the SCharger answers Modbus TCP — directly at
-      <span id="ev-target" style="color:var(--fg)">…</span> (probe A) and as a
-      sub-device on the inverter's SDongle link (probe B; the inverter poller is
-      paused for ~1 min while B runs). Read-only: the probe never writes a register.
+      Direct Modbus TCP to the charger and Modbus via the inverter's SDongle were both
+      tried and both fail — the SCharger accepts a connection then drops it the instant
+      a real request arrives, on every device id (matches other owners' reports: only
+      its managing dongle may be Modbus master). This probe instead logs into the
+      FusionSolar cloud (same login as the app) to find the charger's device id and
+      what real-time fields are available. Set FusionSolar username/password in
+      Settings → EV charger first. Read-only throughout.
     </div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <button id="ev-probe-btn" onclick="startEvProbe()" style="font-size:12px;padding:6px 18px;border-color:var(--accent);color:var(--accent)">&#9654; Run probe sequence</button>
@@ -1101,7 +1104,6 @@ async function loadEvProbeState() {
   try {
     const r = await fetch('/api/ev/probe/state');
     const j = await r.json();
-    document.getElementById('ev-target').textContent = `${j.host}:${j.port}`;
     document.getElementById('ev-results').innerHTML = '';
     (j.results || []).forEach(evRenderResult);
     const box = document.getElementById('ev-log');

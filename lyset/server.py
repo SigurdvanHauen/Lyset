@@ -1323,29 +1323,24 @@ async def api_download_db():
 
 @app.post('/api/ev/probe/start')
 async def api_ev_probe_start():
-    """Start the EV charger Modbus discovery sequence (probe A direct + probe B
-    via the SDongle). 409 if a run is already in progress."""
+    """Start the EV charger cloud discovery sequence (FusionSolar login, plant
+    list, device list, charger real-time data). 409 if a run is already in
+    progress. Skips cleanly (all tests 'skipped') if no FusionSolar
+    credentials are configured yet."""
     settings = config.read_settings()
-    host = (settings.get('EV_CHARGER_HOST') or '192.168.1.97').strip()
-    try:
-        port = int(settings.get('EV_CHARGER_PORT') or 502)
-    except (TypeError, ValueError):
-        port = 502
-    if not _ev_probe.start(host, port, worker=_worker):
+    username  = (settings.get('FUSIONSOLAR_USERNAME') or '').strip()
+    password  = settings.get('FUSIONSOLAR_PASSWORD') or ''
+    subdomain = (settings.get('FUSIONSOLAR_SUBDOMAIN') or 'region01eu5').strip()
+    if not _ev_probe.start(username, password, subdomain):
         raise HTTPException(409, 'A probe run is already in progress')
-    return {'ok': True, 'host': host, 'port': port}
+    return {'ok': True}
 
 
 @app.get('/api/ev/probe/state')
 async def api_ev_probe_state():
     """Current probe state: running flag, per-test results, recent log lines.
     The tab calls this on load so a page refresh doesn't lose the view."""
-    settings = config.read_settings()
-    return {
-        'host': (settings.get('EV_CHARGER_HOST') or '192.168.1.97').strip(),
-        'port': settings.get('EV_CHARGER_PORT') or '502',
-        **_ev_probe.state(),
-    }
+    return _ev_probe.state()
 
 
 @app.get('/api/ev/probe/db')

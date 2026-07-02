@@ -101,17 +101,23 @@ SCHEMA: list[dict] = [
     },
     {
         'group': 'EV charger (experimental)',
-        'note': 'Used by the EV Charger tab\'s Modbus probe. Applied immediately.',
+        'note': 'Used by the EV Charger tab\'s cloud probe. Applied immediately.',
         'fields': [
-            {'key': 'EV_CHARGER_HOST', 'label': 'Charger IP', 'type': 'text',
-             'default': '192.168.1.97', 'placeholder': '192.168.1.97',
-             'help': 'Static LAN address of the SCharger (WiFi).'},
-            {'key': 'EV_CHARGER_PORT', 'label': 'Modbus port', 'type': 'number',
-             'default': '502', 'help': 'Modbus TCP port on the charger (usually 502).'},
             {'key': 'CONSUMPTION_EV_SLOT_W', 'label': 'EV slot threshold (W)', 'type': 'number',
              'default': '6000',
              'help': '15-min house-load averages above this are assumed to contain EV '
              'charging and are NOT learned into the consumption profile.'},
+            {'key': 'FUSIONSOLAR_USERNAME', 'label': 'FusionSolar username', 'type': 'text',
+             'default': '', 'placeholder': 'same login as the FusionSolar app',
+             'help': 'Used by probe C (cloud fallback) since the charger refuses direct Modbus. '
+             'Read-only: only fetches data, never changes settings.'},
+            {'key': 'FUSIONSOLAR_PASSWORD', 'label': 'FusionSolar password', 'type': 'password',
+             'default': '', 'placeholder': 'same login as the FusionSolar app',
+             'help': 'Stored in clear in .env like the other API keys on this page (LAN-only dashboard, no auth).'},
+            {'key': 'FUSIONSOLAR_SUBDOMAIN', 'label': 'FusionSolar subdomain', 'type': 'text',
+             'default': 'region01eu5', 'placeholder': 'region01eu5',
+             'help': 'The first part of the URL when you log into FusionSolar in a browser, '
+             'e.g. "region01eu5" from region01eu5.fusionsolar.huawei.com.'},
         ],
     },
     {
