@@ -18,3 +18,4 @@ lyset_*.db-wal
 lyset_model.json
 docs/
 .env
+lyset_solar_cal.json
