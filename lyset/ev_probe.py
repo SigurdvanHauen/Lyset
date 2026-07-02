@@ -263,8 +263,13 @@ class EVProbe:
         for d in candidates:
             try:
                 data = client.get_real_time_data(d['dn'])
+                # Full dump, untruncated — this is the whole point of the probe: nail
+                # down the exact signal names/ids/units before writing a permanent
+                # poller against them. A truncated 500-char cut previously hid every
+                # signal past "Rated Power" on the real charger, including whatever
+                # covers live charging power/status/session energy.
                 self._log('ok', f"C4: real-time data for {d['name'] or d['mocTypeName']} "
-                                f"(dn={d['dn']}): {json.dumps(data)[:500]}")
+                                f"(dn={d['dn']}):\n{json.dumps(data, indent=2)}")
                 hits += 1
             except Exception as exc:
                 self._log('error', f"C4: dn={d['dn']} real-time fetch failed — "
