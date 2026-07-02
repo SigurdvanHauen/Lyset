@@ -31,8 +31,8 @@ It is an open replacement for paid optimisation services (e.g. IntelliCharge), w
 - **Live dashboard** — power flow, PV strings, grid, battery SoC, energy totals, updated every 10 s over a WebSocket. No page reloads.
 - **History & charts** — every metric is stored in SQLite and plotted; click any card to open a scrollable chart of its full history.
 - **Electricity prices** — fetches all-in import and export (sell-back) prices for your DSO zone from [Strømligning](https://stromligning.dk).
-- **Solar forecast** — pulls a PV production forecast (mean + P10/P90 confidence band) from [Solcast](https://solcast.com).
-- **Consumption forecast** — learns a weekly household-load profile online from your own meter data.
+- **Solar forecast** — pulls a PV production forecast (mean + P10/P90 confidence band) from [Solcast](https://solcast.com), then **self-calibrates** it: a per-hour-of-day correction factor is learned from your roof's measured output vs. the forecast (orientation quirks, shading), converging over a couple of weeks.
+- **Consumption forecast** — learns a weekly household-load profile online from your own meter data, with a self-correcting global bias term (forecast vs. measured) on top. A *Forecast Accuracy* card on the Plan tab shows how both models are tracking reality.
 - **Plan view** — overlays past actuals with a forward plan (solar, load, battery charge/discharge, grid, SoC) plus the price curve, IntelliCharge-style.
 - **Savings tracking** — measures the DKK you've saved vs. buying every kWh from the grid at the import price (solar self-consumption + battery time-shift + arbitrage, folded into one figure). Cards for today / this week / this month / this year, each opening a cumulative or per-bucket chart with **actual vs. predicted** series.
 - **Payback / ROI** — enter your system cost and install date and it estimates the break-even date from your realised average daily savings.
@@ -258,6 +258,7 @@ Base URL `http://<server>:8000`. JSON in/out.
 | `GET` | `/api/savings/daily?date=YYYY-MM-DD` | Cumulative DKK saved for one day — actual + predicted series. |
 | `GET` | `/api/savings/buckets?period=week\|month\|year` | Per-bucket savings (day/week/month) for the current calendar period, actual + predicted. |
 | `GET` | `/api/roi` | Payback estimate: realised avg daily savings, break-even date, years/months/days remaining. |
+| `GET` | `/api/forecast/accuracy?days=7` | Solar & consumption forecast MAE/bias vs. measured history, plus the current adaptive corrections (per-hour solar factors, load bias). |
 | `GET` | `/api/daily-solar` | Per-day produced vs. forecast kWh (last 30 days). |
 | `GET` | `/api/history/series?key=&from_ms=` | Full downsampled history for one metric. |
 | `GET` | `/api/automode` | Auto-controller state + recent command log. |

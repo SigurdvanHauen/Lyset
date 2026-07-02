@@ -39,6 +39,7 @@ from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
+from .solar_calibration import SolarCalibration
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
     NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
@@ -81,6 +82,8 @@ _last_power_forecast: list[dict] = []
 _last_sim_soc: float | None = None  # SoC anchor used for the last simulation run
 _auto_controller: AutoController = AutoController()
 _MODEL_PATH = Path(__file__).parent.parent / 'lyset_model.json'
+_solar_cal: SolarCalibration = SolarCalibration()
+_SOLAR_CAL_PATH = Path(__file__).parent.parent / 'lyset_solar_cal.json'
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 
 # Accumulator: collect 10-s Modbus samples within the current 15-min slot
@@ -528,8 +531,18 @@ def _on_data(data: dict):
         grid_import_w = max(0.0, meter_w)
         key = int(ts / 900)
         if key != _slot_key:
-            if _slot_samples and _slot_key >= 0:
-                avg_w = sum(_slot_samples) / len(_slot_samples)
+            # ≥ 15 of the ~90 expected samples (10-s polls / 15 min), else the
+            # slot is a partial from downtime/restart and would train on noise.
+            if len(_slot_samples) >= 15 and _slot_key >= 0:
+                # 10 %-trimmed mean: single-poll house_load glitches (0 W and
+                # ~5 kW in adjacent polls — non-simultaneous batched reads) fall
+                # in the trimmed tails, while sustained real load (oven, charger)
+                # spans enough samples to survive. A median would also suppress
+                # real short spikes and under-count energy; the trim doesn't.
+                srt  = sorted(_slot_samples)
+                trim = len(srt) // 10
+                kept = srt[trim:len(srt) - trim] if trim else srt
+                avg_w = sum(kept) / len(kept)
                 slot_ts = _slot_key * 900.0
                 _consumption_model.update(slot_ts, avg_w)
                 _save_model_and_regen()
@@ -632,8 +645,34 @@ def _on_price_status(msg: str, ok: bool):
     _price_status_ok = ok
 
 
+def _learn_solar_calibration():
+    """Update the per-hour Solcast correction factors from every 30-min slot that
+    has passed since the last learning pass: stored forecast (solar_forecast
+    table, already calibrated at fetch time) vs actual PV averaged from polls.
+    Runs at startup and before each Solcast fetch is applied (3×/day)."""
+    try:
+        now_ms   = int(time.time() * 1000)
+        # Never reach back before the cursor; on first run, learn from the last 7 days.
+        from_ms  = max(_solar_cal.learned_until_ms, now_ms - 7 * 86_400_000)
+        past_fc  = store.load_solar_forecast(from_ms, now_ms)
+        if not past_fc:
+            return
+        actuals  = store.load_pv_avg_by_period_end(from_ms / 1000, now_ms / 1000)
+        used     = _solar_cal.learn(past_fc, actuals)
+        if used:
+            _solar_cal.save(_SOLAR_CAL_PATH)
+            log.info('SolarCal: learned from %d slot(s) — %s', used, _solar_cal.summary())
+    except Exception as exc:
+        log.warning('SolarCal: learning pass failed — %s', exc)
+
+
 def _on_solar_forecast(records: list[dict]):
     global _last_solar_forecast
+    # Learn from slots that have completed since the last fetch, THEN calibrate
+    # the incoming raw Solcast records with the updated per-hour factors before
+    # anything downstream (DB, controller, simulation, charts) sees them.
+    _learn_solar_calibration()
+    records = _solar_cal.apply(records)
     store.save_solar_forecast(records)
     # Push the full stored window (past 24 h preserved + new future data) so the
     # chart shows historical forecasts alongside actuals, not just the latest fetch.
@@ -734,6 +773,18 @@ async def lifespan(app: FastAPI):
     _price_worker = prices_from_env(on_prices=_on_prices, on_status=_on_price_status)
     if _price_worker:
         _price_worker.start()
+
+    # Load solar-forecast calibration and catch up on slots that completed while
+    # the server was down — must precede the Solcast worker, whose first fetch
+    # applies these factors.
+    global _solar_cal
+    if _SOLAR_CAL_PATH.exists():
+        try:
+            _solar_cal = SolarCalibration.load(_SOLAR_CAL_PATH)
+            log.info('SolarCal: loaded — %s', _solar_cal.summary())
+        except Exception as exc:
+            log.warning('SolarCal: load failed (%s) — starting uncalibrated', exc)
+    _learn_solar_calibration()
 
     # Start Solcast solar forecast worker if API key is configured
     global _solcast_worker, _last_solar_forecast
@@ -1104,6 +1155,73 @@ async def api_power_forecast(full: int = 0):
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, store.load_power_forecast, from_ms, to_ms)
     return {'forecast': data or _last_power_forecast}
+
+
+def _forecast_accuracy(days: int) -> dict:
+    """MAE/bias of the solar and consumption forecasts vs measured history over
+    the last `days` days, plus the current adaptive-correction state. Bias is
+    forecast − actual (positive = over-forecast). Blocking; run in executor."""
+    now_ms  = int(time.time() * 1000)
+    from_ms = now_ms - days * 86_400_000
+
+    # Solar: stored 30-min forecast vs actual PV (only slots where either side
+    # is meaningfully non-zero, so the night doesn't dilute the daytime error).
+    fc_rows = store.load_solar_forecast(from_ms, now_ms)
+    actuals = store.load_pv_avg_by_period_end(from_ms / 1000, now_ms / 1000)
+    solar_pairs = [
+        (r['pv_w'], actuals[r['ts_ms']])
+        for r in fc_rows
+        if r.get('pv_w') is not None and r['ts_ms'] in actuals
+        and (r['pv_w'] >= 50 or actuals[r['ts_ms']] >= 50)
+    ]
+    solar = None
+    if solar_pairs:
+        fc_sum  = sum(f for f, a in solar_pairs)
+        act_sum = sum(a for f, a in solar_pairs)
+        solar = {
+            'slots':      len(solar_pairs),
+            'mae_w':      round(sum(abs(f - a) for f, a in solar_pairs) / len(solar_pairs)),
+            'bias_w':     round((fc_sum - act_sum) / len(solar_pairs)),
+            'actual_vs_forecast': round(act_sum / fc_sum, 3) if fc_sum > 0 else None,
+        }
+
+    # Consumption: stored 15-min forecast (first prediction per slot) vs actual
+    # house_load slot averages.
+    cons_fc  = store.load_consumption_forecast(from_ms, now_ms)
+    load_act = store.load_power_avg_buckets(from_ms / 1000, now_ms / 1000)
+    cons_pairs = [
+        (r['w'], load_act[r['ts_ms']][0])
+        for r in cons_fc
+        if r.get('w') is not None and r['ts_ms'] in load_act
+        and load_act[r['ts_ms']][0] is not None
+    ]
+    consumption = None
+    if cons_pairs:
+        consumption = {
+            'slots':        len(cons_pairs),
+            'mae_w':        round(sum(abs(f - a) for f, a in cons_pairs) / len(cons_pairs)),
+            'bias_w':       round(sum(f - a for f, a in cons_pairs) / len(cons_pairs)),
+            'actual_mean_w': round(sum(a for _, a in cons_pairs) / len(cons_pairs)),
+        }
+
+    return {
+        'days':        days,
+        'solar':       solar,
+        'consumption': consumption,
+        'calibration': {
+            'solar':            _solar_cal.state(),
+            'consumption_bias_w': round(_consumption_model.bias, 1) if _consumption_model else 0.0,
+        },
+    }
+
+
+@app.get('/api/forecast/accuracy')
+async def api_forecast_accuracy(days: int = 7):
+    """How well the solar and consumption forecasts have matched reality lately,
+    and what the adaptive corrections currently are. days is clamped to 1–60."""
+    days = max(1, min(60, days))
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _forecast_accuracy, days)
 
 
 class AutoModeRequest(BaseModel):

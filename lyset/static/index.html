@@ -629,6 +629,11 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-val" id="plan-roi-main" style="font-size:20px">&#8212;</div>
         <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-roi-sub">Set system cost &amp; installation date in Settings.</div>
       </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Forecast Accuracy (7d)</div></div>
+        <div class="card-val" id="plan-acc-main" style="font-size:20px">&#8212;</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-acc-sub">Solar &amp; load forecasts vs measured — learning over time.</div>
+      </div>
     </div>
   </div>
 
@@ -2810,6 +2815,7 @@ function renderPlanChart() {
   updateSavingsCards();
   updateSavingsOverviewCards();
   updateRoiCard();
+  updateAccuracyCard();
 }
 
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
@@ -3125,6 +3131,42 @@ async function updateRoiCard() {
       `${j.recouped_pct}% recouped — est. ${fmtDKK(j.est_saved)} of ${fmtDKK(j.cost)}<br>` +
       `${rate}`;
   }
+}
+
+// Forecast-accuracy entity card: 7-day MAE/bias of the solar and consumption
+// forecasts vs measured history, plus the live adaptive-correction state.
+async function updateAccuracyCard() {
+  const mainEl = document.getElementById('plan-acc-main');
+  const subEl  = document.getElementById('plan-acc-sub');
+  if (!mainEl) return;
+  let j;
+  try {
+    const r = await fetch('/api/forecast/accuracy?days=7');
+    if (!r.ok) throw new Error('http ' + r.status);
+    j = await r.json();
+  } catch (e) { return; }
+
+  const s = j.solar, c = j.consumption;
+  if (!s && !c) {
+    mainEl.textContent = '—';
+    subEl.innerHTML = 'No overlapping forecast/measurement history yet.';
+    return;
+  }
+  const parts = [];
+  if (s) parts.push(`PV ${Math.round((s.actual_vs_forecast || 0) * 100)}%`);
+  if (c) parts.push(`load ±${c.mae_w} W`);
+  mainEl.textContent = parts.join(' · ');
+
+  const lines = [];
+  if (s) lines.push(`Solar: actual = ${Math.round(s.actual_vs_forecast * 100)}% of forecast, ` +
+                    `MAE ${s.mae_w} W over ${s.slots} slots`);
+  if (c) lines.push(`Load: MAE ${c.mae_w} W, bias ${c.bias_w > 0 ? '+' : ''}${c.bias_w} W ` +
+                    `(mean ${c.actual_mean_w} W)`);
+  const cal = j.calibration || {};
+  const nCal = cal.solar ? cal.solar.counts.reduce((a, b) => a + (b > 0 ? 1 : 0), 0) : 0;
+  lines.push(`Corrections: ${nCal}/24 solar hours calibrated, ` +
+             `load bias ${cal.consumption_bias_w > 0 ? '+' : ''}${cal.consumption_bias_w || 0} W`);
+  subEl.innerHTML = lines.join('<br>');
 }
 
 function onSolarForecast(data) {

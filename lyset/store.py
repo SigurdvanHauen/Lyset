@@ -34,10 +34,17 @@ def _get_con() -> sqlite3.Connection:
             ' spot_est REAL, resolution TEXT, forecast INTEGER)'
         )
         _con.execute(
-            # pv_w/p10_w/p90_w are Watts (converted from Solcast kW); ts_ms = period_end UTC ms
+            # pv_w/p10_w/p90_w are Watts (converted from Solcast kW); ts_ms = period_end UTC ms.
+            # raw_w is the UNCALIBRATED Solcast value; pv_w has the per-hour site
+            # calibration applied. The calibration learner needs raw_w so each
+            # observation is independent of the factor active when it was stored.
             'CREATE TABLE IF NOT EXISTS solar_forecast '
-            '(ts_ms INTEGER PRIMARY KEY, pv_w REAL, p10_w REAL, p90_w REAL)'
+            '(ts_ms INTEGER PRIMARY KEY, pv_w REAL, p10_w REAL, p90_w REAL, raw_w REAL)'
         )
+        try:  # migrate pre-calibration DBs (their pv_w was stored uncalibrated)
+            _con.execute('ALTER TABLE solar_forecast ADD COLUMN raw_w REAL')
+        except sqlite3.OperationalError:
+            pass  # column already exists
         _con.execute(
             # w = predicted grid import in Watts; ts_ms = UTC ms of 15-min slot start
             'CREATE TABLE IF NOT EXISTS consumption_forecast '
@@ -136,15 +143,15 @@ def save_solar_forecast(records: list[dict]):
     with _lock:
         con = _get_con()
         for r in records:
+            row = (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w'),
+                   r.get('raw_w', r['pv_w']))
             if r['ts_ms'] <= now_ms:
                 con.execute(
-                    'INSERT OR IGNORE INTO solar_forecast VALUES (?, ?, ?, ?)',
-                    (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w')),
+                    'INSERT OR IGNORE INTO solar_forecast VALUES (?, ?, ?, ?, ?)', row,
                 )
             else:
                 con.execute(
-                    'INSERT OR REPLACE INTO solar_forecast VALUES (?, ?, ?, ?)',
-                    (r['ts_ms'], r['pv_w'], r.get('p10_w'), r.get('p90_w')),
+                    'INSERT OR REPLACE INTO solar_forecast VALUES (?, ?, ?, ?, ?)', row,
                 )
         con.commit()
 
@@ -153,13 +160,13 @@ def load_solar_forecast(from_ms: int, to_ms: int) -> list[dict]:
     """Return stored solar forecast records in [from_ms, to_ms] (UTC milliseconds)."""
     with _lock:
         rows = _get_con().execute(
-            'SELECT ts_ms, pv_w, p10_w, p90_w FROM solar_forecast '
+            'SELECT ts_ms, pv_w, p10_w, p90_w, raw_w FROM solar_forecast '
             'WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms',
             (from_ms, to_ms),
         ).fetchall()
     return [
-        {'ts_ms': ts, 'pv_w': pv, 'p10_w': p10, 'p90_w': p90}
-        for ts, pv, p10, p90 in rows
+        {'ts_ms': ts, 'pv_w': pv, 'p10_w': p10, 'p90_w': p90, 'raw_w': raw}
+        for ts, pv, p10, p90, raw in rows
     ]
 
 
@@ -398,6 +405,30 @@ def load_power_avg_buckets(from_ts: float, to_ts: float,
             (step_s, from_ts, to_ts),
         ).fetchall()
     return {int(b) * step_s * 1000: (hl, gp) for b, hl, gp in rows}
+
+
+def load_pv_avg_by_period_end(from_ts: float, to_ts: float,
+                              min_samples: int = 30) -> dict[int, float]:
+    """Average actual PV power (pv1_power + pv2_power, W) per 30-min period,
+    keyed by period_end UTC ms to align with Solcast forecast records.
+
+    Used by the solar-forecast calibration. Buckets with fewer than min_samples
+    polls (downtime, restarts) are dropped — a half-empty bucket biases the
+    actual/forecast ratio.
+    """
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT CAST(ts / 1800 AS INTEGER) AS b, '
+            '       AVG(COALESCE(json_extract(data, "$.pv1_power"), 0) '
+            '         + COALESCE(json_extract(data, "$.pv2_power"), 0)), '
+            '       COUNT(*) '
+            'FROM polls WHERE ts >= ? AND ts < ? '
+            '  AND (json_extract(data, "$.pv1_power") IS NOT NULL '
+            '    OR json_extract(data, "$.pv2_power") IS NOT NULL) '
+            'GROUP BY b',
+            (from_ts, to_ts),
+        ).fetchall()
+    return {(int(b) + 1) * 1800 * 1000: pv for b, pv, n in rows if n >= min_samples}
 
 
 def poll_ts_range() -> tuple[float, float] | None:

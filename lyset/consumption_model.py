@@ -33,6 +33,15 @@ _DEFAULT_ALPHA = 0.10   # EWM learning rate — faster adaptation than old 0.05
 _SEED_CAP      = 30     # max effective count after seeding
 _HALF_LIFE_DAYS = 14.0  # recency decay: data 14 days old gets half the weight
 
+# Global bias corrector: EWM of (actual − served forecast) across all slots,
+# added onto every prediction. The per-slot profile self-corrects too, but only
+# at ~1 observation per slot per week — a persistent whole-model bias (measured
+# −175 W on 2026-07-02, mostly stale D06 seed washing out) takes weeks to clear
+# slot-by-slot. This corrector clears it in days while the slots converge
+# underneath it, then decays to ~0. Clamped so one wild day can't distort it.
+_BIAS_ALPHA   = 0.05    # per 15-min slot → ~62% of a step change absorbed per day
+_BIAS_CLAMP_W = 500.0
+
 # The house always draws at least this (standby/always-on loads). Predictions are
 # floored to it so slots that still hold the stale D06 net-import seed (≈0 W
 # overnight, because the battery used to cover the standby) — or slots with no data
@@ -58,6 +67,7 @@ class ConsumptionModel:
         self.profile  = np.zeros(_SLOTS_TOTAL, dtype=float)   # W per slot (EWM mean)
         self.variance = np.zeros(_SLOTS_TOTAL, dtype=float)   # EWM variance (W²)
         self.counts   = np.zeros(_SLOTS_TOTAL, dtype=float)   # effective observation count
+        self.bias     = 0.0                                   # W — EWM of (actual − forecast)
 
     # ── seeding from DB history ───────────────────────────────────────────────
 
@@ -166,6 +176,15 @@ class ConsumptionModel:
         dt_local = datetime.fromtimestamp(ts_utc, tz=_TZ)
         idx = _local_idx(dt_local)
         x   = max(0.0, watts)
+        # Bias update against the UNCORRECTED forecast for this slot (profile
+        # mean with the standby floor, before the profile absorbs x). Measuring
+        # against the raw model — not the bias-adjusted output — makes the EWM
+        # converge directly to the model's mean residual instead of integrating.
+        served = max(float(self.profile[idx]), _MIN_STANDBY_W) if self.counts[idx] >= 1 \
+            else _MIN_STANDBY_W
+        err = x - served
+        self.bias = (1 - _BIAS_ALPHA) * self.bias + _BIAS_ALPHA * err
+        self.bias = max(-_BIAS_CLAMP_W, min(_BIAS_CLAMP_W, self.bias))
         if self.counts[idx] < 1:
             self.profile[idx]  = x
             self.variance[idx] = 0.0
@@ -198,7 +217,10 @@ class ConsumptionModel:
             dt_local = datetime.fromtimestamp(ts_utc_i, tz=_TZ)
             idx      = _local_idx(dt_local)
             if self.counts[idx] > 0:
-                mean = float(self.profile[idx])
+                # Global bias corrector shifts the whole forecast; the floor
+                # still applies afterwards (the house never draws less than
+                # standby, whatever the corrector says).
+                mean = float(self.profile[idx]) + self.bias
                 w    = round(max(mean, _MIN_STANDBY_W), 1)
                 if self.counts[idx] >= 5 and self.variance[idx] > 0:
                     std  = math.sqrt(float(self.variance[idx]))
@@ -207,8 +229,8 @@ class ConsumptionModel:
                 else:
                     p10 = p90 = None
             else:
-                # No data for this slot yet — forecast the standby baseline.
-                w   = round(_MIN_STANDBY_W, 1)
+                # No data for this slot yet — standby baseline plus bias.
+                w   = round(max(_MIN_STANDBY_W + self.bias, _MIN_STANDBY_W), 1)
                 p10 = p90 = None
             out.append({'ts_ms': ts_utc_i * 1000, 'w': w, 'p10_w': p10, 'p90_w': p90})
         return out
@@ -226,6 +248,7 @@ class ConsumptionModel:
             'profile':  self.profile.tolist(),
             'variance': self.variance.tolist(),
             'counts':   self.counts.tolist(),
+            'bias':     self.bias,
         }))
 
     @classmethod
@@ -235,4 +258,5 @@ class ConsumptionModel:
         m.profile  = np.array(d['profile'],  dtype=float)
         m.variance = np.array(d.get('variance', [0.0] * _SLOTS_TOTAL), dtype=float)
         m.counts   = np.array(d['counts'],   dtype=float)
+        m.bias     = max(-_BIAS_CLAMP_W, min(_BIAS_CLAMP_W, float(d.get('bias', 0.0))))
         return m
