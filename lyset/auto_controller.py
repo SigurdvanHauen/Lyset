@@ -158,6 +158,8 @@ MIN_SOC_HOLD        = 20.0   # minimum SoC required to bother holding
 HOLD_SOLAR_REFILL_FACTOR = 1.0
 
 _EVAL_INTERVAL_S = 15
+_SC_DEBOUNCE_TICKS = 3   # ticks (45 s) the surplus/deficit sign must persist before
+                         # the default self-consumption branch switches sides
 
 # Private aliases for internal use
 _NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
@@ -213,6 +215,10 @@ class AutoController:
         self.last_action_ts:  Optional[float] = None
         self._on_command:     Optional[Callable[[str, str], None]] = None
         self._grid_charging:  bool            = False  # hysteresis state
+        self._last_soc:       Optional[float] = None   # last real SoC read (37760
+                                                       # drops out on ~10% of polls)
+        self._sc_surplus:     bool            = False  # debounced branch-5 state
+        self._sc_streak:      int             = 0      # ticks disagreeing with it
         self._applied:        dict[int, int]  = {}     # addr → last value written
         self._tick:           int             = 0
         self._solar_fc:       list[dict]      = []     # latest Solcast forecast
@@ -509,6 +515,8 @@ class AutoController:
     def disable(self, worker):
         self.enabled = False
         self._grid_charging = False
+        self._sc_surplus = False
+        self._sc_streak = 0
         self._applied.clear()
         log.info('AutoCtrl: disabled — restoring defaults')
         if worker and worker.is_alive():
@@ -568,7 +576,19 @@ class AutoController:
         # and this briefly computes a physically impossible value (seen at −4084 W).
         # Clamp to ≥0 so a glitch can never masquerade as a chargeable PV surplus.
         house_load = max(0.0, data.get('house_load') or 0)
-        batt_soc   = data.get('batt_soc')   or 50.0
+        # SoC register 37760 sits in its own read batch and drops out on ~10% of
+        # polls. A literal default here (the old `or 50.0`) fed fake data into real
+        # decisions — arbitrage discharge fired at an actual SoC of 5% and grid
+        # charge at an actual 100% (both refused by the BMS, but wrong branches).
+        # Carry the last real reading instead; before the first one, skip the tick.
+        batt_soc = data.get('batt_soc')
+        if batt_soc is None:
+            if self._last_soc is None:
+                log.info('AutoCtrl: no SoC reading yet — skipping tick')
+                return None
+            batt_soc = self._last_soc
+        else:
+            self._last_soc = batt_soc
         grid_w     = data.get('meter_active_power') or 0.0  # +import / -export
         batt_w     = data.get('batt_power') or 0.0           # +charge / -discharge
 
@@ -776,7 +796,23 @@ class AutoController:
         # user confirmed works by hand in FusionSolar. The raised discharge ceiling
         # (47077, via _ensure_power_limits) lets it cover the whole load, not a trickle.
         self._grid_charging = False
-        if surplus_w > 100 and pv_w > _MIN_PV_W:
+        # Debounced surplus/deficit selection: house_load glitches (0 W and ~5 kW in
+        # adjacent polls) flapped this branch every few ticks, rewriting 47086/47100/
+        # 47415 each time — and a single glitched tick of mode 4 during a real
+        # surplus let the firmware dump the battery to grid (observed −2500 W batt,
+        # −4080 W grid at 12:37 on 2026-07-01). Only switch sides after the new side
+        # has won _SC_DEBOUNCE_TICKS consecutive ticks; a held surplus branch is
+        # safe during a real deficit because the meter-fed charge sizing goes
+        # negative and idles the battery.
+        want_surplus = surplus_w > 100 and pv_w > _MIN_PV_W
+        if want_surplus != self._sc_surplus:
+            self._sc_streak += 1
+            if self._sc_streak >= _SC_DEBOUNCE_TICKS:
+                self._sc_surplus = want_surplus
+                self._sc_streak = 0
+        else:
+            self._sc_streak = 0
+        if self._sc_surplus:
             self._set_export_limit(worker, False, data)   # let excess PV export
             batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc, grid_w, batt_w)
             detail = (f'Self-consumption: battery {batt_detail} '
