@@ -12,11 +12,11 @@ Runs every 15 s while enabled and picks ONE action per tick, in priority order:
    good price. Mode 5 is what the user verified by hand in FusionSolar.
 
 1. NEGATIVE EXPORT (export < −0.01 DKK/kWh)
-   Force-charge the battery (47086=1, 47247, 47100=1) to soak up the PV surplus.
-   Combined with the export-limit overlay above this guarantees zero export: the
-   battery absorbs up to its max rate and mode 5 curtails the rest. The forced
-   charge is belt-and-suspenders — even if this firmware ignored 47415 the
-   battery still soaks surplus up to its max rate. Battery full → force-idle.
+   Soak the PV surplus into the battery (via _absorb_surplus) with the export cap
+   (mode 5) curtailing anything beyond the battery's rate, so nothing is sold at a
+   negative price. Below 90% SoC this is native mode 4 (instant, full-rate); near
+   full it's the forced charge (47086=1, 47247, 47100=1), which can't discharge to
+   grid. Battery full → force-idle.
 
 2. GRID CHARGE (now at/near the cheapest of the next CHARGE_HORIZON_H h, a
    materially pricier slot ahead, SoC below threshold)
@@ -37,10 +37,11 @@ Runs every 15 s while enabled and picks ONE action per tick, in priority order:
    47087=0 so the battery can only discharge.
 
 5. DEFAULT — self-consumption
-   SURPLUS (PV > load): force-charge from the surplus only — mode 4 dumps a
-   near-full battery to grid during a surplus on this firmware, so a forced charge
-   is used instead; excess PV exports (cap lifted) or is curtailed at a negative
-   price. DEFICIT (PV ≤ load): max self-consumption with zero export — mode 4
+   SURPLUS (PV > load): absorb the surplus (via _absorb_surplus) — native mode 4
+   below 90% SoC (the hardware charges from 100% of the surplus with no controller
+   lag), falling back to a forced charge only near full where mode 4 can dump a
+   near-full battery to grid; excess PV exports (cap lifted). DEFICIT (PV ≤ load):
+   max self-consumption with zero export — mode 4
    covers the load natively (no fixed setpoint) AND Active Power Control mode 5
    ("zero export limitation") so the inverter drives the battery to cover the load
    and never exports. Grid charge held OFF (47087=0) and any forced command cleared
@@ -122,6 +123,13 @@ GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresi
 GRID_CHARGE_SOC_MAX   = 80.0    # stop grid charging above this (hysteresis high)
 GRID_CHARGE_W         = 2500    # W — grid charge rate
 FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
+NATIVE_SC_SOC_MAX     = 90.0    # below this SoC, charge a PV surplus with Huawei's native
+                                # Maximum Self-Consumption (mode 4) — a sub-second hardware
+                                # loop that soaks 100% of the surplus up to the battery's
+                                # physical rate, with none of the 15 s force-charge lag or
+                                # 100 W quantisation. At/above this the firmware can dump a
+                                # near-full battery to grid during a surplus (observed ~97%),
+                                # so we fall back to the forced-charge workaround there.
 MAX_FORCE_CHARGE_W    = 5000    # W — legacy; inverter clamps to rated max
 BATT_MAX_CHARGE_W     = 2500    # W — LUNA2000-5kWh physical max charge rate (C/2)
 BATT_MAX_DISCHARGE_W  = 2500    # W — full discharge rate; asserted on 47077 so mode 4
@@ -168,6 +176,7 @@ _GRID_CHARGE_SOC_START = GRID_CHARGE_SOC_START
 _GRID_CHARGE_SOC_MAX  = GRID_CHARGE_SOC_MAX
 _GRID_CHARGE_W        = GRID_CHARGE_W
 _FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
+_NATIVE_SC_SOC_MAX    = NATIVE_SC_SOC_MAX
 _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
 _BATT_MAX_CHARGE_W    = BATT_MAX_CHARGE_W
 _BATT_MAX_DISCHARGE_W = BATT_MAX_DISCHARGE_W
@@ -434,6 +443,35 @@ class AutoController:
         reason = 'full' if batt_soc >= _FORCE_CHARGE_SOC_MAX else 'no surplus'
         return f'idle ({reason})'
 
+    def _absorb_surplus(self, worker, surplus_w: float, batt_soc: float, data: dict,
+                        zero_export: bool, grid_w=None, batt_w=None) -> str:
+        """
+        Store a PV surplus in the battery, choosing HOW based on SoC.
+
+        Below _NATIVE_SC_SOC_MAX: hand off to Huawei's native Maximum
+        Self-Consumption (mode 4). It's a sub-second hardware control loop, so it
+        charges from 100% of the instantaneous surplus up to the battery's physical
+        rate with none of the forced-charge path's 15 s deadbeat lag or 100 W
+        quantisation — this is the "free-running on the surplus" behaviour. The dump
+        bug this code originally worked around is only observed near-full (~97%), so
+        below 90% mode 4 is safe and strictly better. The forced command is cleared,
+        so the battery physically can't be commanded to discharge here either.
+
+        At/above _NATIVE_SC_SOC_MAX: fall back to the meter-fed forced charge, which
+        cannot discharge to grid — the guard against the near-full mode-4 dump.
+
+        The export-limit overlay is the caller's policy: zero_export=True curtails
+        excess PV (negative price), False lets it export (good price).
+        """
+        self._set_export_limit(worker, zero_export, data)
+        if batt_soc < _NATIVE_SC_SOC_MAX:
+            # Native mode 4 — identical register writes to the deficit path; the
+            # hardware decides charge vs. discharge from the live PV/load balance.
+            self._set_self_consumption(worker, data)
+            return (f'self-consumption (mode 4, charges from surplus up to '
+                    f'{_BATT_MAX_CHARGE_W} W)')
+        return self._charge_from_surplus(worker, surplus_w, batt_soc, grid_w, batt_w)
+
     def _set_self_consumption(self, worker, data: dict):
         """
         Put the battery in true max self-consumption: cover the house load from the
@@ -657,8 +695,10 @@ class AutoController:
         # Charge power tracks the surplus (never imports); full / no surplus → idle.
         if export_dkk < _NEGATIVE_EXPORT_DKK:
             self._grid_charging = False
-            self._set_export_limit(worker, True, data)   # cap feed-in to 0 W
-            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc, grid_w, batt_w)
+            # zero_export=True: mode 4 charges from the surplus, the export cap curtails
+            # anything beyond the battery's rate so nothing is sold at a negative price.
+            batt_detail = self._absorb_surplus(worker, surplus_w, batt_soc, data, True,
+                                               grid_w, batt_w)
             detail = (f'Negative export {export_dkk:.3f} DKK — battery {batt_detail} '
                       f'(SoC {batt_soc:.0f}%, PV {pv_w:.0f} W, load {house_load:.0f} W)')
             return _Cmd(mode='export_limited', detail=detail)
@@ -813,8 +853,9 @@ class AutoController:
         else:
             self._sc_streak = 0
         if self._sc_surplus:
-            self._set_export_limit(worker, False, data)   # let excess PV export
-            batt_detail = self._charge_from_surplus(worker, surplus_w, batt_soc, grid_w, batt_w)
+            # zero_export=False: excess PV beyond the charge rate exports at the good price.
+            batt_detail = self._absorb_surplus(worker, surplus_w, batt_soc, data, False,
+                                               grid_w, batt_w)
             detail = (f'Self-consumption: battery {batt_detail} '
                       f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
