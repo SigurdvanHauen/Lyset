@@ -1072,7 +1072,9 @@ async def api_settings_post(body: SettingsRequest):
         restarted.append('inverter')
 
     if written_set & {'STROMLIGNING_API_KEY', 'STROMLIGNING_POSTAL_CODE',
-                      'STROMLIGNING_SUPPLIER_ID', 'PRICE_EXPORT_FEE', 'PRICE_POLL_INTERVAL'}:
+                      'STROMLIGNING_SUPPLIER_ID', 'PRICE_EXPORT_FEE', 'PRICE_POLL_INTERVAL',
+                      'PRICE_TILLAEG_ORE', 'PRICE_TRANSPORT_ORE', 'PRICE_ELAFGIFT_ORE',
+                      'PRICE_VAT_PCT'}:
         _restart_price_worker()
         restarted.append('prices')
 

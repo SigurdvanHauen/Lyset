@@ -1,17 +1,26 @@
 """
 Danish electricity prices — Strømligning API (stromligning.dk).
 
-Fetches all-in electricity prices for the correct DSO tariff zone via postal
-code lookup. Returns 15-minute resolution for current/historical data and
-1-hour resolution for forecasts. Import price includes spot, network tariffs,
-electricity tax, and VAT. Export payout = bare Nord Pool spot (electricity.value,
-which is already the raw spot — not tax-inclusive) minus small feed-in/balance
-tariffs — matching Vindstød's surplus settlement, where elafgift and VAT do NOT apply.
+Fetches the bare Nord Pool spot price for the correct DSO tariff zone via postal
+code lookup (15-minute resolution for current/historical data, 1-hour for
+forecasts) and builds the IMPORT price from the user's own contract fees rather
+than Strømligning's generic all-in figure:
+
+    import = (spot + tillæg + transportbetaling + elafgift) × (1 + VAT)
+
+Every fee is editable in Settings → Electricity prices so it can be kept in sync
+with the provider. Export payout = bare spot (electricity.value, already the raw
+spot — not tax-inclusive) minus small feed-in/balance tariffs — matching Vindstød's
+surplus settlement, where elafgift and VAT do NOT apply.
 
 Environment variables:
   STROMLIGNING_API_KEY       — API key, Bearer scheme (required)
   STROMLIGNING_POSTAL_CODE   — Danish postal code for DSO auto-lookup (default: 5500)
   STROMLIGNING_SUPPLIER_ID   — Override DSO lookup with a known supplier ID
+  PRICE_TILLAEG_ORE          — Supplier markup on spot, øre/kWh (default: 10.00)
+  PRICE_TRANSPORT_ORE        — Net transport tariff, øre/kWh (default: 28.93)
+  PRICE_ELAFGIFT_ORE         — Electricity tax, øre/kWh excl. VAT (default: 1.00)
+  PRICE_VAT_PCT              — VAT applied to spot + fees, % (default: 25)
   PRICE_EXPORT_FEE           — DKK/kWh feed-in/balance tariffs deducted from export (default: 0.033375)
   PRICE_POLL_INTERVAL        — Seconds between refreshes (default: 1800)
 """
@@ -118,6 +127,16 @@ def _parse_records(records: list[dict]) -> list[dict]:
     # 0.00625 + balance 0.006625 + netselskab indfødning 0.0105 + Vindstød balance
     # 0.01 ≈ 0.033375. Netselskab indfødningstarif varies by net area.
     export_fee = _env_float('PRICE_EXPORT_FEE', 0.033375)
+    # IMPORT price is built from the user's own contract fees (Settings → Electricity
+    # prices), not Strømligning's generic price.total — the provider's actual
+    # per-kWh line items are added to the bare spot and VAT applied to the whole
+    # thing. Fees are entered in øre/kWh (matching the bill) → convert to DKK.
+    import_add_dkk = (
+        _env_float('PRICE_TILLAEG_ORE',   10.00)   # supplier markup on spot
+        + _env_float('PRICE_TRANSPORT_ORE', 28.93)  # net transport tariff
+        + _env_float('PRICE_ELAFGIFT_ORE',   1.00)  # electricity tax (excl. VAT)
+    ) / 100.0
+    vat_mult = 1.0 + _env_float('PRICE_VAT_PCT', 25.0) / 100.0
     out = []
     for rec in records:
         date_str = rec.get('date', '')
@@ -128,14 +147,15 @@ def _parse_records(records: list[dict]) -> list[dict]:
         if ts_ms is None:
             continue
 
-        price = rec.get('price', {})
         elec  = rec.get('details', {}).get('electricity', {})
-
-        import_price = price.get('total')            # DKK/kWh incl. VAT (all-in)
-        spot_price   = elec.get('value')             # bare Nord Pool spot, excl. VAT
-
-        if import_price is None or spot_price is None:
+        spot_price = elec.get('value')               # bare Nord Pool spot, excl. VAT
+        if spot_price is None:
             continue
+
+        # Real import price the user pays: (spot + supplier markup + transport tariff
+        # + elafgift) × VAT. Everything is per-kWh; spot can be negative but the fixed
+        # fees usually keep the all-in import positive.
+        import_price = (spot_price + import_add_dkk) * vat_mult
 
         # Export payout (what Vindstød actually pays): the bare spot minus the small
         # feed-in/balance tariffs. Elafgift and VAT are NOT part of export settlement
