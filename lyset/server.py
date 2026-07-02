@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import statistics
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -1308,7 +1309,6 @@ async def api_download_db():
     solar/consumption/power forecasts, daily_solar, auto_commands). The snapshot
     is taken via SQLite's online backup so it's safe while polling continues.
     Open it with any SQLite tool — handy for offline sanity checks."""
-    import tempfile
     ts  = datetime.now(_TZ_LOCAL).strftime('%Y%m%d-%H%M%S')
     tmp = Path(tempfile.gettempdir()) / f'lyset_history_{ts}.db'
     loop = asyncio.get_running_loop()
