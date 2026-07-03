@@ -192,6 +192,10 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 .card-sub  { font-size: 10px; color: var(--muted); margin-top: 4px; min-height: 13px; }
 .unit      { font-size: 12px; color: var(--muted); margin-left: 2px; }
 
+/* Side-by-side section columns (Energy Today | EV) */
+.split-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; align-items: start; margin-top: 18px; }
+.split-cols .sec { margin-top: 0; }
+
 /* ── Dashboard inline charts ── */
 #dash-charts {
   display: grid;
@@ -386,6 +390,10 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   /* Cards grid: two-column minimum so they don't get too tall */
   .cards { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+
+  /* Section columns stack on narrow screens */
+  .split-cols { grid-template-columns: 1fr; }
+  .split-cols > div + div .sec { margin-top: 18px; }
   .card  { padding: 10px 12px; }
   .card-val { font-size: 19px; }
 
@@ -474,15 +482,44 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
-    <div class="sec">Energy Today</div>
-    <div class="cards">
-      <div class="card pv clickable" onclick="openDailyYieldModal()">
-        <div class="card-top"><div class="card-lbl">Produced</div></div>
-        <div class="card-val" id="d-daily-yield">&#8212;<span class="unit">kWh</span></div>
+    <div class="split-cols">
+      <div>
+        <div class="sec">Energy Today</div>
+        <div class="cards">
+          <div class="card pv clickable" onclick="openDailyYieldModal()">
+            <div class="card-top"><div class="card-lbl">Produced</div></div>
+            <div class="card-val" id="d-daily-yield">&#8212;<span class="unit">kWh</span></div>
+          </div>
+          <div class="card pv clickable" onclick="openDailyYieldModal()">
+            <div class="card-top"><div class="card-lbl">Expected (Solcast)</div></div>
+            <div class="card-val" id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></div>
+          </div>
+        </div>
       </div>
-      <div class="card pv clickable" onclick="openDailyYieldModal()">
-        <div class="card-top"><div class="card-lbl">Expected (Solcast)</div></div>
-        <div class="card-val" id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></div>
+      <div>
+        <div class="sec">EV</div>
+        <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">
+          <div class="card acc">
+            <div class="card-top"><div class="card-lbl">Charged Today</div></div>
+            <div class="card-val" id="d-ev-day">&#8212;<span class="unit">kWh</span></div>
+          </div>
+          <div class="card acc">
+            <div class="card-top"><div class="card-lbl">This Week</div></div>
+            <div class="card-val" id="d-ev-week">&#8212;<span class="unit">kWh</span></div>
+          </div>
+          <div class="card acc">
+            <div class="card-top"><div class="card-lbl">This Month</div></div>
+            <div class="card-val" id="d-ev-month">&#8212;<span class="unit">kWh</span></div>
+          </div>
+          <div class="card acc">
+            <div class="card-top"><div class="card-lbl">This Year</div></div>
+            <div class="card-val" id="d-ev-year">&#8212;<span class="unit">kWh</span></div>
+          </div>
+          <div class="card acc">
+            <div class="card-top"><div class="card-lbl">Lifetime</div></div>
+            <div class="card-val" id="d-ev-life">&#8212;<span class="unit">kWh</span></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1034,6 +1071,26 @@ function onEvChargerData(payload) {
   _renderEvChargerCurrent(payload, null);   // "today" needs a DB round-trip for the day min/max
   loadEvChargerState();                     // refresh with the derived today figure
   loadEvChargerDaily();                     // refresh today's bar on the chart
+  loadEvSummary();                          // refresh the Dashboard EV cards
+}
+
+// Dashboard "EV" cards: charged kWh today / this week / month / year + lifetime.
+async function loadEvSummary() {
+  let j;
+  try {
+    const r = await fetch('/api/ev/charger/summary');
+    if (!r.ok) return;
+    j = await r.json();
+  } catch (e) { return; }
+  const put = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = (v != null ? v.toFixed(2) : '&#8212;') + '<span class="unit">kWh</span>';
+  };
+  put('d-ev-day',   j.day);
+  put('d-ev-week',  j.week);
+  put('d-ev-month', j.month);
+  put('d-ev-year',  j.year);
+  put('d-ev-life',  j.lifetime);
 }
 
 async function loadEvChargerDaily() {
@@ -3826,6 +3883,7 @@ document.addEventListener('keydown', e => {
   }
 });
 connectWS();
+loadEvSummary();
 setInterval(updateMeta, 1000);
 setInterval(() => { if (_priceLineChart) _priceLineChart.draw(); }, 60000);
 

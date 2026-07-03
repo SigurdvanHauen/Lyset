@@ -1403,6 +1403,14 @@ async def api_ev_charger_daily(days: int = 30):
     return {'daily': data}
 
 
+@app.get('/api/ev/charger/summary')
+async def api_ev_charger_summary():
+    """kWh charged today / this week / this month / this year + the lifetime
+    counter, for the Dashboard's EV cards. Calendar periods, local time."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, store.load_ev_energy_summary)
+
+
 @app.get('/api/prices')
 async def api_prices():
     now_ms = int(time.time() * 1000)

@@ -301,17 +301,17 @@ def load_ev_charger_history(from_ts: float, to_ts: float) -> list[dict]:
     ]
 
 
-def load_ev_daily_energy(days: int = 30) -> list[dict]:
-    """Daily EV-charged energy for the last `days` local dates, oldest first.
+def _ev_day_deltas() -> tuple[dict[str, float], float | None]:
+    """Per-local-day EV-charged kWh plus the latest lifetime-counter reading.
 
-    Derived from the lifetime counter: each day's figure is the delta between
-    that day's LAST reading and the previous day-with-data's last reading, so
-    the series sums exactly to the counter's growth — energy charged across
-    midnight or during a cloud-poll outage lands on the first day after the
-    gap instead of being lost (the day-min/max approach would drop it).
-    Days without any poll yield None (unknown), never a fake 0. The first
-    day ever recorded uses its own first poll as the opening baseline so
-    day-one charging still shows.
+    Each day's figure is the delta between that day's LAST reading and the
+    previous day-with-data's last reading, so the series sums exactly to the
+    counter's growth — energy charged across midnight or during a cloud-poll
+    outage lands on the first day after the gap instead of being lost (the
+    day-min/max approach would drop it). Days without any poll are absent
+    from the dict (unknown), never a fake 0. The first day ever recorded
+    uses its own first poll as the opening baseline so day-one charging
+    still shows.
     """
     with _lock:
         con = _get_con()
@@ -334,12 +334,46 @@ def load_ev_daily_energy(days: int = 30) -> list[dict]:
             # huge negative bar.
             deltas[d] = max(0.0, round(kwh - prev, 3))
         prev = kwh
+    return deltas, prev  # prev has ended up as the newest counter reading
+
+
+def load_ev_daily_energy(days: int = 30) -> list[dict]:
+    """Daily EV-charged energy for the last `days` local dates, oldest first.
+
+    Derived from the lifetime counter via _ev_day_deltas(); days without any
+    poll yield None (unknown), never a fake 0.
+    """
+    deltas, _ = _ev_day_deltas()
     start = date.today() - timedelta(days=days - 1)
     return [
         {'date': (start + timedelta(days=i)).isoformat(),
          'kwh': deltas.get((start + timedelta(days=i)).isoformat())}
         for i in range(days)
     ]
+
+
+def load_ev_energy_summary() -> dict:
+    """EV-charged kWh for calendar periods (local time, week starts Monday):
+    today, this week, this month, this year, plus the lifetime counter itself.
+
+    Period sums add up the known day deltas inside the period; 'day' is None
+    when today has no poll yet (unknown, not 0). 'lifetime' is None until the
+    first successful poll ever.
+    """
+    deltas, lifetime = _ev_day_deltas()
+    today = date.today()
+
+    def _since(start: date) -> float:
+        s = start.isoformat()
+        return round(sum(v for d, v in deltas.items() if d >= s), 3)
+
+    return {
+        'day':      deltas.get(today.isoformat()),
+        'week':     _since(today - timedelta(days=today.weekday())),
+        'month':    _since(today.replace(day=1)),
+        'year':     _since(today.replace(month=1, day=1)),
+        'lifetime': lifetime,
+    }
 
 
 def save_auto_command(ts: float, mode: str, detail: str):
