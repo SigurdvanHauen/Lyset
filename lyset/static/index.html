@@ -486,95 +486,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
-  </div>
-
-  <!-- Plan (auto-mode behaviour: actuals + AI plan) -->
-  <div id="panel-plan" class="panel">
-    <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
-        <div id="plan-buttons" style="display:flex;gap:8px;flex-shrink:0">
-          <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
-          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
-          <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
-          <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
-        </div>
-      </div>
-      <div id="plan-chart-wrap" style="position:relative;height:420px">
-        <canvas id="plan-chart"></canvas>
-        <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
-      </div>
-      <div id="plan-footer-text" style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
-        Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
-        Plan combines Solcast solar, the learned consumption model, electricity prices and the
-        auto-mode controller's decision logic. Battery SOC is on the right axis.
-        Click any legend item to show/hide that line.
-      </div>
-    </div>
-
-    <div class="sec" style="margin-top:18px">Savings Today</div>
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
-      <div class="card acc clickable" onclick="openSavingsChart()">
-        <div class="card-top"><div class="card-lbl">Saved So Far</div></div>
-        <div class="card-val" id="plan-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">vs. buying all power from grid &middot; click for chart</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Forecast Today</div></div>
-        <div class="card-val" id="plan-saved-fc">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">predicted end-of-day total</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Would've Paid</div></div>
-        <div class="card-val" id="plan-would-pay">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">all household load at import price</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Net Grid Cost</div></div>
-        <div class="card-val" id="plan-did-pay">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">import cost &minus; export earnings</div>
-      </div>
-    </div>
-
-    <div class="sec" style="margin-top:18px">Savings Overview</div>
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
-      <div class="card acc clickable" onclick="openSavingsBars('week', 'Savings this week — per day')">
-        <div class="card-top"><div class="card-lbl">This Week</div></div>
-        <div class="card-val" id="plan-week-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar week so far &middot; click: daily bars</div>
-      </div>
-      <div class="card acc clickable" onclick="openSavingsBars('month', 'Savings this month — per week')">
-        <div class="card-top"><div class="card-lbl">This Month</div></div>
-        <div class="card-val" id="plan-month-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar month so far &middot; click: weekly bars</div>
-      </div>
-      <div class="card acc clickable" onclick="openSavingsBars('year', 'Savings this year — per month')">
-        <div class="card-top"><div class="card-lbl">This Year</div></div>
-        <div class="card-val" id="plan-year-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar year so far &middot; click: monthly bars</div>
-      </div>
-    </div>
-
-    <div class="sec" style="margin-top:18px">Payback</div>
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">PV System Payback</div></div>
-        <div class="card-val" id="plan-roi-main" style="font-size:20px">&#8212;</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-roi-sub">Set system cost &amp; installation date in Settings.</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Forecast Accuracy (7d)</div></div>
-        <div class="card-val" id="plan-acc-main" style="font-size:20px">&#8212;</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-acc-sub">Solar &amp; load forecasts vs measured — learning over time.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Prices -->
-  <div id="panel-prices" class="panel">
-
-    <!-- Current hour cards -->
-    <div class="sec">Current Hour</div>
+    <div class="sec">Prices — Current Hour</div>
     <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">
       <div class="card acc">
         <div class="card-top"><div class="card-lbl">Import Price</div></div>
@@ -603,8 +515,87 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       </div>
     </div>
 
+    <div class="sec">Economics</div>
+    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
+      <div class="card acc clickable" onclick="openSavingsChart()">
+        <div class="card-top"><div class="card-lbl">Saved So Far</div></div>
+        <div class="card-val" id="plan-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">vs. buying all power from grid &middot; click for chart</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Forecast Today</div></div>
+        <div class="card-val" id="plan-saved-fc">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">predicted end-of-day total</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Would've Paid</div></div>
+        <div class="card-val" id="plan-would-pay">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">all household load at import price</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Net Grid Cost</div></div>
+        <div class="card-val" id="plan-did-pay">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">import cost &minus; export earnings</div>
+      </div>
+      <div class="card acc clickable" onclick="openSavingsBars('week', 'Savings this week — per day')">
+        <div class="card-top"><div class="card-lbl">This Week</div></div>
+        <div class="card-val" id="plan-week-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar week so far &middot; click: daily bars</div>
+      </div>
+      <div class="card acc clickable" onclick="openSavingsBars('month', 'Savings this month — per week')">
+        <div class="card-top"><div class="card-lbl">This Month</div></div>
+        <div class="card-val" id="plan-month-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar month so far &middot; click: weekly bars</div>
+      </div>
+      <div class="card acc clickable" onclick="openSavingsBars('year', 'Savings this year — per month')">
+        <div class="card-top"><div class="card-lbl">This Year</div></div>
+        <div class="card-val" id="plan-year-saved">&#8212;<span class="unit">DKK</span></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar year so far &middot; click: monthly bars</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">PV System Payback</div></div>
+        <div class="card-val" id="plan-roi-main" style="font-size:20px">&#8212;</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-roi-sub">Set system cost &amp; installation date in Settings.</div>
+      </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">Forecast Accuracy (7d)</div></div>
+        <div class="card-val" id="plan-acc-main" style="font-size:20px">&#8212;</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-acc-sub">Solar &amp; load forecasts vs measured — learning over time.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Plan (auto-mode behaviour: actuals + AI plan) -->
+  <div id="panel-plan" class="panel">
+    <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+      <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
+        <div id="plan-buttons" style="display:flex;gap:8px;flex-shrink:0">
+          <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
+          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
+          <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
+          <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
+        </div>
+      </div>
+      <div id="plan-chart-wrap" style="position:relative;height:560px">
+        <canvas id="plan-chart"></canvas>
+        <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
+      </div>
+      <div id="plan-footer-text" style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
+        Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
+        Plan combines Solcast solar, the learned consumption model, electricity prices and the
+        auto-mode controller's decision logic. Battery SOC is on the right axis.
+        Click any legend item to show/hide that line.
+      </div>
+    </div>
+  </div>
+
+  <!-- Prices -->
+  <div id="panel-prices" class="panel">
+
     <!-- Price forecast chart -->
-    <div class="sec" style="margin-top:16px">
+    <div class="sec">
       Price Forecast
       <span id="pr-status" style="float:right;font-size:10px;color:var(--muted);text-transform:none;font-weight:normal;letter-spacing:0"></span>
     </div>
