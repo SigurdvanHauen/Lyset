@@ -84,11 +84,12 @@ REGISTERS: list[Register] = [
     Register(37118,  1, 'U16',  100,  'Hz',  'Meter frequency',          'Meter',   'meter_frequency'),
 
     # ── Battery control state (written by auto-controller; polled to reflect live state) ──
-    # 47086: 1=forced charge/discharge, 4=max self-consumption
+    # 47086: StorageWorkingModesC — 1=fixed/forced charge-discharge, 2=max
+    # self-consumption, 4=FULLY FED TO GRID (never write 4; see BATTERY_WORKING_MODES)
     # 47087: 0=grid charge disabled, 1=grid charge enabled
     # 47100: 0=none, 1=force-charge, 2=force-discharge
     # 47075/47077 (U32, W): max charge / max discharge power. These are GLOBAL limits
-    # that cap the battery in EVERY mode incl. mode 4 — a low max-discharge-power pins
+    # that cap the battery in EVERY mode incl. self-consumption — a low max-discharge-power pins
     # self-consumption discharge (e.g. -400 W while the deficit is 600 W). Polled so the
     # controller can read them back and re-assert the full rate. (47098 = forced power is
     # NOT accessible — Illegal Data Address.) Forcible setpoints are split by direction:
@@ -162,14 +163,18 @@ BATTERY_STATUSES: dict[int, str] = {
     4: 'Sleep mode',
 }
 
+# Values of register 47086 (storage working mode SETTINGS) — StorageWorkingModesC
+# in wlcrs/huawei-solar-lib. NOT the enum of the read-only status register 37006
+# (StorageWorkingModesB), where 4 = self-consumption. Using the B labels here hid
+# a serious bug: writing 4 to 47086 put the inverter in FULLY FED TO GRID, which
+# dumps the battery to grid at max rate (any SoC) whenever the export cap is lifted.
 BATTERY_WORKING_MODES: dict[int, str] = {
-    0: 'None',
-    1: 'Forced charge/discharge',
-    2: 'Time-of-use (LG)',
-    3: 'Fixed charge/discharge',
-    4: 'Maximise self-consumption',
-    5: 'Fully fed to grid',
-    6: 'Time-of-use (LG, Pro)',
+    0: 'Adaptive',
+    1: 'Fixed charge/discharge',
+    2: 'Maximise self-consumption',
+    3: 'Time-of-use (LG)',
+    4: 'Fully fed to grid',
+    5: 'Time-of-use (LUNA2000)',
 }
 
 BATT_FORCED_MODES: dict[int, str] = {

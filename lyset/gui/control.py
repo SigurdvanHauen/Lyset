@@ -47,13 +47,15 @@ C = {
     'danger':  '#F87171',
 }
 
+# Register 47086 values — StorageWorkingModesC (wlcrs/huawei-solar-lib). The old
+# map here was wrong; 4 is FULLY FED TO GRID, which dumps the battery to grid.
 WORKING_MODES = {
-    0: 'Maximise self-consumption',
-    1: 'Fully fed to grid',
-    2: 'Time-of-use (TOU)',
-    3: 'Time-of-use (TOU) Pro',
-    4: 'Fixed charge/discharge',
-    5: 'Forced charge/discharge',
+    0: 'Adaptive',
+    1: 'Fixed charge/discharge',
+    2: 'Maximise self-consumption',
+    3: 'Time-of-use (LG)',
+    4: 'Fully fed to grid',
+    5: 'Time-of-use (LUNA2000)',
 }
 
 ACTIVE_POWER_MODES = {
