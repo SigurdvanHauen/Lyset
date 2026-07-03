@@ -59,7 +59,8 @@ class SolarCalibration:
 
     # ── learning ──────────────────────────────────────────────────────────────
 
-    def learn(self, forecast_rows: list[dict], actual_by_ts: dict[int, float]) -> int:
+    def learn(self, forecast_rows: list[dict], actual_by_ts: dict[int, float],
+              skip_ts: set[int] | None = None) -> int:
         """
         Consume past (raw forecast, actual PV) pairs newer than the cursor.
 
@@ -67,8 +68,12 @@ class SolarCalibration:
         solar_forecast table (period_end UTC ms). raw_w is the uncalibrated
         forecast; rows from before the column existed fall back to pv_w.
         actual_by_ts:  {period_end_ms: avg actual PV W} from poll history.
+        skip_ts: period_end_ms of slots to advance the cursor past WITHOUT
+        learning — used to drop curtailed slots (zero-export windows), where the
+        measured PV was clipped to load + battery and would bias the factor down.
         Returns the number of slots consumed.
         """
+        skip = skip_ts or set()
         used = 0
         max_seen = self.learned_until_ms
         for r in sorted(forecast_rows, key=lambda x: x['ts_ms']):
@@ -77,6 +82,11 @@ class SolarCalibration:
             if fc is None:
                 fc = r.get('pv_w')
             if ts <= self.learned_until_ms or fc is None or fc < MIN_LEARN_W:
+                continue
+            if ts in skip:
+                # Curtailed slot: skip learning but still advance the cursor so
+                # it isn't reconsidered — the clipped PV is not the sun's fault.
+                max_seen = max(max_seen, ts)
                 continue
             act = actual_by_ts.get(ts)
             if act is None:

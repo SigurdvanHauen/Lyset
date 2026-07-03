@@ -672,10 +672,35 @@ def _on_price_status(msg: str, ok: bool):
     _price_status_ok = ok
 
 
+def _curtailed_slot_ts(forecast_rows: list[dict], from_ms: int, to_ms: int) -> set[int]:
+    """period_end_ms of 30-min forecast slots whose export price was negative.
+
+    The auto-controller runs zero-export (mode 5) whenever export <
+    NEGATIVE_EXPORT_DKK, clipping PV to house load + battery charge. The measured
+    PV in those slots understates the sun, so they must not train the calibration.
+    A slot's price is the hourly record covering its midpoint (period_end − 15 min);
+    bisect makes it robust to any price resolution. Reach one hour before from_ms
+    so the first slot still finds its covering price."""
+    prices = store.load_prices(from_ms - 3_600_000, to_ms)
+    if not prices:
+        return set()
+    prices.sort(key=lambda p: p['ts'])
+    ptimes = [p['ts'] for p in prices]
+    skip: set[int] = set()
+    for r in forecast_rows:
+        ts = r['ts_ms']
+        i = bisect.bisect_right(ptimes, ts - 900_000) - 1   # price covering the slot midpoint
+        if i >= 0 and prices[i]['export'] < NEGATIVE_EXPORT_DKK:
+            skip.add(ts)
+    return skip
+
+
 def _learn_solar_calibration():
     """Update the per-hour Solcast correction factors from every 30-min slot that
     has passed since the last learning pass: stored forecast (solar_forecast
     table, already calibrated at fetch time) vs actual PV averaged from polls.
+    Slots that fell in a negative-export (curtailment) window are skipped — the
+    inverter clipped PV there, so their low 'actual' is not a forecast miss.
     Runs at startup and before each Solcast fetch is applied (3×/day)."""
     try:
         now_ms   = int(time.time() * 1000)
@@ -685,10 +710,12 @@ def _learn_solar_calibration():
         if not past_fc:
             return
         actuals  = store.load_pv_avg_by_period_end(from_ms / 1000, now_ms / 1000)
-        used     = _solar_cal.learn(past_fc, actuals)
+        curtailed = _curtailed_slot_ts(past_fc, from_ms, now_ms)
+        used     = _solar_cal.learn(past_fc, actuals, skip_ts=curtailed)
         if used:
             _solar_cal.save(_SOLAR_CAL_PATH)
-            log.info('SolarCal: learned from %d slot(s) — %s', used, _solar_cal.summary())
+            log.info('SolarCal: learned from %d slot(s), skipped %d curtailed — %s',
+                     used, len(curtailed), _solar_cal.summary())
     except Exception as exc:
         log.warning('SolarCal: learning pass failed — %s', exc)
 
