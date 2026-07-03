@@ -438,6 +438,13 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Dashboard -->
   <div id="panel-dashboard" class="panel active">
+    <div id="auto-status-bar" class="clickable" onclick="openAutoChart()" title="Auto mode — click for command history chart"
+         style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:12px;cursor:pointer">
+      <span style="font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap">Auto Mode</span>
+      <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
+      <div id="d-auto-action" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No commands yet</div>
+    </div>
+
     <div class="sec">Trends (24 h)</div>
     <div id="dash-charts"></div>
 
@@ -457,6 +464,10 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-val" id="d-batt">&#8212;<span class="unit">W</span></div>
         <div class="card-sub" id="d-batt-sub"></div>
       </div>
+      <div class="card batt clickable" onclick="openChart('batt_soc','Battery SOC','%','#34D399')">
+        <div class="card-top"><div class="card-lbl">Battery SOC</div><div class="card-times" id="t-d-soc"></div></div>
+        <div class="card-val" id="d-soc">&#8212;<span class="unit">%</span></div>
+      </div>
       <div class="card load clickable" onclick="openChart('house_load','House Load','W','#F87171')">
         <div class="card-top"><div class="card-lbl">House Load</div><div class="card-times" id="t-d-load"></div></div>
         <div class="card-val" id="d-load">&#8212;<span class="unit">W</span></div>
@@ -472,85 +483,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <div class="card pv clickable" onclick="openDailyYieldModal()">
         <div class="card-top"><div class="card-lbl">Expected (Solcast)</div></div>
         <div class="card-val" id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></div>
-      </div>
-    </div>
-
-    <div class="sec">Battery</div>
-    <div class="cards">
-      <div class="card batt clickable" onclick="openChart('batt_soc','Battery SOC','%','#34D399')">
-        <div class="card-top"><div class="card-lbl">SOC</div><div class="card-times" id="t-d-soc"></div></div>
-        <div class="card-val" id="d-soc">&#8212;<span class="unit">%</span></div>
-      </div>
-      <div class="card acc clickable"  onclick="openChart('batt_temperature','Batt Temperature','°C','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Temperature</div><div class="card-times" id="t-d-btemp"></div></div>
-        <div class="card-val" id="d-btemp">&#8212;<span class="unit">&#176;C</span></div>
-      </div>
-      <div class="card acc clickable"  onclick="openChart('batt_bus_voltage','Batt Bus Voltage','V','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Bus Voltage</div><div class="card-times" id="t-d-bvolt"></div></div>
-        <div class="card-val" id="d-bvolt">&#8212;<span class="unit">V</span></div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Working Mode</div><div class="card-times" id="t-d-bmode"></div></div>
-        <div class="card-val" style="font-size:13px" id="d-bmode">&#8212;</div>
-      </div>
-    </div>
-
-    <div class="sec">PV Strings</div>
-    <div class="cards">
-      <div class="card pv clickable" onclick="openChart('pv1_voltage','PV1 Voltage','V','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV1 Voltage</div><div class="card-times" id="t-d-pv1v"></div></div>
-        <div class="card-val" id="d-pv1v">&#8212;<span class="unit">V</span></div>
-      </div>
-      <div class="card pv clickable" onclick="openChart('pv1_current','PV1 Current','A','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV1 Current</div><div class="card-times" id="t-d-pv1a"></div></div>
-        <div class="card-val" id="d-pv1a">&#8212;<span class="unit">A</span></div>
-      </div>
-      <div class="card pv clickable" onclick="openChart('pv1_power','PV1 Power','W','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV1 Power</div><div class="card-times" id="t-d-pv1w"></div></div>
-        <div class="card-val" id="d-pv1w">&#8212;<span class="unit">W</span></div>
-      </div>
-      <div class="card pv clickable" onclick="openChart('pv2_voltage','PV2 Voltage','V','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV2 Voltage</div><div class="card-times" id="t-d-pv2v"></div></div>
-        <div class="card-val" id="d-pv2v">&#8212;<span class="unit">V</span></div>
-      </div>
-      <div class="card pv clickable" onclick="openChart('pv2_current','PV2 Current','A','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV2 Current</div><div class="card-times" id="t-d-pv2a"></div></div>
-        <div class="card-val" id="d-pv2a">&#8212;<span class="unit">A</span></div>
-      </div>
-      <div class="card pv clickable" onclick="openChart('pv2_power','PV2 Power','W','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV2 Power</div><div class="card-times" id="t-d-pv2w"></div></div>
-        <div class="card-val" id="d-pv2w">&#8212;<span class="unit">W</span></div>
-      </div>
-    </div>
-
-    <div class="sec">Grid</div>
-    <div class="cards">
-      <div class="card grid clickable" onclick="openChart('meter_frequency','Grid Frequency','Hz','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Frequency</div><div class="card-times" id="t-d-freq"></div></div>
-        <div class="card-val" id="d-freq">&#8212;<span class="unit">Hz</span></div>
-      </div>
-      <div class="card grid clickable" onclick="openChart('grid_voltage_a','Grid Voltage L1','V','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Voltage L1</div><div class="card-times" id="t-d-va"></div></div>
-        <div class="card-val" id="d-va">&#8212;<span class="unit">V</span></div>
-      </div>
-      <div class="card grid clickable" onclick="openChart('power_factor','Power Factor','','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Power Factor</div><div class="card-times" id="t-d-pf"></div></div>
-        <div class="card-val" id="d-pf">&#8212;</div>
-      </div>
-      <div class="card acc clickable"  onclick="openChart('internal_temp','Internal Temp','°C','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Internal Temp</div><div class="card-times" id="t-d-itemp"></div></div>
-        <div class="card-val" id="d-itemp">&#8212;<span class="unit">&#176;C</span></div>
-      </div>
-      <div class="card acc clickable" onclick="openStateChart()">
-        <div class="card-top"><div class="card-lbl">System State</div><div class="card-times" id="t-d-istate"></div></div>
-        <div class="card-val" style="font-size:12px" id="d-istate">&#8212;</div>
-      </div>
-      <div class="card acc clickable" onclick="openAutoChart()">
-        <div class="card-top">
-          <div class="card-lbl">Auto Mode</div>
-          <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
-        </div>
-        <div id="d-auto-action" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5;word-break:break-word">No commands yet</div>
       </div>
     </div>
 
@@ -1267,22 +1199,6 @@ function onData(d) {
 
   setCard('d-soc',   d.batt_soc,         1);
   setCard('plan-soc', d.batt_soc,        1);
-  setCard('d-btemp', d.batt_temperature, 1);
-  setCard('d-bvolt', d.batt_bus_voltage, 1);
-  setText('d-bmode',   d.batt_working_mode_label);
-
-  setCard('d-pv1v', d.pv1_voltage, 1);
-  setCard('d-pv1a', d.pv1_current, 2);
-  setCard('d-pv1w', d.pv1_power,   0);
-  setCard('d-pv2v', d.pv2_voltage, 1);
-  setCard('d-pv2a', d.pv2_current, 2);
-  setCard('d-pv2w', d.pv2_power,   0);
-
-  setCard('d-freq',  d.meter_frequency, 2);
-  setCard('d-va',    d.grid_voltage_a, 1);
-  setCard('d-pf',    d.power_factor,   3);
-  setCard('d-itemp', d.internal_temp,  1);
-  setText('d-istate', COMPUTED_STATES[d._cstate_idx]?.label ?? '—');
 
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
