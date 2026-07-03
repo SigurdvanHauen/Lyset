@@ -2449,14 +2449,18 @@ function _solcastPvKwAt(t) {
 // Future solar (kW). Anchored at `now` with the interpolated in-progress-slot value
 // so the dashed future line joins the dashed past-forecast (which ends at the same
 // value) instead of stepping up to the next 30-min slot boundary.
-function _planFutSolarKW() {
+// curtailed=false returns the raw Solcast potential (what PV *could* make) —
+// used for the "Solar potential" line shown alongside the P10/P90 band, so the
+// band has its median when zero-export capping bends the planned line away from it.
+function _planFutSolarKW(curtailed = true) {
   const now = Date.now();
   const out = [];
+  const cap = curtailed ? _curtailSolarKw : (kw) => kw;
   const anchorKw = _solcastPvKwAt(now);
-  if (anchorKw != null) out.push({ x: now, y: _curtailSolarKw(anchorKw, now) });
+  if (anchorKw != null) out.push({ x: now, y: cap(anchorKw, now) });
   for (const r of _solcastData) {
     if (r.ts_ms <= now || r.pv_w == null) continue;
-    out.push({ x: r.ts_ms, y: _curtailSolarKw(r.pv_w / 1000, r.ts_ms) });
+    out.push({ x: r.ts_ms, y: cap(r.pv_w / 1000, r.ts_ms) });
   }
   return out;
 }
@@ -2465,10 +2469,11 @@ function _planFutSolarKW() {
 // raw predicted potential straight from Solcast — distinct from the `solar` line,
 // whose future part is the curtailed *planned* generation. Future periods only,
 // so it lines up with the dashed "plan" region.
-// P10/P90 solar confidence band (kW), future slots only. No mean line — the
-// existing "Solar" trace already is the median. No smoothing: Solcast is already
-// coarse (30-min slots); the history smoother's ±30-point window assumes 10-s
-// data and would span ±15 h, flattening the curve.
+// P10/P90 solar confidence band (kW), future slots only. Its median is the
+// "Solar potential" line (raw, uncurtailed) drawn with it — the "Solar" trace
+// deviates from the median wherever zero-export capping curtails the plan.
+// No smoothing: Solcast is already coarse (30-min slots); the history smoother's
+// ±30-point window assumes 10-s data and would span ±15 h, flattening the curve.
 function _planSolarBand() {
   const now = Date.now();
   const p10 = [], p90 = [];
@@ -2578,8 +2583,9 @@ function buildPlanDatasets() {
   if (planSmoothOn('priceImp')) impPx = smoothPoints(impPx, 30, false);
   if (planSmoothOn('priceExp')) expPx = smoothPoints(expPx, 30, false);
 
-  // Solcast solar P10/P90 confidence band, future only.
+  // Solcast solar P10/P90 confidence band + its uncurtailed median, future only.
   const sfc = _planSolarBand();
+  const solarPot = _planFutSolarKW(false);
 
   // One shared 5-min grid for every line → aligned tooltips, no between-point holes.
   const STEP      = 5 * 60 * 1000;
@@ -2602,6 +2608,7 @@ function buildPlanDatasets() {
   const sfcR = {
     p10: _planResample(sfc.p10, grid, false, POWER_GAP),
     p90: _planResample(sfc.p90, grid, false, POWER_GAP),
+    pot: _planResample(solarPot, grid, false, POWER_GAP),
   };
 
   // Solid past, dashed future (plan) — split on the "now" boundary.
@@ -2701,7 +2708,10 @@ function buildPlanDatasets() {
   // Solar P10/P90 confidence band — prepend (filled, no border) so the shaded
   // band sits behind every power line. Same orange as the "Solar" trace. Order
   // matters: the P10 dataset's fill:'-1' references the P90 dataset before it.
-  // Toggled together by the "Bands" button (no legend entry, no mean line).
+  // "Solar potential" is the band's median: the raw uncurtailed forecast, dotted
+  // and fainter, so a zero-export-capped "Solar" line still shows what PV could
+  // have made. Where nothing is curtailed it hides exactly under the Solar line.
+  // All three toggled together by the "Bands" button (no legend entries).
   const fcHidden = !_planBandsEnabled;
   const bandCol = '#F59E0B';      // matches PLAN_SERIES 'solar'
   datasets.unshift(
@@ -2728,6 +2738,21 @@ function buildPlanDatasets() {
       pointRadius: 0,
       pointHoverRadius: 0,
       fill: '-1',                 // fill up to the P90 dataset → confidence band
+      tension: 0.3,
+      spanGaps: false,
+      yAxisID: 'y',
+      hidden: fcHidden,
+    },
+    {
+      label: 'Solar potential',
+      data: sfcR.pot,
+      borderColor: bandCol + '99',
+      backgroundColor: 'transparent',
+      borderWidth: 1.5,
+      borderDash: [2, 3],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
       tension: 0.3,
       spanGaps: false,
       yAxisID: 'y',
@@ -2869,11 +2894,19 @@ function renderPlanChart() {
           external: planExternalTooltip,
           // Skip the null gap-break points so hovering the forecast region doesn't
           // produce empty/jumpy rows (and never calls toFixed on null). Also drop
-          // the P10/P90 band bounds — only the "Solar forecast" mean gets a row.
-          filter: item => item.parsed && item.parsed.y != null
-            && item.dataset.label !== 'Solar P10'
-            && item.dataset.label !== 'Solar P90'
-            && !item.dataset.label.endsWith(' (pred)'),
+          // the P10/P90 band bounds, and the "Solar potential" median wherever it
+          // matches the planned Solar value (nothing curtailed → duplicate row).
+          filter: (item, _i, items) => {
+            if (!item.parsed || item.parsed.y == null) return false;
+            const l = item.dataset.label;
+            if (l === 'Solar P10' || l === 'Solar P90' || l.endsWith(' (pred)')) return false;
+            if (l === 'Solar potential') {
+              const s = items.find(o => o.dataset.label === 'Solar');
+              return !(s && s.parsed && s.parsed.y != null
+                       && Math.abs(s.parsed.y - item.parsed.y) < 0.005);
+            }
+            return true;
+          },
           callbacks: {
             title: ctx => ctx.length ? new Date(ctx[0].parsed.x).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '',
             label: ctx => {
