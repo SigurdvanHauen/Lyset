@@ -11,6 +11,7 @@ import sqlite3
 import statistics
 import threading
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 _DB_PATH = Path(__file__).parent.parent / 'lyset_history.db'
@@ -297,6 +298,47 @@ def load_ev_charger_history(from_ts: float, to_ts: float) -> list[dict]:
         {'ts': ts, 'status': status, 'total_energy_kwh': kwh,
          'model': model, 'rated_power_kw': rated_kw, 'sw_version': sw}
         for ts, status, kwh, model, rated_kw, sw in rows
+    ]
+
+
+def load_ev_daily_energy(days: int = 30) -> list[dict]:
+    """Daily EV-charged energy for the last `days` local dates, oldest first.
+
+    Derived from the lifetime counter: each day's figure is the delta between
+    that day's LAST reading and the previous day-with-data's last reading, so
+    the series sums exactly to the counter's growth — energy charged across
+    midnight or during a cloud-poll outage lands on the first day after the
+    gap instead of being lost (the day-min/max approach would drop it).
+    Days without any poll yield None (unknown), never a fake 0. The first
+    day ever recorded uses its own first poll as the opening baseline so
+    day-one charging still shows.
+    """
+    with _lock:
+        con = _get_con()
+        # SQLite guarantees the bare column comes from the max(ts) row.
+        rows = con.execute(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS d, total_energy_kwh, max(ts) "
+            'FROM ev_charger_polls WHERE total_energy_kwh IS NOT NULL '
+            'GROUP BY d ORDER BY d',
+        ).fetchall()
+        first = con.execute(
+            'SELECT total_energy_kwh FROM ev_charger_polls '
+            'WHERE total_energy_kwh IS NOT NULL ORDER BY ts LIMIT 1',
+        ).fetchone()
+    deltas: dict[str, float] = {}
+    prev = first[0] if first else None
+    for d, kwh, _ in rows:
+        if prev is not None:
+            # Clamp tiny negatives (counter jitter); a real counter reset
+            # (device swap/factory reset) also lands on 0 rather than a
+            # huge negative bar.
+            deltas[d] = max(0.0, round(kwh - prev, 3))
+        prev = kwh
+    start = date.today() - timedelta(days=days - 1)
+    return [
+        {'date': (start + timedelta(days=i)).isoformat(),
+         'kwh': deltas.get((start + timedelta(days=i)).isoformat())}
+        for i in range(days)
     ]
 
 

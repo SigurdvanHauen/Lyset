@@ -1385,12 +1385,22 @@ async def api_ev_charger_state():
 
 @app.get('/api/ev/charger/history')
 async def api_ev_charger_history(hours: int = 48):
-    """Poll history for the EV Charger tab's chart. hours is clamped to 1-720 (30 d)."""
+    """Raw poll history (lifetime-counter samples). hours is clamped to 1-720 (30 d)."""
     hours = max(1, min(720, hours))
     now = time.time()
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, store.load_ev_charger_history, now - hours * 3600, now)
     return {'history': data}
+
+
+@app.get('/api/ev/charger/daily')
+async def api_ev_charger_daily(days: int = 30):
+    """kWh charged per local day (delta of the lifetime counter's last reading
+    per day) for the EV Charger tab's bar chart. days clamped to 1-365."""
+    days = max(1, min(365, days))
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, store.load_ev_daily_energy, days)
+    return {'daily': data}
 
 
 @app.get('/api/prices')

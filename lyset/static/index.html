@@ -753,6 +753,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       so anything new shows up without a code change. <b>No remote control (start/stop/limit)</b> —
       no such endpoint has been found; see the project notes for how to add it safely.
     </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Energy charged per day — last 30 days (from the lifetime counter's day-over-day delta; a missing bar means no cloud data that day)</div>
     <div style="position:relative;height:220px">
       <canvas id="ev-charger-chart"></canvas>
     </div>
@@ -1033,7 +1034,7 @@ function showTab(name, btn) {
   btn.classList.add('active');
   if (name === 'prices') { renderPriceChart(); renderPriceLineChart(); }
   if (name === 'plan') renderPlanChart();
-  if (name === 'ev') { loadEvChargerState(); loadEvChargerHistory(); }
+  if (name === 'ev') { loadEvChargerState(); loadEvChargerDaily(); }
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -1109,47 +1110,54 @@ async function loadEvChargerState() {
 function onEvChargerData(payload) {
   _renderEvChargerCurrent(payload, null);   // "today" needs a DB round-trip for the day min/max
   loadEvChargerState();                     // refresh with the derived today figure
-  loadEvChargerHistory();                   // append the new point to the chart
+  loadEvChargerDaily();                     // refresh today's bar on the chart
 }
 
-async function loadEvChargerHistory() {
+async function loadEvChargerDaily() {
   const canvas = document.getElementById('ev-charger-chart');
   if (!canvas) return;
   let j;
   try {
-    const r = await fetch('/api/ev/charger/history?hours=168');
+    const r = await fetch('/api/ev/charger/daily?days=30');
     if (!r.ok) return;
     j = await r.json();
   } catch (e) { return; }
 
-  const hist = (j.history || []).filter(r => r.total_energy_kwh != null);
-  const data = hist.map(r => ({ x: r.ts * 1000, y: r.total_energy_kwh }));
+  // Days without polls (or the first day ever recorded) come back as null —
+  // rendered as a missing bar, never a fake 0.
+  const daily  = j.daily || [];
+  const labels = daily.map(d => d.date);
+  const vals   = daily.map(d => d.kwh);
 
   if (_evChargerChart) {
-    _evChargerChart.data.datasets[0].data = data;
+    _evChargerChart.data.labels = labels;
+    _evChargerChart.data.datasets[0].data = vals;
     _evChargerChart.update('none');
     return;
   }
   _evChargerChart = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: { datasets: [{
-      label: 'Lifetime energy charged (kWh)',
-      data, borderColor: '#34D399', backgroundColor: 'rgba(52,211,153,0.12)',
-      borderWidth: 2, pointRadius: 0, fill: true, tension: 0.15, stepped: 'before',
+    type: 'bar',
+    data: { labels, datasets: [{
+      label: 'Charged per day (kWh)',
+      data: vals, backgroundColor: 'rgba(52,211,153,0.75)',
+      borderRadius: 4, maxBarThickness: 22,
+      categoryPercentage: 0.85, barPercentage: 0.9,
     }] },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       scales: {
         x: {
-          type: 'linear',
           ticks: {
-            color: '#8892AA', maxTicksLimit: 8, font: { size: 9 },
-            callback: v => new Date(v).toLocaleDateString([], { day: 'numeric', month: 'short' }),
+            color: '#8892AA', autoSkip: true, maxTicksLimit: 10, maxRotation: 0, font: { size: 9 },
+            callback: function (v) {
+              return new Date(this.getLabelForValue(v)).toLocaleDateString([], { day: 'numeric', month: 'short' });
+            },
           },
-          grid: { color: '#2D3555' },
+          grid: { display: false },
         },
         y: {
-          title: { display: true, text: 'kWh', color: '#8892AA', font: { size: 10 } },
+          beginAtZero: true,
+          title: { display: true, text: 'kWh / day', color: '#8892AA', font: { size: 10 } },
           ticks: { color: '#8892AA', font: { size: 9 } },
           grid:  { color: '#2D3555' },
         },
@@ -1159,7 +1167,10 @@ async function loadEvChargerHistory() {
         tooltip: {
           backgroundColor: '#1C2032', titleColor: '#8892AA', bodyColor: '#E2E8F4',
           borderColor: '#2D3555', borderWidth: 1, padding: 10,
-          callbacks: { title: ctx => new Date(ctx[0].parsed.x).toLocaleString() },
+          callbacks: {
+            title: ctx => new Date(ctx[0].label).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'long' }),
+            label: ctx => ` ${ctx.parsed.y.toFixed(2)} kWh charged`,
+          },
         },
       },
     },
