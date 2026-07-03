@@ -175,12 +175,22 @@ class EVChargerWorker(threading.Thread):
     def run(self):
         self._running = True
         while self._running:
+            delay = self._poll_interval
             try:
                 self._tick()
             except Exception as exc:
                 log.error('EVChargerWorker: unexpected error — %s', exc, exc_info=True)
                 self._on_status(f'EV charger: error — {exc}', False)
-            self._sleep(self._poll_interval)
+                # An error here is almost always a dead/kicked cloud session
+                # that is_session_active() still vouched for (fusion_solar_py's
+                # "Failed to reset session and login again"). Drop the client so
+                # the next tick does a genuinely fresh login, and back off hard
+                # — rapid re-login attempts are what provoke Huawei's CAPTCHA,
+                # which then makes every subsequent login fail the same way.
+                self._client = None
+                self._charger_dn = None
+                delay = max(_LOGIN_BACKOFF_S, self._poll_interval)
+            self._sleep(delay)
 
     def _sleep(self, seconds: float):
         deadline = time.time() + seconds
