@@ -623,11 +623,16 @@ class AutoController:
         export_dkk = cur_price.get('export') or 0.0
         import_dkk = cur_price.get('import') or 0.0
         pv_w       = (data.get('pv1_power') or 0) + (data.get('pv2_power') or 0)
-        # house_load = active_power + meter − batt_power: during a fast battery
-        # charge↔discharge transition the batched reads are captured a few ms apart
-        # and this briefly computes a physically impossible value (seen at −4084 W).
-        # Clamp to ≥0 so a glitch can never masquerade as a chargeable PV surplus.
-        house_load = max(0.0, data.get('house_load') or 0)
+        # house_load is validated and hold-filled at the read layer (sanitize.py):
+        # negative skew samples are dropped and a fresh last-good value is
+        # substituted. If it is STILL absent (no good reading for 90 s), skip the
+        # tick — the old `or 0` fallback turned "unknown" into "load 0 W", which
+        # manufactured a fake PV surplus and flipped the self-consumption branch.
+        house_load = data.get('house_load')
+        if house_load is None:
+            log.info('AutoCtrl: no house_load reading — skipping tick')
+            return None
+        house_load = max(0.0, house_load)
         # SoC register 37760 sits in its own read batch and drops out on ~10% of
         # polls. A literal default here (the old `or 50.0`) fed fake data into real
         # decisions — arbitrage discharge fired at an actual SoC of 5% and grid

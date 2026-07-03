@@ -17,6 +17,7 @@ from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
 
 from .register_map import REGISTERS, Register, INVERTER_STATES, BATTERY_STATUSES, BATTERY_WORKING_MODES, BATT_FORCED_MODES
+from .sanitize import DataSanitizer
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,10 @@ class ModbusWorker(threading.Thread):
         self._running = False
         self._client: Optional[ModbusTcpClient] = None
         self._write_queue: queue.Queue = queue.Queue()
+        # Cleans every poll at the source (ranges, enums, spike confirmation,
+        # hold-last-good) so all consumers — controller, dashboard, DB, model —
+        # see the same validated data. Only touched from the worker thread.
+        self._sanitizer = DataSanitizer()
 
     # ── Public control ────────────────────────────────────────────────────────
 
@@ -250,25 +255,23 @@ class ModbusWorker(threading.Thread):
             if 'meter_active_power' in data:
                 data['meter_active_power'] = -data['meter_active_power']
 
-            # Reject I32 power readings that exceed any realistic residential system.
-            # Modbus word-order corruption can produce values in the millions of watts
-            # for a single poll; guard here so the bad read never reaches the DB.
-            # 35 kW headroom: the SCharger-22KT-S0 EV charger (22 kW, three-phase)
-            # shows up on the meter, so a 10 kW cap would silently discard every
-            # poll during a charging session; real glitches are in the millions.
-            _POWER_LIMIT_W = 35_000
-            for _k in ('active_power', 'meter_active_power', 'batt_power'):
-                _v = data.get(_k)
-                if _v is not None and abs(_v) > _POWER_LIMIT_W:
-                    log.warning('%s outlier %.0f W discarded (Modbus I32 glitch)', _k, _v)
-                    del data[_k]
-
-            if 'active_power' in data and 'meter_active_power' in data:
-                batt = data.get('batt_power', 0.0)
-                # house_load = solar_out + grid_import - battery_charge
+            # house_load = solar_out + grid_import - battery_charge. All three
+            # components must be present: assuming a missing batt_power is 0 (the
+            # old behaviour) shifts the load by up to ±2500 W whenever the battery
+            # batch fails mid-charge. When skipped, the sanitizer substitutes the
+            # last good house_load while fresh.
+            if ('active_power' in data and 'meter_active_power' in data
+                    and 'batt_power' in data):
                 data['house_load'] = round(
-                    data['active_power'] + data['meter_active_power'] - batt, 1
+                    data['active_power'] + data['meter_active_power']
+                    - data['batt_power'], 1
                 )
+
+            # Validate everything (physical ranges, enum codes, spike
+            # confirmation, hold-last-good) BEFORE labels are derived, so a
+            # garbage status code can't be presented as a real state. See
+            # sanitize.py for the policy and the incidents behind it.
+            data = self._sanitizer.apply(data)
 
             if 'inverter_state' in data:
                 code = int(data['inverter_state'])
