@@ -1,99 +1,50 @@
 # Lyset
 
-**Lyset** (Danish: *the light*) is a self-hosted monitoring and **battery-optimisation** server for a Huawei SUN2000 solar inverter with a LUNA2000 battery. It polls the inverter over Modbus TCP, serves a live web dashboard, pulls Danish electricity prices and a solar forecast, learns your household consumption, and can **actively control the battery** to charge cheap / discharge expensive / avoid exporting at negative prices — running entirely on your own hardware, with no cloud dependency.
+**Lyset** (Danish: *the light*) is a self-hosted dashboard and **battery optimiser** for Huawei **SUN2000** solar inverters with a **LUNA2000** battery. It talks to the inverter directly over Modbus TCP, shows a live web dashboard, pulls electricity prices and a solar forecast, learns your household's consumption, and can **actively control the battery** — charging when power is cheap, discharging when it's expensive, and never exporting at negative prices.
 
-It is an open replacement for paid optimisation services (e.g. IntelliCharge), with full control over the data and the decision logic.
-
----
-
-## Contents
-
-- [What it does](#what-it-does)
-- [Hardware](#hardware)
-- [How it works](#how-it-works)
-- [Setup](#setup)
-- [Configuration (`.env`)](#configuration-env)
-- [Connecting to your inverter](#connecting-to-your-inverter)
-- [The battery auto-controller](#the-battery-auto-controller)
-- [HTTP API](#http-api)
-- [WebSocket API](#websocket-api)
-- [Home Assistant integration](#home-assistant-integration)
-- [Running 24/7 (Proxmox LXC / systemd)](#running-247-proxmox-lxc--systemd)
-- [Data storage](#data-storage)
-- [Hardware constraints & gotchas](#hardware-constraints--gotchas)
-- [Project layout](#project-layout)
-- [Licence](#licence)
+It runs entirely on your own hardware with no cloud account required, as an open alternative to paid optimisation services.
 
 ---
 
 ## What it does
 
-- **Live dashboard** — power flow, PV strings, grid, battery SoC, energy totals, updated every 10 s over a WebSocket. No page reloads.
-- **History & charts** — every metric is stored in SQLite and plotted; click any card to open a scrollable chart of its full history.
-- **Electricity prices** — fetches all-in import and export (sell-back) prices for your DSO zone from [Strømligning](https://stromligning.dk).
-- **Solar forecast** — pulls a PV production forecast (mean + P10/P90 confidence band) from [Solcast](https://solcast.com), then **self-calibrates** it: a per-hour-of-day correction factor is learned from your roof's measured output vs. the forecast (orientation quirks, shading), converging over a couple of weeks.
-- **Consumption forecast** — learns a weekly household-load profile online from your own meter data, with a self-correcting global bias term (forecast vs. measured) on top. A *Forecast Accuracy* card on the Plan tab shows how both models are tracking reality.
-- **Plan view** — overlays past actuals with a forward plan (solar, load, battery charge/discharge, grid, SoC) plus the price curve, IntelliCharge-style.
-- **Savings tracking** — measures the DKK you've saved vs. buying every kWh from the grid at the import price (solar self-consumption + battery time-shift + arbitrage, folded into one figure). Cards for today / this week / this month / this year, each opening a cumulative or per-bucket chart with **actual vs. predicted** series.
-- **Payback / ROI** — enter your system cost and install date and it estimates the break-even date from your realised average daily savings.
-- **Auto-controller** — decides each cycle whether to grid-charge, hold, arbitrage-discharge, force-charge from surplus, or run plain self-consumption, and writes the battery-control registers to make it happen.
-- **Settings dialog** — a gear-icon modal configures the inverter, API keys, and every tunable, writing them back to `.env`. No file editing or restart for most changes.
-- **Home Assistant feed** — a single flat-JSON endpoint exposes everything for HA REST sensors (see below).
-
-> There is also a legacy **PySide6 desktop GUI** (`lyset/gui/`) from the project's first phase. It is no longer the primary interface; the web server is. The two share the same `register_map.py` and `modbus_client.py`.
+- **Live dashboard** — PV, grid, battery and house load, streamed over a WebSocket and updated every few seconds. Click any chart to expand it.
+- **Electricity prices** — fetches all-in import and export prices (Denmark, via [Strømligning](https://stromligning.dk)).
+- **Solar forecast** — pulls a PV forecast from [Solcast](https://solcast.com) and self-calibrates it against your roof's measured output over time.
+- **Consumption learning** — builds a weekly household-load profile from your own meter data and keeps adapting it.
+- **Plan & savings** — overlays past actuals with a forward plan (solar, load, battery, grid, price) and tracks the money saved versus buying every kWh from the grid.
+- **Battery auto-controller** — each cycle it decides whether to grid-charge, hold, arbitrage-discharge, soak up surplus, or just self-consume, and writes the battery registers to make it happen.
+- **Home Assistant feed** — one flat-JSON endpoint exposes everything for REST sensors.
 
 ---
 
-## Hardware
+## Compatibility
 
-Built and verified against:
+Lyset speaks standard **Huawei SUN2000 Modbus TCP** through an **SDongle** (port 502). It was built and verified against one SUN2000 + LUNA2000 setup, but should work with similar systems.
 
-| Device | Model |
-|---|---|
-| Inverter | Huawei SUN2000-6KTL-M1 |
-| Battery | Huawei LUNA2000-5-H1 (5 kWh) |
-| Solar array | ~6.9 kWp |
-| Dongle | Huawei SDongle-A05 (exposes Modbus TCP on port **502**) |
+Register availability and battery-control behaviour **vary by firmware**, so expect to verify a few register addresses against your own inverter (see [`register_map.py`](lyset/register_map.py)) and to watch the logs the first time you let it control the battery.
 
-It should work with other SUN2000 + LUNA2000 setups that speak Modbus TCP through an SDongle, but register availability and battery-control behaviour vary by firmware — expect to verify a few addresses against your own unit (see [`register_map.py`](lyset/register_map.py)).
+> ⚠️ The SDongle allows **only one Modbus client at a time.** If Home Assistant's `huawei_solar` integration (or anything else) is already connected to the inverter, Lyset can't connect — and vice-versa. Let Lyset own the connection and have Home Assistant read from Lyset instead (see below).
 
 ---
 
 ## How it works
 
+A background thread polls the inverter over Modbus every few seconds and hands each reading to a FastAPI server. The server stores history in SQLite, runs the price / solar / consumption workers, feeds the battery auto-controller, and pushes live updates to the browser and to Home Assistant.
+
 ```
-┌─────────────┐   Modbus TCP    ┌───────────────────────────────────────────┐
-│  SUN2000    │◀───port 502────▶│  ModbusWorker (background thread)          │
-│  + SDongle  │  connect-per-poll│  reads all registers every 10 s           │
-└─────────────┘                 └──────────────┬────────────────────────────┘
-                                               │ callback
-   Strømligning ──prices──┐                    ▼
-   Solcast ──solar fc──┐  │      ┌───────────────────────────────────────────┐
-   (your meter) ─load──┘  └─────▶│  FastAPI server (lyset/server.py)         │
-                                 │  • SQLite history store                   │
-                                 │  • AutoController (battery decisions)     │
-                                 │  • REST + WebSocket + HA snapshot         │
-                                 └──────────────┬────────────────────────────┘
-                                                │
-                         ┌──────────────────────┼─────────────────────┐
-                         ▼                      ▼                     ▼
-                    Browser SPA           Home Assistant         (writes back to
-                  (live dashboard)        (REST sensors)          the inverter)
+  Inverter + SDongle  ──Modbus TCP──▶  Lyset (FastAPI + SQLite)  ──▶  Browser dashboard
+  Prices / Solar / your meter  ──────▶       │  auto-controller     ──▶  Home Assistant
+                                             └──writes back to the inverter
 ```
 
-The Modbus worker **opens a fresh TCP connection at the start of every poll and closes it immediately** — the SDongle drops idle connections after ~30 s and a half-open socket hangs silently. This is deliberate; do not switch it to a persistent connection.
+The Modbus worker opens a fresh connection for each poll and closes it immediately — the SDongle drops idle connections, so this is intentional.
 
 ---
 
-## Setup
+## Install
 
-### Prerequisites
-
-- **Python 3.11+**
-- The inverter reachable on your LAN (you'll need its IP)
-- Optional but recommended: a [Strømligning API key](https://stromligning.dk) (prices) and a [Solcast hobbyist API key](https://solcast.com) (solar forecast). Without them the server still runs as a monitor; the optimisation features just stay idle.
-
-### Install
+Requires **Python 3.11+** and the inverter reachable on your LAN.
 
 ```bash
 git clone https://github.com/SigurdvanHauen/Lyset.git
@@ -103,282 +54,72 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Configure
+---
 
-Two options, and you can mix them:
+## Set up
 
-- **In the browser (easiest):** start the server and click the **gear icon** (top-right) to open **Settings**. Every option below is editable there — inverter address, API keys, prices, ROI inputs, auto-controller tunables — and is written back to `.env`. Most take effect immediately (the relevant worker restarts on save).
-- **By hand:** create a `.env` file in the project root before first start (see [Configuration](#configuration-env) for all keys):
+You can configure Lyset **entirely from the browser** — no file editing needed for most things.
+
+1. **Start it:**
+
+   ```bash
+   python main.py
+   ```
+
+   The server runs on **`0.0.0.0:8000`**. Open **http://localhost:8000** (or `http://<server-ip>:8000` from another device).
+
+2. **Configure it:** click the **gear icon** (top-right) to open **Settings**. Set your inverter's IP address and, optionally, your API keys and tunables. Changes are saved to a local `.env` file and take effect immediately.
+
+Prefer files? Create a `.env` in the project root before first start:
 
 ```ini
-# Minimal — prices + solar forecast. Leave out to run as a pure monitor.
-INVERTER_HOST=192.168.1.185
-STROMLIGNING_API_KEY=your-key-here
-STROMLIGNING_POSTAL_CODE=5500
-SOLCAST_API_KEY=your-key-here
+INVERTER_HOST=192.168.x.x           # your inverter's LAN address
+
+# Optional — unlock prices & forecast. Leave out to run as a pure monitor.
+STROMLIGNING_API_KEY=your-key
+STROMLIGNING_POSTAL_CODE=your-danish-postal-code   # picks your tariff zone
+SOLCAST_API_KEY=your-key
 ```
 
-### Run
+Find the inverter's IP in your router's DHCP list or the FusionSolar app.
 
-```bash
-python main.py
-```
-
-This starts the FastAPI server (via uvicorn) on **`0.0.0.0:8000`**. Open **http://localhost:8000** (or `http://<server-ip>:8000` from another device) for the dashboard.
-
-On startup the server auto-connects to the inverter, starts the price/solar/consumption workers (if configured), and **enables the auto-controller** (unless you disable it — see below).
-
----
-
-## Configuration (`.env`)
-
-All configuration is via environment variables, loaded from `.env` at startup (`python-dotenv`), and most keys below are also editable live from the in-app **Settings** dialog (which writes the same `.env`). Everything has a default; only the API keys are really required to unlock the paid features.
-
-### Inverter (Modbus TCP)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `INVERTER_HOST` | `192.168.1.185` | LAN address of the inverter's SDongle. |
-| `INVERTER_PORT` | `502` | Modbus TCP port. |
-| `INVERTER_SLAVE_ID` | `1` | Modbus unit / slave ID. |
-| `INVERTER_POLL_INTERVAL` | `10` | Seconds between inverter reads. |
-
-> Changing any of these (in `.env` or via Settings) reconnects the poller. Find the inverter's IP in your router's DHCP table or the FusionSolar app under the SDongle's network settings.
-
-### Electricity prices (Strømligning)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `STROMLIGNING_API_KEY` | — | API key (Bearer). **Unset → price polling disabled.** |
-| `STROMLIGNING_POSTAL_CODE` | `5500` | Danish postal code, used to auto-pick your DSO tariff zone. |
-| `STROMLIGNING_SUPPLIER_ID` | auto | Override the DSO lookup with a known supplier ID. |
-| `PRICE_EXPORT_FEE` | `0.033375` | DKK/kWh of feed-in/balance tariffs subtracted from the spot price to get the export (sell-back) payout. |
-| `PRICE_POLL_INTERVAL` | `1800` | Seconds between price refreshes (30 min). |
-
-> **Export price model:** the export payout is the bare Nord Pool spot (`details.electricity.value` from the API — already excl. VAT/elafgift) minus `PRICE_EXPORT_FEE`. Elafgift and VAT do **not** apply to surplus sales, so export goes negative whenever the spot itself is negative.
-
-### Solar forecast (Solcast)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `SOLCAST_API_KEY` | — | API key. **Unset → solar forecast disabled.** |
-| `SOLCAST_RESOURCE_ID` | auto-discover | Rooftop site UUID(s), comma-separated. If unset it's discovered once via `/rooftop_sites` (costs 1 API call). Note the UUID from the logs and set it to avoid the extra call. |
-| `SOLCAST_FETCH_HOURS` | `6,12,18` | Local hours at which to fetch (the free tier is rate-limited — see below). |
-| `SOLCAST_POLL_INTERVAL` | `21600` | Seconds between refreshes (6 h). |
-
-> Solcast hobbyist accounts allow **10 calls/day per site**. With 1 site keep `SOLCAST_POLL_INTERVAL ≥ 8640`; with 2 sites `≥ 17280`. Fetching at fixed hours (default) is the simplest way to stay under quota.
-
-### Consumption model
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `CONSUMPTION_HISTORY_PATH` | — | Path to a meter-data Excel file (Eloverblik `MeterData.xlsx`) used to seed the weekly load profile on first run. Without it the model learns from scratch from live polls. |
-| `CONSUMPTION_MIN_STANDBY_W` | `300` | Floor (W) applied to load predictions so empty/overnight slots never read as 0 W. |
-
-### PV system (payback / ROI)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `PV_SYSTEM_COST` | — | Total installed cost of your PV + battery system in DKK. Drives the payback card on the Plan tab. |
-| `PV_INSTALL_DATE` | — | Commissioning date (`YYYY-MM-DD`). Break-even is measured from here using your average daily savings so far. |
-
-### Auto-controller
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `AUTO_CONTROLLER_AUTOSTART` | `1` | `0`/`false`/`no`/`off` to start with the controller **disabled** (monitor only — never writes to the battery). You can also toggle it live from the dashboard. |
-| `ARBITRAGE_ENABLED` | `1` | Allow the controller to force-discharge the battery to the grid for arbitrage. `0` keeps all stored energy for self-consumption. Takes effect immediately. |
-| `ARBITRAGE_MIN_GAIN_PCT` | `5` | Required predicted round-trip gain (%) before an arbitrage discharge fires, measured against the most expensive upcoming import the same energy could otherwise offset. `0` = break-even allowed; higher = more conservative. Takes effect immediately. See [the auto-controller](#the-battery-auto-controller). |
-
----
-
-## Connecting to your inverter
-
-The server auto-connects on startup using `INVERTER_HOST` / `INVERTER_PORT` / `INVERTER_SLAVE_ID` / `INVERTER_POLL_INTERVAL` (defaults `192.168.1.185:502`, slave `1`, 10 s). If your inverter lives at a different IP:
-
-- **In the browser:** open **Settings** (gear icon) → *Inverter (Modbus TCP)*, set the host, and save. The poller reconnects immediately, and the value persists in `.env`.
-- **By hand:** set `INVERTER_HOST` (etc.) in `.env` before starting.
-
-Find the inverter's IP from your router's DHCP table, or in the FusionSolar app under the SDongle's network settings.
-
-> ⚠️ **The SDongle allows only one Modbus TCP client at a time.** If Home Assistant's `huawei_solar` integration (or any other Modbus client) is already connected, Lyset can't connect, and vice-versa. **Do not point both directly at the inverter.** The intended pattern is: **Lyset owns the single Modbus connection, and Home Assistant reads from Lyset's HA snapshot endpoint** (below) — no conflict.
+**API keys are optional.** Without them Lyset still runs as a live monitor — the price, forecast and optimisation features simply stay idle until you add the keys. A free [Solcast](https://solcast.com) hobbyist key and a [Strømligning](https://stromligning.dk) key unlock the rest. (Prices are Denmark-specific; the monitoring and solar features work anywhere.)
 
 ---
 
 ## The battery auto-controller
 
-Every 15 s the controller looks at the current/next price slots, PV, load, and SoC, and picks one regime:
+When enabled, the controller checks prices, PV, load and state-of-charge each cycle and picks one behaviour:
 
-| Regime | When | Action |
-|---|---|---|
-| **Negative-export force-charge** | export price < threshold | Cap feed-in to 0 W (APC zero-export) and soak surplus PV into the battery so nothing is dumped to grid at a loss. |
-| **Grid charge** | now is near the cheapest of the next *N* h **and** a materially pricier slot is coming **and** there's room | Force-charge from grid to bank cheap energy. |
-| **Hold** | drawing from battery, with a much pricier slot ahead and no solar to refill it | Force-idle; let cheap grid cover the load now and save the battery for the peak. |
-| **Arbitrage discharge** | export now clears the opportunity-cost gate (below) and SoC is high | Force-discharge to grid. |
-| **Self-consumption** (default) | none of the above | Surplus → charge from surplus; deficit → max self-consumption with zero export. |
+| Regime | What it does |
+|---|---|
+| **Force-charge on negative export** | Caps feed-in to 0 W and soaks surplus PV into the battery so nothing is sold at a loss. |
+| **Grid charge** | Banks cheap grid energy when a pricier period is coming. |
+| **Hold** | Lets cheap grid cover the load now and saves the battery for a coming peak. |
+| **Arbitrage discharge** | Sells stored energy to the grid — but only when it's guaranteed to beat re-buying that energy later. |
+| **Self-consumption** (default) | Normal behaviour: use solar first, battery second, grid last. |
 
-**Arbitrage that can't lose money.** The discharge gate compares the current export price against the **opportunity cost** of the stored energy — the *most expensive* upcoming import that same energy could otherwise offset by self-consumption — not against the cheapest rebuy. It fires only when
+It's **off-safe**: disable it (from the dashboard, or `AUTO_CONTROLLER_AUTOSTART=0`) and Lyset stops writing to the inverter entirely and becomes a pure monitor. Thresholds live at the top of [`auto_controller.py`](lyset/auto_controller.py).
 
-```
-export_now  ≥  max_upcoming_import × (1 + ARBITRAGE_MIN_GAIN_PCT/100)
-```
-
-Because import always exceeds export for the same hour (Danish spot ± fees), clearing this bar guarantees that re-importing your load later is cheaper than what you sold at — so the trade is structurally non-losing. The Plan-tab simulation runs the *identical* gate, so the projected SoC curve matches what the controller will actually do.
-
-Design notes:
-- **Surplus force-charge is meter-fed:** the charge target is sized from the meter's own feedback (`batt_w − grid_w`), not the raw PV-minus-load estimate, so glitchy PV reads can't make it over-charge and pull power from the grid.
-- Writes are **read-back gated** where the register can be polled (re-issued only until the inverter confirms, then stopped) and **deduped** otherwise — so the single-client SDongle is never flooded with redundant writes. (The forcible-charge power register `47247` doesn't read back on this firmware, so it's re-asserted each tick.)
-- Disabling the controller (from the dashboard, or `AUTO_CONTROLLER_AUTOSTART=0`) restores safe defaults and **stops all writes** — Lyset becomes a pure monitor.
-- The thresholds and horizons live as constants at the top of [`lyset/auto_controller.py`](lyset/auto_controller.py); `ARBITRAGE_ENABLED` and `ARBITRAGE_MIN_GAIN_PCT` are live settings.
-
-> The control logic was tuned for one specific SUN2000/LUNA2000 firmware. **If you reuse it, watch the logs and verify the battery behaves before trusting it unattended** — some registers don't read back on every firmware, and battery-mode semantics differ.
+> Battery control was tuned for one specific firmware. **Watch the logs and confirm the battery behaves before trusting it unattended.**
 
 ---
 
-## HTTP API
+## Home Assistant
 
-Base URL `http://<server>:8000`. JSON in/out.
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/` | The single-page web dashboard. |
-| `POST` | `/api/connect` | Start the Modbus worker. Body: `{host, port, slave_id, poll_interval}`. |
-| `POST` | `/api/disconnect` | Stop the worker. |
-| `GET` | `/api/state` | Connection state + last snapshot + recent log lines. |
-| `POST` | `/api/write` | Queue a register write. Body: `{type: "u16"\|"u32"\|"i32", address, value, description}`. |
-| `GET` | `/api/read?address=&type=` | Synchronous single-register read. |
-| `GET` | `/api/settings` | Settings schema with current values (powers the Settings dialog). |
-| `POST` | `/api/settings` | Persist settings to `.env` and apply live. Body: `{KEY: value, …}`. |
-| `GET` | `/api/prices` | Stored price series (past 24 h → +7 days). |
-| `GET` | `/api/solar-forecast?full=` | Solcast forecast series. |
-| `POST` | `/api/solar-forecast/refresh` | Force an immediate Solcast fetch. |
-| `GET` | `/api/consumption-forecast?full=` | Consumption forecast + model coverage. |
-| `POST` | `/api/consumption/import-excel` | Seed the consumption model from an Excel file. Body: `{path}`. |
-| `GET` | `/api/power-forecast?full=` | Simulated forward SoC / battery / grid plan. |
-| `GET` | `/api/savings/daily?date=YYYY-MM-DD` | Cumulative DKK saved for one day — actual + predicted series. |
-| `GET` | `/api/savings/buckets?period=week\|month\|year` | Per-bucket savings (day/week/month) for the current calendar period, actual + predicted. |
-| `GET` | `/api/roi` | Payback estimate: realised avg daily savings, break-even date, years/months/days remaining. |
-| `GET` | `/api/forecast/accuracy?days=7` | Solar & consumption forecast MAE/bias vs. measured history, plus the current adaptive corrections (per-hour solar factors, load bias). |
-| `GET` | `/api/daily-solar` | Per-day produced vs. forecast kWh (last 30 days). |
-| `GET` | `/api/history/series?key=&from_ms=` | Full downsampled history for one metric. |
-| `GET` | `/api/automode` | Auto-controller state + recent command log. |
-| `POST` | `/api/automode` | Enable/disable the controller. Body: `{enabled}`. |
-| `GET` | `/api/ha/snapshot` | **Flat snapshot for Home Assistant** (see below). |
-| `GET` | `/api/download/db` | Download a consistent SQLite backup of the whole history DB. |
-| `DELETE` | `/api/history` | Clear stored history. |
-| `POST` | `/api/pymodbus-logs` | Toggle verbose pymodbus logging. Body: `{enabled}`. |
-| `WS` | `/ws` | Real-time push (below). |
-
----
-
-## WebSocket API
-
-Connect to `ws://<server>:8000/ws`. On connect the server sends an initial burst (history, current connection state, last data, prices, forecasts, auto-command log), then streams updates. Each message is JSON with a `type`:
-
-| `type` | Payload | When |
-|---|---|---|
-| `data` | live inverter snapshot (`payload`) | every poll (~10 s) |
-| `history` | array of past points | once on connect / after clear |
-| `connection` | `{ok, msg}` | connect/disconnect events |
-| `prices` | price series (`payload`) | on price refresh |
-| `solar_forecast` | Solcast series (`payload`) | on solar refresh |
-| `consumption_forecast` | load forecast (`payload`) | on model update |
-| `power_forecast` | forward SoC/battery/grid plan (`payload`) | on re-simulation |
-| `auto_mode` | `{enabled, last_action, last_action_ts}` | controller toggled |
-| `auto_history` | recent command log | once on connect |
-| `write_result` | `{ok, msg}` | after a register write |
-| `error` | `{msg}` | Modbus/worker errors |
-| `log` | `{entry}` | every server log line (powers the Log tab) |
-
----
-
-## Home Assistant integration
-
-The single-Modbus-client limit means HA should **not** talk to the inverter directly while Lyset is running. Instead, point HA at Lyset's snapshot endpoint:
+Because only one Modbus client can talk to the inverter, point Home Assistant at Lyset instead of the inverter:
 
 ```
 GET http://<lyset-host>:8000/api/ha/snapshot
 ```
 
-It returns one flat JSON object with the current state plus next-slot forecasts — designed for the HA REST sensor with `json_attributes`.
-
-### What's exposed
-
-| Field | Unit | Meaning |
-|---|---|---|
-| `ts_ms`, `connected` | — | snapshot time; inverter link state |
-| `pv_w` | W | total PV power (string 1 + 2) |
-| `grid_w` | W | grid meter power (**+ import, − export**) |
-| `batt_w` | W | battery power (**+ charging, − discharging**) |
-| `batt_soc` | % | battery state of charge |
-| `house_load_w` | W | computed household consumption |
-| `inverter_state` | code | inverter state register |
-| `daily_yield_kwh` | kWh | produced today (inverter's own counter) |
-| `solar_fc_kwh_today` | kWh | Solcast estimate of full-day yield |
-| `import_price_dkk` / `export_price_dkk` | DKK/kWh | active price slot |
-| `solar_fc_w`, `solar_fc_p10_w`, `solar_fc_p90_w`, `solar_fc_ts_ms` | W / ms | next Solcast period (mean + P10/P90 band) |
-| `forecast_soc`, `forecast_batt_w`, `forecast_grid_w`, `forecast_ts_ms` | % / W / ms | next simulated plan slot |
-| `consumption_fc_w` | W | active consumption-forecast slot |
-| `solar_forecast_today` | array | today's 30-min forecast periods (for charts) |
-| `prices_today` | array | today's price slots (for charts) |
-
-### Example HA configuration
-
-```yaml
-# configuration.yaml
-rest:
-  - resource: http://192.168.1.50:8000/api/ha/snapshot
-    scan_interval: 30          # Modbus refreshes every 10 s, prices every 30 min
-    sensor:
-      - name: "Solar Power"
-        value_template: "{{ value_json.pv_w }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-
-      - name: "Battery SoC"
-        value_template: "{{ value_json.batt_soc }}"
-        unit_of_measurement: "%"
-        device_class: battery
-        state_class: measurement
-
-      - name: "Grid Power"
-        value_template: "{{ value_json.grid_w }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-
-      - name: "Import Price"
-        value_template: "{{ value_json.import_price_dkk }}"
-        unit_of_measurement: "DKK/kWh"
-        state_class: measurement
-
-      - name: "Export Price"
-        value_template: "{{ value_json.export_price_dkk }}"
-        unit_of_measurement: "DKK/kWh"
-        state_class: measurement
-
-      - name: "Solar Produced Today"
-        value_template: "{{ value_json.daily_yield_kwh }}"
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        # full forecast arrays are available as attributes:
-        json_attributes:
-          - solar_forecast_today
-          - prices_today
-          - solar_fc_kwh_today
-```
-
-Sign conventions match the inverter: **`grid_w` > 0 = importing, `batt_w` > 0 = charging.** Flip the sign in a template if you want "export"/"discharge" as positive.
-
-> If you'd rather HA own the Modbus link, you can — but then **stop Lyset's worker first** (`POST /api/disconnect`, or run with the controller off), because both cannot hold the single SDongle socket at once.
+It returns one flat JSON object (PV, grid, battery, SoC, house load, prices, next-slot forecasts) — ideal for a REST sensor with `json_attributes`. Sign conventions match the inverter: `grid_w > 0` = importing, `batt_w > 0` = charging.
 
 ---
 
-## Running 24/7 (Proxmox LXC / systemd)
+## Running 24/7
 
-Lyset is designed to run headless on a small always-on host (the reference deployment is a Proxmox LXC). A minimal systemd unit:
+Lyset is happy running headless on any small always-on machine. Example `systemd` unit:
 
 ```ini
 # /etc/systemd/system/lyset.service
@@ -392,7 +133,6 @@ WorkingDirectory=/opt/Lyset
 ExecStart=/opt/Lyset/.venv/bin/python main.py
 EnvironmentFile=/opt/Lyset/.env
 Restart=always
-RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -403,50 +143,16 @@ sudo systemctl enable --now lyset
 journalctl -u lyset -f        # follow logs
 ```
 
-Update by pulling the repo and restarting the service. The SQLite history DB (`lyset_history.db`) and learned model (`lyset_model.json`) live in the working directory and persist across restarts — back them up if you care about the history.
+History (`lyset_history.db`) and the learned model (`lyset_model.json`) live in the working directory and persist across restarts — back them up if you care about the data. You can also download a copy any time from the Log tab or `GET /api/download/db`.
 
 ---
 
-## Data storage
+## Under the hood
 
-Everything is a single SQLite file, **`lyset_history.db`**, created on first run in the working directory ([`lyset/store.py`](lyset/store.py)). Tables: inverter polls, prices, solar/consumption/power forecasts, daily solar totals, and the auto-controller command log. The learned consumption profile is a separate JSON file, **`lyset_model.json`**.
-
-Grab a consistent copy any time (safe while polling) from `GET /api/download/db` or the Log tab's download button — it's a normal SQLite database you can open with any tool.
-
----
-
-## Hardware constraints & gotchas
-
-- **Single Modbus client** — the SDongle allows exactly one TCP client. Don't run HA's `huawei_solar` against the inverter at the same time as Lyset.
-- **Connect-per-poll** — a fresh connection is opened and closed each cycle on purpose (the SDongle drops idle sockets after ~30 s). Don't "optimise" it into a persistent connection.
-- **Device-info registers (30000+)** don't respond through the SDongle proxy on this firmware and are excluded from polling.
-- **Battery SoC lives at register 37760**, far from the other battery registers (37001–37022); the batch reader handles the gap.
-- **pymodbus 3.x** — use the `device_id=` keyword (not `slave=`).
-- **`run_coroutine_threadsafe` is avoided** for the worker→browser push path (it silently drops futures on Windows); the code uses `call_soon_threadsafe` + an `asyncio.Queue` instead.
-
----
-
-## Project layout
-
-```
-Lyset/
-├── main.py                     # entry point — starts uvicorn
-├── requirements.txt
-├── .env                        # your config (not committed)
-└── lyset/
-    ├── server.py               # FastAPI app: REST, WebSocket, worker lifecycle, HA snapshot
-    ├── register_map.py         # single source of truth for all Modbus registers
-    ├── modbus_client.py        # ModbusWorker thread — batched reads, connect-per-poll
-    ├── auto_controller.py      # battery decision/control logic
-    ├── prices.py               # Strømligning price worker
-    ├── solcast.py              # Solcast solar-forecast worker
-    ├── consumption_model.py    # weekly load profile (seed + online EMA learning)
-    ├── store.py                # SQLite history store
-    ├── static/index.html       # single-file web dashboard (Chart.js, no build step)
-    └── gui/                    # legacy PySide6 desktop app (phase 1)
-```
-
-No build step for the frontend — `static/index.html` is a single self-contained SPA using Chart.js from a CDN. No test suite or linter is configured; `pip install -r requirements.txt` is the only dependency check.
+- **No build step** — the dashboard is a single self-contained `static/index.html` using Chart.js from a CDN.
+- **REST + WebSocket API** — everything the dashboard uses is available programmatically; browse the routes in [`server.py`](lyset/server.py).
+- **Data** — one SQLite file plus one JSON model file, both in the working directory.
+- There's also a legacy PySide6 desktop GUI (`lyset/gui/`) from the project's first phase; the web server is now the primary interface.
 
 ---
 
