@@ -675,13 +675,13 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         &middot; Solid bars = real data (15 min) &middot; Faded = hourly forecast
       </div>
 
-      <!-- Stair-step import vs export line chart -->
+      <!-- Stair-step price line chart (import OR export, per the mode toggle) -->
       <div style="display:flex;gap:18px;margin:18px 0 10px;font-size:11px">
-        <span style="display:flex;align-items:center;gap:5px">
+        <span id="pr-line-lgd-import" style="display:flex;align-items:center;gap:5px">
           <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>
           Import (all-in incl. VAT)
         </span>
-        <span style="display:flex;align-items:center;gap:5px">
+        <span id="pr-line-lgd-export" style="display:flex;align-items:center;gap:5px">
           <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>
           Export est. (spot only)
         </span>
@@ -3400,8 +3400,7 @@ function onPrices(prices) {
 // Price modal — opened from the dashboard Import/Export price cards.
 function openPriceModal(mode) {
   document.getElementById('price-modal-overlay').classList.add('active');
-  setPriceMode(mode || 'import');   // sets the toggle + renders the bar chart
-  renderPriceLineChart();
+  setPriceMode(mode || 'import');   // sets the toggle + renders both charts for that mode
 }
 function closePriceModal() {
   document.getElementById('price-modal-overlay').classList.remove('active');
@@ -3600,7 +3599,12 @@ function setPriceMode(mode) {
   _priceMode = mode;
   document.getElementById('pr-btn-import').className = mode === 'import' ? 'primary' : '';
   document.getElementById('pr-btn-export').className = mode === 'export' ? 'primary' : '';
+  const lgdImp = document.getElementById('pr-line-lgd-import');
+  const lgdExp = document.getElementById('pr-line-lgd-export');
+  if (lgdImp) lgdImp.style.display = mode === 'export' ? 'none' : 'flex';
+  if (lgdExp) lgdExp.style.display = mode === 'export' ? 'flex' : 'none';
   renderPriceChart();
+  renderPriceLineChart();
 }
 
 function renderPriceLineChart() {
@@ -3617,37 +3621,37 @@ function renderPriceLineChart() {
     return p && p.forecast ? [6, 4] : [];
   };
 
+  const importDs = {
+    label:            'Import (all-in incl. VAT)',
+    data:             importPts,
+    borderColor:      '#F59E0B',
+    backgroundColor:  '#F59E0B18',
+    borderWidth:      2,
+    pointRadius:      0,
+    pointHoverRadius: 4,
+    pointHoverBackgroundColor: '#F59E0B',
+    stepped:          'before',
+    fill:             true,
+    tension:          0,
+    segment: { borderDash: forecastBorder },
+  };
+  const exportDs = {
+    label:            'Export est. (spot only)',
+    data:             exportPts,
+    borderColor:      '#34D399',
+    backgroundColor:  '#34D39912',
+    borderWidth:      2,
+    pointRadius:      0,
+    pointHoverRadius: 4,
+    pointHoverBackgroundColor: '#34D399',
+    stepped:          'before',
+    fill:             true,
+    tension:          0,
+    segment: { borderDash: forecastBorder },
+  };
+  // Show only the series matching the active card/toggle.
   const chartData = {
-    datasets: [
-      {
-        label:            'Import (all-in incl. VAT)',
-        data:             importPts,
-        borderColor:      '#F59E0B',
-        backgroundColor:  '#F59E0B18',
-        borderWidth:      2,
-        pointRadius:      0,
-        pointHoverRadius: 4,
-        pointHoverBackgroundColor: '#F59E0B',
-        stepped:          'before',
-        fill:             true,
-        tension:          0,
-        segment: { borderDash: forecastBorder },
-      },
-      {
-        label:            'Export est. (spot only)',
-        data:             exportPts,
-        borderColor:      '#34D399',
-        backgroundColor:  '#34D39912',
-        borderWidth:      2,
-        pointRadius:      0,
-        pointHoverRadius: 4,
-        pointHoverBackgroundColor: '#34D399',
-        stepped:          'before',
-        fill:             true,
-        tension:          0,
-        segment: { borderDash: forecastBorder },
-      },
-    ],
+    datasets: _priceMode === 'export' ? [exportDs] : [importDs],
   };
 
   const sharedTooltip = {
