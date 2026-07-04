@@ -1233,6 +1233,15 @@ const DASH_CHARTS = [
 ];
 const _dashCharts = {};  // key → Chart instance
 
+// Fixed viewport for the inline trend charts: the last 6 h of measured data plus
+// the next 12 h of forecast. The window slides with wall-clock time on each poll.
+const DASH_PAST_MS = 6  * 3600 * 1000;
+const DASH_FUT_MS  = 12 * 3600 * 1000;
+function _dashWindow() {
+  const now = Date.now();
+  return { min: now - DASH_PAST_MS, max: now + DASH_FUT_MS };
+}
+
 // Build the DOM cells (once) for every dashboard chart.
 function buildDashChartCells() {
   const wrap = document.getElementById('dash-charts');
@@ -1291,8 +1300,10 @@ function renderDashCharts() {
         scales: {
           x: {
             type: 'linear',
+            min: _dashWindow().min,
+            max: _dashWindow().max,
             ticks: {
-              color: '#8892AA', maxTicksLimit: 6, font: { size: 9 },
+              color: '#8892AA', maxTicksLimit: 7, font: { size: 9 },
               callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             },
             grid: { color: '#2D3555' },
@@ -1334,10 +1345,13 @@ function renderDashCharts() {
 // re-render (picking up new/removed forecast overlays) happens on history load.
 function refreshDashCharts() {
   if (!Object.keys(_dashCharts).length) { renderDashCharts(); return; }
+  const win = _dashWindow();
   for (const c of DASH_CHARTS) {
     const ch = _dashCharts[c.key];
     if (!ch) continue;
     ch.data.datasets[0].data = modalSeriesData(c.key);
+    ch.options.scales.x.min = win.min;   // slide the -6h/+12h window with real time
+    ch.options.scales.x.max = win.max;
     ch.update('none');
   }
 }
