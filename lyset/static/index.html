@@ -1233,13 +1233,12 @@ const DASH_CHARTS = [
 ];
 const _dashCharts = {};  // key → Chart instance
 
-// Fixed viewport for the inline trend charts: the last 6 h of measured data plus
-// the next 12 h of forecast. The window slides with wall-clock time on each poll.
-const DASH_PAST_MS = 6  * 3600 * 1000;
-const DASH_FUT_MS  = 12 * 3600 * 1000;
+// Fixed viewport for the inline trend charts: the whole current calendar day,
+// 00:00 → 24:00 local. Rolls to the new day at midnight (recomputed each poll).
 function _dashWindow() {
-  const now = Date.now();
-  return { min: now - DASH_PAST_MS, max: now + DASH_FUT_MS };
+  const now   = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return { min: start, max: start + 24 * 3600 * 1000 };
 }
 
 // Build the DOM cells (once) for every dashboard chart.
@@ -1350,7 +1349,7 @@ function refreshDashCharts() {
     const ch = _dashCharts[c.key];
     if (!ch) continue;
     ch.data.datasets[0].data = modalSeriesData(c.key);
-    ch.options.scales.x.min = win.min;   // slide the -6h/+12h window with real time
+    ch.options.scales.x.min = win.min;   // keep the day window current (rolls at midnight)
     ch.options.scales.x.max = win.max;
     ch.update('none');
   }
