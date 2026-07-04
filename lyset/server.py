@@ -18,6 +18,7 @@ import asyncio
 import bisect
 import json
 import logging
+import math
 import os
 import statistics
 import tempfile
@@ -634,6 +635,46 @@ def _on_data(data: dict):
                 _push_power_forecast(fc)
 
 
+try:
+    _CONS_SMOOTH_SIGMA = float(os.getenv('CONSUMPTION_SMOOTH_SIGMA_SLOTS', '1.2'))
+except (TypeError, ValueError):
+    _CONS_SMOOTH_SIGMA = 1.2
+
+
+def _smooth_w_timeseries(records: list[dict], sigma: float) -> list[dict]:
+    """Gaussian-smooth the 'w' of a consumption series along time (15-min slots).
+
+    The consumption model's per-slot profile smoothing only reaches freshly predicted
+    slots; rows already frozen in consumption_forecast (INSERT OR IGNORE) keep their
+    original per-slot sampling noise — and the plan sim overlays exactly those frozen
+    rows as its load input. Smoothing the SERVED series here de-noises the house-needs
+    line, the SoC/grid/export plan, and the auto-controller's load input in one place,
+    regardless of what the frozen rows hold. Linear (no week wrap); rows missing 'w'
+    pass through and locally shorten the kernel.
+    """
+    if sigma <= 0 or len(records) < 3:
+        return records
+    recs   = sorted(records, key=lambda r: r['ts_ms'])
+    ws     = [r.get('w') for r in recs]
+    n      = len(ws)
+    rad    = max(1, int(round(3 * sigma)))
+    kernel = [math.exp(-0.5 * (k / sigma) ** 2) for k in range(-rad, rad + 1)]
+    out    = []
+    for i in range(n):
+        if ws[i] is None:
+            out.append(recs[i])
+            continue
+        num = den = 0.0
+        for k in range(-rad, rad + 1):
+            j = i + k
+            if 0 <= j < n and ws[j] is not None:
+                wk   = kernel[k + rad]
+                num += wk * ws[j]
+                den += wk
+        out.append({**recs[i], 'w': round(num / den, 1) if den else ws[i]})
+    return out
+
+
 def _merge_cons_bands(records: list[dict], future: list[dict]) -> list[dict]:
     """Attach a p10/p90 confidence band to each stored consumption record.
 
@@ -643,7 +684,11 @@ def _merge_cons_bands(records: list[dict], future: list[dict]) -> list[dict]:
     bias, transplanting the raw p10/p90 leaves the band off-centre from the displayed
     line. Transplant only the HALF-WIDTHS (p90−mean, mean−p10 — σ-based and
     bias-independent) onto the displayed 'w' so the band brackets the dashed mean line.
+
+    The 'w' is first smoothed along time so the served line (and everything that
+    consumes it) is de-noised even where the frozen rows still hold raw per-slot noise.
     """
+    records    = _smooth_w_timeseries(records, _CONS_SMOOTH_SIGMA)
     pred_by_ts = {r['ts_ms']: r for r in future}
     out = []
     for r in records:
