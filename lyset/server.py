@@ -633,6 +633,31 @@ def _on_data(data: dict):
                 _push_power_forecast(fc)
 
 
+def _merge_cons_bands(records: list[dict], future: list[dict]) -> list[dict]:
+    """Attach a p10/p90 confidence band to each stored consumption record.
+
+    The DB keeps only the mean 'w' (frozen at first write via INSERT OR IGNORE); the
+    σ-based band comes from the fresh `future` predict(). Because the fresh predict
+    carries the model's *current* global bias while 'w' was frozen under an earlier
+    bias, transplanting the raw p10/p90 leaves the band off-centre from the displayed
+    line. Transplant only the HALF-WIDTHS (p90−mean, mean−p10 — σ-based and
+    bias-independent) onto the displayed 'w' so the band brackets the dashed mean line.
+    """
+    pred_by_ts = {r['ts_ms']: r for r in future}
+    out = []
+    for r in records:
+        pr = pred_by_ts.get(r['ts_ms'])
+        if (pr and r.get('w') is not None and pr.get('w') is not None
+                and pr.get('p10_w') is not None and pr.get('p90_w') is not None):
+            w = r['w']
+            out.append({**r,
+                        'p10_w': round(max(0.0, w - (pr['w'] - pr['p10_w'])), 1),
+                        'p90_w': round(w + (pr['p90_w'] - pr['w']), 1)})
+        else:
+            out.append({**r, 'p10_w': None, 'p90_w': None})
+    return out
+
+
 def _save_model_and_regen():
     global _last_consumption_forecast
     try:
@@ -643,28 +668,11 @@ def _save_model_and_regen():
     # so past predictions are preserved for comparison against actual measurements)
     future = _consumption_model.predict(time.time())
     store.save_consumption_forecast(future)
-    # Push the combined window: past 24h of predictions + next 24h.
-    # The DB stores only the mean 'w' (frozen at first write); p10/p90 come from the
-    # fresh predict(). The fresh predict carries the model's *current* global bias
-    # while the stored 'w' was frozen under an earlier bias, so the raw fresh band sits
-    # off-centre from the displayed 'w' line. Transplant only the band's HALF-WIDTHS
-    # (σ-based, bias-independent) onto the displayed 'w' so the band brackets the line.
+    # Push the combined window: past 24h of predictions + next 24h. Bands are
+    # re-centred on the displayed mean by _merge_cons_bands (see its docstring).
     now_ms = int(time.time() * 1000)
     combined = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
-    pred_by_ts = {r['ts_ms']: r for r in future}
-
-    def _centred_bands(r):
-        pr = pred_by_ts.get(r['ts_ms'])
-        if (not pr or pr.get('w') is None
-                or pr.get('p10_w') is None or pr.get('p90_w') is None):
-            return {'p10_w': None, 'p90_w': None}
-        w = r['w']
-        return {
-            'p10_w': round(max(0.0, w - (pr['w'] - pr['p10_w'])), 1),
-            'p90_w': round(w + (pr['p90_w'] - pr['w']), 1),
-        }
-
-    _last_consumption_forecast = [{**r, **_centred_bands(r)} for r in (combined or future)]
+    _last_consumption_forecast = _merge_cons_bands(combined or future, future)
     _auto_controller.set_consumption_forecast(_last_consumption_forecast)
     _push({'type': 'consumption_forecast', 'payload': _last_consumption_forecast})
 
@@ -965,13 +973,8 @@ async def lifespan(app: FastAPI):
         store.save_consumption_forecast(future)
         now_ms = int(time.time() * 1000)
         stored = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
-        # Merge p10/p90 from fresh prediction into stored records (DB only keeps 'w')
-        pred_by_ts = {r['ts_ms']: r for r in future}
-        _last_consumption_forecast = [
-            {**r, 'p10_w': pred_by_ts.get(r['ts_ms'], {}).get('p10_w'),
-                  'p90_w': pred_by_ts.get(r['ts_ms'], {}).get('p90_w')}
-            for r in (stored or future)
-        ]
+        # Bands re-centred on the displayed mean by _merge_cons_bands (DB only keeps 'w')
+        _last_consumption_forecast = _merge_cons_bands(stored or future, future)
         _auto_controller.set_consumption_forecast(_last_consumption_forecast)
 
     # Restore stored power forecast from DB
