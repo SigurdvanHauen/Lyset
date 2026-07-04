@@ -217,14 +217,22 @@ def _simulate_soc(
       batt_w: positive = charging, negative = discharging  (matches batt_power key)
       grid_w: positive = importing, negative = exporting   (matches meter_active_power key)
 
-    Iterates over a 30-min time grid (not solar_fc records) so that night periods
+    Iterates over a 15-min time grid (not solar_fc records) so that night periods
     — which Solcast omits entirely because PV=0 — are still stepped through and the
-    battery correctly discharges overnight.
+    battery correctly discharges overnight. The grid matches the consumption
+    forecast's 15-min slots, and each record is labelled at its slot-START ts_ms
+    (the same convention the house-needs line uses), so the plotted battery-power
+    line coincides with the house-load line instead of sitting a coarse 30-min
+    backward average above it. PV, still on Solcast's 30-min resolution, is read
+    from the 30-min period enclosing each 15-min step.
     """
     if not solar_fc or capacity_kwh <= 0:
         return []
 
-    SLOT_MS = 30 * 60 * 1000  # 30-min steps matching Solcast resolution
+    SLOT_MS  = 15 * 60 * 1000  # 15-min steps matching the consumption forecast
+    SLOT_H   = SLOT_MS / 3_600_000  # hours per step (0.25) for energy integration
+    SOLAR_MS = 30 * 60 * 1000  # Solcast resolution — each 15-min step reads its
+                               # enclosing 30-min PV period
     cutoff_ms = start_ms if start_ms is not None else int(time.time() * 1000)
 
     # Index solar by period-end ts; night periods (omitted by Solcast) default to 0 W
@@ -246,21 +254,13 @@ def _simulate_soc(
     result    = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
     for ts_ms in range(first_slot_ms, int(end_ms) + 1, SLOT_MS):
-        pv_w = solar_by_ts.get(ts_ms, 0.0)
-
-        # Map 30-min period [ts_ms-30min, ts_ms] to two 15-min consumption slots
-        slot1_ms = ts_ms - SLOT_MS
-        slot2_ms = ts_ms - SLOT_MS // 2
-        load1 = load_by_ts.get(slot1_ms)
-        load2 = load_by_ts.get(slot2_ms)
-
-        if load1 is not None and load2 is not None:
-            load_w = (load1 + load2) / 2.0
-        elif load1 is not None:
-            load_w = load1
-        elif load2 is not None:
-            load_w = load2
-        else:
+        # ts_ms is a 15-min slot-START, matching the consumption forecast's own
+        # ts_ms convention, so the plotted discharge point lands on the same x as
+        # the house-needs line for that slot. PV is a power that's flat across its
+        # 30-min Solcast period, so read the period enclosing this slot-start.
+        pv_w   = solar_by_ts.get((ts_ms // SOLAR_MS + 1) * SOLAR_MS, 0.0)
+        load_w = load_by_ts.get(ts_ms)
+        if load_w is None:
             continue  # beyond load forecast window — stop stepping
 
         net_kw = (pv_w - load_w) / 1000.0
@@ -308,7 +308,8 @@ def _simulate_soc(
                         # pack for. Sum forecast PV between now and the peak; suppress
                         # the hold when it covers the battery (mirrors AutoController).
                         solar_kwh = sum(
-                            (solar_by_ts.get(t, 0.0)) / 1000.0 * 0.5
+                            solar_by_ts.get((t // SOLAR_MS + 1) * SOLAR_MS, 0.0)
+                            / 1000.0 * SLOT_H
                             for t in range(ts_ms + SLOT_MS, peak_p['ts'] + 1, SLOT_MS)
                         )
                         solar_will_refill = solar_kwh >= capacity_kwh * HOLD_SOLAR_REFILL_FACTOR
@@ -339,7 +340,7 @@ def _simulate_soc(
                                 continue
                             # 15-min load slot lt sits in the 30-min solar period
                             # ending at the next boundary (same mapping as above).
-                            period_end = (lt // SLOT_MS + 1) * SLOT_MS
+                            period_end = (lt // SOLAR_MS + 1) * SOLAR_MS
                             deficit_w  = max(0.0, lw - solar_by_ts.get(period_end, 0.0))
                             reserve_kwh += deficit_w / 1000.0 * 0.25
                         do_arbit = (available_kwh - reserve_kwh) > ARBIT_MIN_EXCESS_KWH
@@ -355,13 +356,13 @@ def _simulate_soc(
                 else:
                     batt_kw = min(net_kw, max_power_kw)
                 grid_kw    = max(0.0, batt_kw - net_kw)  # surplus remainder curtailed, not exported
-                energy_kwh = batt_kw * 0.5 * charge_eff
+                energy_kwh = batt_kw * SLOT_H * charge_eff
 
             elif do_gc:
                 gc_active  = True
                 batt_kw    = min(GRID_CHARGE_W / 1000.0, max_power_kw)
                 grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * 0.5 * charge_eff
+                energy_kwh = batt_kw * SLOT_H * charge_eff
 
             elif do_hold:
                 gc_active  = False
@@ -373,7 +374,7 @@ def _simulate_soc(
                 gc_active  = False
                 batt_kw    = 0.0 if soc <= MIN_SOC_ARBIT else -min(GRID_CHARGE_W / 1000.0, max_power_kw)
                 grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * 0.5 / discharge_eff  # batt_kw ≤ 0 → SoC falls
+                energy_kwh = batt_kw * SLOT_H / discharge_eff  # batt_kw ≤ 0 → SoC falls
 
             else:
                 # Self-consumption (covers negative export and the default case)
@@ -383,7 +384,7 @@ def _simulate_soc(
                 else:
                     batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
                 grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+                energy_kwh = batt_kw * SLOT_H * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
 
         else:
             # No price data — pure self-consumption
@@ -392,7 +393,7 @@ def _simulate_soc(
             else:
                 batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
             grid_kw    = batt_kw - net_kw
-            energy_kwh = batt_kw * 0.5 * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+            energy_kwh = batt_kw * SLOT_H * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
 
         soc = max(min_soc, min(100.0, soc + energy_kwh / capacity_kwh * 100.0))
         result.append({
