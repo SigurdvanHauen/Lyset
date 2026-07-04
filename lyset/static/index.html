@@ -675,21 +675,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         &middot; Solid bars = real data (15 min) &middot; Faded = hourly forecast
       </div>
 
-      <!-- Stair-step price line chart (import OR export, per the mode toggle) -->
-      <div style="display:flex;gap:18px;margin:18px 0 10px;font-size:11px">
-        <span id="pr-line-lgd-import" style="display:flex;align-items:center;gap:5px">
-          <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>
-          Import (all-in incl. VAT)
-        </span>
-        <span id="pr-line-lgd-export" style="display:flex;align-items:center;gap:5px">
-          <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>
-          Export est. (spot only)
-        </span>
-      </div>
-      <div style="position:relative;height:220px">
-        <canvas id="pr-line-chart"></canvas>
-      </div>
-
     </div>
   </div>
 </div>
@@ -3382,7 +3367,6 @@ function updateGridSub() {
 // ── Prices ────────────────────────────────────────────────────────────────────
 let _pricesData    = [];
 let _priceChart    = null;
-let _priceLineChart = null;
 let _priceMode     = 'import';
 
 function onPrices(prices) {
@@ -3392,7 +3376,7 @@ function onPrices(prices) {
   const prStatus = document.getElementById('pr-status');
   if (prStatus) prStatus.textContent = '';
   const prOverlay = document.getElementById('price-modal-overlay');
-  if (prOverlay && prOverlay.classList.contains('active')) { renderPriceChart(); renderPriceLineChart(); }
+  if (prOverlay && prOverlay.classList.contains('active')) { renderPriceChart(); }
   // The plan chart draws the price overlays itself — refresh it if it's showing.
   refreshPlanChart();
 }
@@ -3599,168 +3583,7 @@ function setPriceMode(mode) {
   _priceMode = mode;
   document.getElementById('pr-btn-import').className = mode === 'import' ? 'primary' : '';
   document.getElementById('pr-btn-export').className = mode === 'export' ? 'primary' : '';
-  const lgdImp = document.getElementById('pr-line-lgd-import');
-  const lgdExp = document.getElementById('pr-line-lgd-export');
-  if (lgdImp) lgdImp.style.display = mode === 'export' ? 'none' : 'flex';
-  if (lgdExp) lgdExp.style.display = mode === 'export' ? 'flex' : 'none';
   renderPriceChart();
-  renderPriceLineChart();
-}
-
-function renderPriceLineChart() {
-  if (!_pricesData.length) return;
-  const now = Date.now();
-
-  // Use {x, y} pairs with actual timestamps so spacing reflects real time.
-  const importPts = _pricesData.map(p => ({ x: p.ts, y: p.import }));
-  const exportPts = _pricesData.map(p => ({ x: p.ts, y: p.export  }));
-
-  // Segment styling: forecast = dashed line
-  const forecastBorder = ctx => {
-    const p = _pricesData[ctx.p0DataIndex];
-    return p && p.forecast ? [6, 4] : [];
-  };
-
-  const importDs = {
-    label:            'Import (all-in incl. VAT)',
-    data:             importPts,
-    borderColor:      '#F59E0B',
-    backgroundColor:  '#F59E0B18',
-    borderWidth:      2,
-    pointRadius:      0,
-    pointHoverRadius: 4,
-    pointHoverBackgroundColor: '#F59E0B',
-    stepped:          'before',
-    fill:             true,
-    tension:          0,
-    segment: { borderDash: forecastBorder },
-  };
-  const exportDs = {
-    label:            'Export est. (spot only)',
-    data:             exportPts,
-    borderColor:      '#34D399',
-    backgroundColor:  '#34D39912',
-    borderWidth:      2,
-    pointRadius:      0,
-    pointHoverRadius: 4,
-    pointHoverBackgroundColor: '#34D399',
-    stepped:          'before',
-    fill:             true,
-    tension:          0,
-    segment: { borderDash: forecastBorder },
-  };
-  // Show only the series matching the active card/toggle.
-  const chartData = {
-    datasets: _priceMode === 'export' ? [exportDs] : [importDs],
-  };
-
-  const sharedTooltip = {
-    backgroundColor: '#1C2032',
-    titleColor:      '#8892AA',
-    bodyColor:       '#E2E8F4',
-    borderColor:     '#2D3555',
-    borderWidth:     1,
-    padding:         10,
-    callbacks: {
-      title: ctx => {
-        const p = _pricesData[ctx[0].dataIndex];
-        if (!p) return '';
-        return _fmtDT(p.ts) + (p.forecast ? ' (forecast)' : '') + ` · ${p.resolution || '1h'}`;
-      },
-      label: ctx => {
-        const p  = _pricesData[ctx.dataIndex];
-        if (!p) return ctx.dataset.label + ': —';
-        const v  = ctx.parsed.y != null ? ctx.parsed.y.toFixed(4) : '—';
-        const marker = ctx.dataset.label.startsWith('Import') ? '🟡' : '🟢';
-        return `${marker} ${ctx.dataset.label}: ${v} DKK/kWh`;
-      },
-      afterBody: ctx => {
-        const p = _pricesData[ctx[0].dataIndex];
-        if (!p) return [];
-        return [`   Spot+tax: ${p.spot_est.toFixed(4)} DKK/kWh`];
-      },
-    },
-  };
-
-  if (_priceLineChart) {
-    _priceLineChart.data = chartData;
-    _priceLineChart.options.scales.y.min = undefined;
-    _priceLineChart.update('none');
-    return;
-  }
-
-  // Inline plugin: vertical "now" line drawn after each render
-  const nowLinePlugin = {
-    id: 'nowLine',
-    afterDraw(chart) {
-      const now   = Date.now();
-      const xScale = chart.scales.x;
-      const x     = xScale.getPixelForValue(now);
-      if (x < xScale.left || x > xScale.right) return;
-      const ctx2  = chart.ctx;
-      const { top, bottom } = chart.chartArea;
-      ctx2.save();
-      ctx2.beginPath();
-      ctx2.moveTo(x, top);
-      ctx2.lineTo(x, bottom);
-      ctx2.strokeStyle = '#E2E8F4';
-      ctx2.lineWidth   = 1.5;
-      ctx2.setLineDash([4, 3]);
-      ctx2.stroke();
-      // Label
-      ctx2.fillStyle    = '#E2E8F4';
-      ctx2.font         = 'bold 9px sans-serif';
-      ctx2.textAlign    = 'left';
-      ctx2.fillText('Now', x + 3, top + 12);
-      ctx2.restore();
-    },
-  };
-
-  _priceLineChart = new Chart(
-    document.getElementById('pr-line-chart').getContext('2d'), {
-    type:    'line',
-    data:    chartData,
-    plugins: [nowLinePlugin],
-    options: {
-      responsive:          true,
-      maintainAspectRatio: false,
-      animation:           false,
-      interaction:         { mode: 'index', intersect: false },
-      plugins: {
-        legend:  { display: false },
-        tooltip: sharedTooltip,
-        zoom: {
-          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
-          pan:  { enabled: true, mode: 'x' },
-        },
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          ticks: {
-            color:         '#8892AA',
-            font:          { size: 9 },
-            maxTicksLimit: 24,
-            maxRotation:   45,
-            callback: (v, index, ticks) => {
-              const d    = new Date(v);
-              const prev = index > 0 ? new Date(ticks[index - 1].value) : null;
-              const t    = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-              if (!prev || prev.getDate() !== d.getDate())
-                return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'numeric' }) + ' ' + t;
-              return t;
-            },
-          },
-          grid: { color: '#2D3555' },
-        },
-        y: {
-          title: { display: true, text: 'DKK/kWh', color: '#8892AA', font: { size: 10 } },
-          ticks: { color: '#8892AA', font: { size: 10 }, callback: v => v.toFixed(2) },
-          grid:  { color: '#2D3555' },
-        },
-      },
-    },
-  });
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -3931,7 +3754,6 @@ loadEvSummary();
 renderPlanChart();   // plan chart now lives on the dashboard, so draw it on load
 renderDashCharts();  // build the 3×2 trend grid (incl. the EV cell) immediately
 setInterval(updateMeta, 1000);
-setInterval(() => { if (_priceLineChart) _priceLineChart.draw(); }, 60000);
 
 fetch('/api/state').then(r => r.json()).then(s => {
   if (s.connected) onConn(true, s.msg);
