@@ -1318,7 +1318,7 @@ function renderDashCharts() {
             display: hasOverlay,
             labels: {
               color: '#8892AA', font: { size: 9 }, boxWidth: 16,
-              filter: item => item.text !== 'P90' && item.text !== 'P10',
+              filter: item => !/P(10|90)$/.test(item.text),  // hide P10/P90 + Cons P10/P90 band bounds
             },
           },
           tooltip: {
@@ -1328,7 +1328,7 @@ function renderDashCharts() {
             callbacks: {
               title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
               label: ctx => {
-                if (ctx.dataset.label === 'P90' || ctx.dataset.label === 'P10') return null;
+                if (/P(10|90)$/.test(ctx.dataset.label)) return null;  // P10/P90 + Cons variants
                 return ctx.dataset.label + ': ' + ctx.formattedValue + (c.unit ? ' ' + c.unit : '');
               },
             },
@@ -1648,7 +1648,7 @@ function openChart(key, label, unit, color) {
             color: '#8892AA',
             font:  { size: 10 },
             boxWidth: 20,
-            filter: item => item.text !== 'P90' && item.text !== 'P10',
+            filter: item => !/P(10|90)$/.test(item.text),  // hide P10/P90 + Cons P10/P90 band bounds
           },
         },
         tooltip: {
@@ -1665,7 +1665,7 @@ function openChart(key, label, unit, color) {
                 hour: '2-digit', minute: '2-digit' }) : d.toLocaleTimeString();
             },
             label: ctx => {
-              if (ctx.dataset.label === 'P90' || ctx.dataset.label === 'P10') return null;
+              if (/P(10|90)$/.test(ctx.dataset.label)) return null;  // P10/P90 + Cons variants
               return ctx.dataset.label + ': ' + ctx.formattedValue + (unit ? ' ' + unit : '');
             },
           }

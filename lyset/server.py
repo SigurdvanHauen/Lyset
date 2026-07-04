@@ -1203,6 +1203,11 @@ async def api_consumption_forecast(full: int = 0):
     to_ms   = now_ms + 7 * 86_400_000 if full else now_ms + 86_400_000
     loop   = asyncio.get_running_loop()
     data   = await loop.run_in_executor(None, store.load_consumption_forecast, from_ms, to_ms)
+    # DB rows carry only the mean 'w'; attach the (re-centred) p10/p90 band from a
+    # fresh predict so the expanded modal chart shows confidence bands too.
+    if data and _consumption_model:
+        future = _consumption_model.predict(time.time(), n_slots=192)
+        data = _merge_cons_bands(data, future)
     return {
         'forecast': data if data else _last_consumption_forecast,
         'coverage': _consumption_model.coverage if _consumption_model else 0,
