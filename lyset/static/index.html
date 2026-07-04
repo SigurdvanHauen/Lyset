@@ -450,6 +450,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
          style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:12px;cursor:pointer">
       <span style="font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap">Auto Mode</span>
       <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
+      <span id="d-export-badge" title="Grid export limitation (inverter active-power-control mode)" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Export&nbsp;&#8212;</span>
       <div id="d-auto-action" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No commands yet</div>
     </div>
 
@@ -1196,6 +1197,8 @@ function onData(d) {
 
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
+
+  renderExportBadge(d.active_power_mode, d.max_feed_grid_w);
 
   refreshDashCharts();
   refreshPlanChart();
@@ -2015,6 +2018,36 @@ function openStateChart() {
 
 function onAutoHistory(commands) {
   _autoCommands = commands || [];
+}
+
+// Grid-export status badge in the auto-mode bar, from active-power-control mode
+// (reg 47415): 0=unlimited (export ON), 5=zero-export (OFF), 6/7=watt/%-limited.
+function renderExportBadge(mode, feedW) {
+  const badge = document.getElementById('d-export-badge');
+  if (!badge) return;
+  let label, color, border, bg;
+  if (mode === 0) {
+    label = 'Export On';
+    color = 'var(--success)'; border = 'var(--success)'; bg = '#0d2e1a';
+  } else if (mode === 5) {
+    label = 'Export Off';
+    color = 'var(--danger)'; border = 'var(--danger)'; bg = '#2e1416';
+  } else if (mode === 6 || mode === 7) {
+    const cap = (mode === 6 && typeof feedW === 'number')
+      ? ` ${Math.round(feedW)} W` : '';
+    label = 'Export Limited' + cap;
+    color = 'var(--warning)'; border = 'var(--warning)'; bg = '#2e2410';
+  } else {
+    badge.innerHTML = 'Export&nbsp;&#8212;';
+    badge.style.color = 'var(--muted)';
+    badge.style.borderColor = 'var(--border)';
+    badge.style.background = 'var(--surf2)';
+    return;
+  }
+  badge.textContent = label;
+  badge.style.color = color;
+  badge.style.borderColor = border;
+  badge.style.background = bg;
 }
 
 function onAutoMode(msg) {
