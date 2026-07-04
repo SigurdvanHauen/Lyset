@@ -199,7 +199,7 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 /* ── Dashboard inline charts ── */
 #dash-charts {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
   margin-bottom: 4px;
 }
@@ -222,7 +222,7 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 .dash-chart-box { position: relative; height: 190px; }
 
 /* ── Chart modal ── */
-#modal-overlay {
+#modal-overlay, #price-modal-overlay {
   display: none;
   position: fixed;
   inset: 0;
@@ -232,7 +232,7 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
   justify-content: center;
   backdrop-filter: blur(2px);
 }
-#modal-overlay.active { display: flex; }
+#modal-overlay.active, #price-modal-overlay.active { display: flex; }
 .modal-box {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -391,6 +391,9 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   /* Cards grid: two-column minimum so they don't get too tall */
   .cards { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
 
+  /* Dashboard chart grid: single column on narrow screens */
+  #dash-charts { grid-template-columns: 1fr; }
+
   /* Section columns stack on narrow screens */
   .split-cols { grid-template-columns: 1fr; }
   .split-cols > div + div .sec { margin-top: 18px; }
@@ -435,9 +438,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 <!-- ── Tab bar ── -->
 <div id="tabbar">
   <button class="tab-btn active" onclick="showTab('dashboard',this)">Dashboard</button>
-  <button class="tab-btn"        onclick="showTab('plan',this)">Plan</button>
-  <button class="tab-btn"        onclick="showTab('prices',this)">Prices</button>
-  <button class="tab-btn"        onclick="showTab('ev',this)">EV Charger</button>
   <button class="tab-btn"        onclick="showTab('log',this)">Log</button>
 </div>
 
@@ -451,6 +451,29 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <span style="font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap">Auto Mode</span>
       <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
       <div id="d-auto-action" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No commands yet</div>
+    </div>
+
+    <div class="sec">Plan — Actuals &amp; AI Forecast</div>
+    <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px">
+      <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
+        <div id="plan-buttons" style="display:flex;gap:8px;flex-shrink:0">
+          <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
+          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
+          <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
+          <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
+        </div>
+      </div>
+      <div id="plan-chart-wrap" style="position:relative;height:560px">
+        <canvas id="plan-chart"></canvas>
+        <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
+      </div>
+      <div id="plan-footer-text" style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
+        Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
+        Plan combines Solcast solar, the learned consumption model, electricity prices and the
+        auto-mode controller's decision logic. Battery SOC is on the right axis.
+        Click any legend item to show/hide that line.
+      </div>
     </div>
 
     <div class="sec">Trends (24 h)</div>
@@ -525,12 +548,12 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
     <div class="sec">Prices — Current Hour</div>
     <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">
-      <div class="card acc">
+      <div class="card acc clickable" onclick="openPriceModal('import')" title="Click for the price forecast chart">
         <div class="card-top"><div class="card-lbl">Import Price</div></div>
         <div class="card-val" id="pr-cur-import">&#8212;<span class="unit">DKK/kWh</span></div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-cur-import-sub"></div>
       </div>
-      <div class="card acc">
+      <div class="card acc clickable" onclick="openPriceModal('export')" title="Click for the price forecast chart">
         <div class="card-top"><div class="card-lbl">Export (spot est.)</div></div>
         <div class="card-val" id="pr-cur-export">&#8212;<span class="unit">DKK/kWh</span></div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-cur-export-sub">Net metering ~spot price</div>
@@ -603,123 +626,6 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   </div>
 
-  <!-- Plan (auto-mode behaviour: actuals + AI plan) -->
-  <div id="panel-plan" class="panel">
-    <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
-        <div id="plan-buttons" style="display:flex;gap:8px;flex-shrink:0">
-          <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
-          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
-          <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
-          <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
-        </div>
-      </div>
-      <div id="plan-chart-wrap" style="position:relative;height:560px">
-        <canvas id="plan-chart"></canvas>
-        <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
-      </div>
-      <div id="plan-footer-text" style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
-        Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
-        Plan combines Solcast solar, the learned consumption model, electricity prices and the
-        auto-mode controller's decision logic. Battery SOC is on the right axis.
-        Click any legend item to show/hide that line.
-      </div>
-    </div>
-  </div>
-
-  <!-- Prices -->
-  <div id="panel-prices" class="panel">
-
-    <!-- Price forecast chart -->
-    <div class="sec">
-      Price Forecast
-      <span id="pr-status" style="float:right;font-size:10px;color:var(--muted);text-transform:none;font-weight:normal;letter-spacing:0"></span>
-    </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
-        <button id="pr-btn-import" class="primary" onclick="setPriceMode('import')" style="font-size:11px;padding:3px 12px">Import (all-in)</button>
-        <button id="pr-btn-export" onclick="setPriceMode('export')" style="font-size:11px;padding:3px 12px">Export (spot est.)</button>
-        <span style="font-size:10px;color:var(--muted);margin-left:auto">
-          &#9632; past &nbsp; &#9632; current &nbsp; &#9632; future &nbsp; &#9632; forecast
-        </span>
-      </div>
-      <div style="position:relative;height:300px">
-        <canvas id="pr-chart"></canvas>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.6">
-        Data: <a href="https://stromligning.dk" target="_blank" style="color:var(--muted)">Strømligning</a>
-        &middot; DK1 zone &middot; Import = spot + DSO tariff + elafgift + 25% VAT
-        &middot; Export &asymp; spot price (excl. elafgift, no VAT)
-        &middot; Solid bars = real data (15 min) &middot; Faded = hourly forecast
-      </div>
-    </div>
-
-    <!-- Stair-step import vs export line chart -->
-    <div class="sec" style="margin-top:16px">Import vs Export — Stair-Step</div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
-      <div style="display:flex;gap:18px;margin-bottom:10px;font-size:11px">
-        <span style="display:flex;align-items:center;gap:5px">
-          <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>
-          Import (all-in incl. VAT)
-        </span>
-        <span style="display:flex;align-items:center;gap:5px">
-          <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>
-          Export est. (spot only)
-        </span>
-      </div>
-      <div style="position:relative;height:220px">
-        <canvas id="pr-line-chart"></canvas>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- EV Charger (development / experimentation) -->
-  <div id="panel-ev" class="panel">
-    <div class="sec">Current Status <span id="ev-charger-status-msg" style="font-size:10px;font-weight:400;color:var(--muted);margin-left:8px"></span></div>
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-bottom:8px">
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Status Code</div></div>
-        <div class="card-val" id="ev-c-status">&#8212;</div>
-        <div style="font-size:9px;color:var(--muted);margin-top:4px">raw — meaning unconfirmed</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Model</div></div>
-        <div class="card-val" style="font-size:14px" id="ev-c-model">&#8212;</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Rated Power</div></div>
-        <div class="card-val" id="ev-c-rated">&#8212;<span class="unit">kW</span></div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Lifetime Charged</div></div>
-        <div class="card-val" id="ev-c-lifetime">&#8212;<span class="unit">kWh</span></div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Charged Today</div></div>
-        <div class="card-val" id="ev-c-today">&#8212;<span class="unit">kWh</span></div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Last Update</div></div>
-        <div class="card-val" style="font-size:14px" id="ev-c-updated">&#8212;</div>
-      </div>
-    </div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.6">
-      Polled from the FusionSolar cloud. The API's
-      real-time data for this charger, read while idle with no EV connected, only exposes identity
-      fields and a lifetime energy counter — no live charging power or a confirmed plug/session
-      status. That may change once a real session happens; the raw signal dump is stored every poll
-      so anything new shows up without a code change. <b>No remote control (start/stop/limit)</b> —
-      no such endpoint has been found; see the project notes for how to add it safely.
-    </div>
-    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Energy charged per day — last 30 days (from the lifetime counter's day-over-day delta; a missing bar means no cloud data that day)</div>
-    <div style="position:relative;height:220px">
-      <canvas id="ev-charger-chart"></canvas>
-    </div>
-  </div>
-
-  <!-- Control -->
   <!-- Log -->
   <div id="panel-log" class="panel">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -733,6 +639,60 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   </div>
 
 </div><!-- #panels -->
+
+<!-- ── Price modal (opened from the Import/Export dashboard cards) ── -->
+<div id="price-modal-overlay" onclick="if(event.target===this)closePriceModal()">
+  <div class="modal-box" style="width:min(94vw,960px);height:min(88vh,760px)">
+    <div class="modal-hdr">
+      <div>
+        <div class="modal-hdr-title">Electricity Prices
+          <span id="pr-status" style="font-size:10px;color:var(--muted);font-weight:normal;margin-left:8px"></span>
+        </div>
+        <div class="modal-hdr-hint">Strømligning &middot; DK1 zone</div>
+      </div>
+      <div class="modal-actions">
+        <button id="pr-btn-import" class="primary" onclick="setPriceMode('import')" style="font-size:11px;padding:4px 12px">Import (all-in)</button>
+        <button id="pr-btn-export" onclick="setPriceMode('export')" style="font-size:11px;padding:4px 12px">Export (spot est.)</button>
+        <button class="modal-close" onclick="closePriceModal()">&#215;</button>
+      </div>
+    </div>
+    <div style="flex:1;min-height:0;overflow:auto;padding:14px 16px 18px">
+
+      <!-- Price forecast bar chart -->
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:11px;color:var(--muted);font-weight:600">Price Forecast</span>
+        <span style="font-size:10px;color:var(--muted);margin-left:auto">
+          &#9632; past &nbsp; &#9632; current &nbsp; &#9632; future &nbsp; &#9632; forecast
+        </span>
+      </div>
+      <div style="position:relative;height:300px">
+        <canvas id="pr-chart"></canvas>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.6">
+        Data: <a href="https://stromligning.dk" target="_blank" style="color:var(--muted)">Strømligning</a>
+        &middot; DK1 zone &middot; Import = spot + DSO tariff + elafgift + 25% VAT
+        &middot; Export &asymp; spot price (excl. elafgift, no VAT)
+        &middot; Solid bars = real data (15 min) &middot; Faded = hourly forecast
+      </div>
+
+      <!-- Stair-step import vs export line chart -->
+      <div style="display:flex;gap:18px;margin:18px 0 10px;font-size:11px">
+        <span style="display:flex;align-items:center;gap:5px">
+          <span style="width:22px;height:3px;background:#F59E0B;display:inline-block;border-radius:2px"></span>
+          Import (all-in incl. VAT)
+        </span>
+        <span style="display:flex;align-items:center;gap:5px">
+          <span style="width:22px;height:3px;background:#34D399;display:inline-block;border-radius:2px"></span>
+          Export est. (spot only)
+        </span>
+      </div>
+      <div style="position:relative;height:220px">
+        <canvas id="pr-line-chart"></canvas>
+      </div>
+
+    </div>
+  </div>
+</div>
 
 <!-- ── Chart modal ── -->
 <div id="modal-overlay" onclick="overlayClick(event)">
@@ -992,9 +952,6 @@ function showTab(name, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
-  if (name === 'prices') { renderPriceChart(); renderPriceLineChart(); }
-  if (name === 'plan') renderPlanChart();
-  if (name === 'ev') { loadEvChargerState(); loadEvChargerDaily(); }
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -1045,16 +1002,20 @@ function onEvChargerStatus(msg, ok) {
   el.style.color = ok ? 'var(--muted)' : '#F87171';
 }
 
+// The EV status cards were removed with the EV tab; guard every lookup so this
+// stays a no-op if the elements are absent (only the daily chart survived).
 function _renderEvChargerCurrent(cur, energyTodayKwh) {
-  document.getElementById('ev-c-status').textContent = cur && cur.status != null ? cur.status : '—';
-  document.getElementById('ev-c-model').textContent  = (cur && cur.model) || '—';
-  document.getElementById('ev-c-rated').innerHTML =
-    (cur && cur.rated_power != null ? cur.rated_power : '&#8212;') + '<span class="unit">kW</span>';
-  document.getElementById('ev-c-lifetime').innerHTML =
-    (cur && cur.total_energy_charged != null ? cur.total_energy_charged.toFixed(2) : '&#8212;') + '<span class="unit">kWh</span>';
-  document.getElementById('ev-c-today').innerHTML =
-    (energyTodayKwh != null ? energyTodayKwh.toFixed(2) : '&#8212;') + '<span class="unit">kWh</span>';
-  document.getElementById('ev-c-updated').textContent = cur ? _evFmtTs(cur._timestamp) : '—';
+  const setT = (id, txt)  => { const e = document.getElementById(id); if (e) e.textContent = txt; };
+  const setH = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML  = html; };
+  setT('ev-c-status', cur && cur.status != null ? cur.status : '—');
+  setT('ev-c-model',  (cur && cur.model) || '—');
+  setH('ev-c-rated',
+    (cur && cur.rated_power != null ? cur.rated_power : '&#8212;') + '<span class="unit">kW</span>');
+  setH('ev-c-lifetime',
+    (cur && cur.total_energy_charged != null ? cur.total_energy_charged.toFixed(2) : '&#8212;') + '<span class="unit">kWh</span>');
+  setH('ev-c-today',
+    (energyTodayKwh != null ? energyTodayKwh.toFixed(2) : '&#8212;') + '<span class="unit">kWh</span>');
+  setT('ev-c-updated', cur ? _evFmtTs(cur._timestamp) : '—');
 }
 
 async function loadEvChargerState() {
@@ -1260,10 +1221,13 @@ function onData(d) {
 // modal (same datasets via buildMetricDatasets, same styling) but embedded in a
 // grid on the Dashboard tab. Zoom/pan is off so page scrolling isn't hijacked;
 // clicking a chart opens the full modal for that metric.
+// 3×2 grid — row 1: PV, Battery, Grid · row 2: House, SoC, EV.
+// The first five are live metric series; the sixth (EV) is a bar chart with its
+// own renderer (loadEvChargerDaily), appended as a special cell below.
 const DASH_CHARTS = [
   { key: 'active_power',       label: 'PV Power',      unit: 'W', color: '#F59E0B' },
-  { key: 'meter_active_power', label: 'Grid Power',    unit: 'W', color: '#4F8EF7' },
   { key: 'batt_power',         label: 'Battery Power', unit: 'W', color: '#34D399' },
+  { key: 'meter_active_power', label: 'Grid Power',    unit: 'W', color: '#4F8EF7' },
   { key: 'house_load',         label: 'House Load',    unit: 'W', color: '#F87171' },
   { key: 'batt_soc',           label: 'Battery SoC',   unit: '%', color: '#34D399' },
 ];
@@ -1289,6 +1253,22 @@ function buildDashChartCells() {
     cell.appendChild(box);
     wrap.appendChild(cell);
   }
+  // 6th cell: EV charger daily-kWh bar chart. Not a metric series — it hosts the
+  // ev-charger-chart canvas that loadEvChargerDaily() draws into.
+  const evCell = document.createElement('div');
+  evCell.className = 'dash-chart-cell';
+  evCell.style.cursor = 'default';
+  const evHead = document.createElement('div');
+  evHead.className = 'dash-chart-title';
+  evHead.textContent = 'EV Charged (kWh / day)';
+  const evBox = document.createElement('div');
+  evBox.className = 'dash-chart-box';
+  const evCanvas = document.createElement('canvas');
+  evCanvas.id = 'ev-charger-chart';
+  evBox.appendChild(evCanvas);
+  evCell.appendChild(evHead);
+  evCell.appendChild(evBox);
+  wrap.appendChild(evCell);
 }
 
 function renderDashCharts() {
@@ -1347,6 +1327,7 @@ function renderDashCharts() {
       },
     });
   }
+  loadEvChargerDaily();   // draw/refresh the 6th (EV) cell
 }
 
 // Cheap in-place refresh of the actual series (datasets[0]) on each poll; a full
@@ -2973,7 +2954,8 @@ function renderPlanChart() {
 // Lightweight refresh: rebuild datasets in place (no chart teardown / zoom reset).
 function refreshPlanChart() {
   if (!_planChart) return;
-  if (!document.getElementById('panel-plan').classList.contains('active')) return;
+  const dash = document.getElementById('panel-dashboard');
+  if (!dash || !dash.classList.contains('active')) return;
   _planChart.data.datasets = buildPlanDatasets();
   _planChart.update('none');
   updateSavingsCards();
@@ -3394,11 +3376,22 @@ function onPrices(prices) {
   _pricesData = prices.slice().sort((a, b) => a.ts - b.ts);
   updatePriceCards();
   updateGridSub();
-  document.getElementById('pr-status').textContent = '';
-  const prPanel = document.getElementById('panel-prices');
-  if (prPanel.classList.contains('active')) { renderPriceChart(); renderPriceLineChart(); }
+  const prStatus = document.getElementById('pr-status');
+  if (prStatus) prStatus.textContent = '';
+  const prOverlay = document.getElementById('price-modal-overlay');
+  if (prOverlay && prOverlay.classList.contains('active')) { renderPriceChart(); renderPriceLineChart(); }
   // The plan chart draws the price overlays itself — refresh it if it's showing.
   refreshPlanChart();
+}
+
+// Price modal — opened from the dashboard Import/Export price cards.
+function openPriceModal(mode) {
+  document.getElementById('price-modal-overlay').classList.add('active');
+  setPriceMode(mode || 'import');   // sets the toggle + renders the bar chart
+  renderPriceLineChart();
+}
+function closePriceModal() {
+  document.getElementById('price-modal-overlay').classList.remove('active');
 }
 
 function _fmtTime(ts) {
@@ -3912,11 +3905,14 @@ async function loadTopbarFromSettings() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('settings-overlay').classList.contains('active')) closeSettings();
+    else if (document.getElementById('price-modal-overlay').classList.contains('active')) closePriceModal();
     else closeModal();
   }
 });
 connectWS();
 loadEvSummary();
+renderPlanChart();   // plan chart now lives on the dashboard, so draw it on load
+renderDashCharts();  // build the 3×2 trend grid (incl. the EV cell) immediately
 setInterval(updateMeta, 1000);
 setInterval(() => { if (_priceLineChart) _priceLineChart.draw(); }, 60000);
 
