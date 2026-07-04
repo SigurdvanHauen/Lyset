@@ -123,6 +123,13 @@ def arbitrage_min_gain() -> float:
 NEGATIVE_EXPORT_DKK   = 0.0     # export below 0 → curtail PV feed-in and force-charge
                                 # (any negative export means we'd PAY to export — never
                                 # do it; the −0.007 DKK case slipped a −0.01 dead-band)
+EXPORT_RESUME_DKK     = 0.03    # ASYMMETRIC hysteresis (not a symmetric dead-band): we
+                                # still curtail the instant export < 0 (never sell at a
+                                # loss), but once curtailing we stay curtailed until the
+                                # export price is clearly positive (> this). Stops the
+                                # curtail decision — and the physical APC export-limit
+                                # write — from chattering every slot when the export price
+                                # hovers around 0 (the picket-fence export plan).
 MIN_PV_W              = 300     # below this, don't bother writing a PV limit
 CHEAP_IMPORT_DKK      = 0.50    # legacy constant — kept for _simulate_soc in server.py
 GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresis low)
@@ -180,6 +187,7 @@ _SC_DEBOUNCE_TICKS = 3   # ticks (45 s) the surplus/deficit sign must persist be
 
 # Private aliases for internal use
 _NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
+_EXPORT_RESUME_DKK    = EXPORT_RESUME_DKK
 _MIN_PV_W             = MIN_PV_W
 _GRID_CHARGE_SOC_START = GRID_CHARGE_SOC_START
 _GRID_CHARGE_SOC_MAX  = GRID_CHARGE_SOC_MAX
@@ -233,6 +241,7 @@ class AutoController:
         self.last_action_ts:  Optional[float] = None
         self._on_command:     Optional[Callable[[str, str], None]] = None
         self._grid_charging:  bool            = False  # hysteresis state
+        self._export_curtailed: bool          = False  # zero-export hysteresis state
         self._last_soc:       Optional[float] = None   # last real SoC read (37760
                                                        # drops out on ~10% of polls)
         self._sc_surplus:     bool            = False  # debounced branch-5 state
@@ -373,6 +382,11 @@ class AutoController:
         single-client SDongle. In that case fall back to the optimistic _apply cache:
         write once, then re-assert only on the periodic resync.
         """
+        # Record the commanded state so the negative-export decision can apply
+        # hysteresis (every branch calls this exactly once per tick, so it always
+        # reflects reality).
+        self._export_curtailed = zero_export
+
         target = _EXPORT_LIMIT_MODE_ZERO if zero_export else _EXPORT_LIMIT_MODE_UNLIMITED
         label  = 'zero export limitation' if zero_export else 'unlimited'
         desc   = f'AutoCtrl: active power ctrl mode={target} ({label})'
@@ -712,7 +726,11 @@ class AutoController:
         # overlay above curtails surplus PV beyond the battery, and here we force a
         # charge so the battery soaks up what it can and can never discharge to grid.
         # Charge power tracks the surplus (never imports); full / no surplus → idle.
-        if export_dkk < _NEGATIVE_EXPORT_DKK:
+        # Asymmetric hysteresis: curtail the instant export < 0, but once curtailing
+        # keep curtailing until the price is clearly positive (> RESUME) so a price
+        # hovering around 0 can't flip the export limit every slot.
+        neg_thresh = _EXPORT_RESUME_DKK if self._export_curtailed else _NEGATIVE_EXPORT_DKK
+        if export_dkk < neg_thresh:
             self._grid_charging = False
             # zero_export=True: self-consumption charges from the surplus, the export cap
             # curtails anything beyond the battery's rate so nothing is sold at a negative price.

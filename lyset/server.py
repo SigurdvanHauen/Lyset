@@ -45,7 +45,7 @@ from .solar_calibration import SolarCalibration
 from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
-    NEGATIVE_EXPORT_DKK, CHEAP_IMPORT_DKK,
+    NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_SOC_START, GRID_CHARGE_SOC_MAX, GRID_CHARGE_W,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
     CHARGE_MARGIN_DKK, CHARGE_HORIZON_H,
@@ -198,6 +198,7 @@ def _simulate_soc(
     load_fc: list[dict],
     prices: list[dict] | None = None,
     gc_state: bool = False,
+    neg_state: bool = False,
     min_soc: float = 10.0,
     charge_eff: float = 0.97,
     discharge_eff: float = 0.97,
@@ -250,8 +251,9 @@ def _simulate_soc(
     end_ms        = max(r['ts_ms'] for r in solar_fc)
     first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
 
-    soc       = start_soc
-    gc_active = gc_state  # grid-charge hysteresis state across steps
+    soc        = start_soc
+    gc_active  = gc_state   # grid-charge hysteresis state across steps
+    neg_active = neg_state  # zero-export hysteresis state across steps
     result    = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
     for ts_ms in range(first_slot_ms, int(end_ms) + 1, SLOT_MS):
@@ -285,7 +287,13 @@ def _simulate_soc(
             future_from_here = prices_sorted[price_ptr + 1:]
             gc_soc_limit = GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
 
-            do_neg = export_dkk < NEGATIVE_EXPORT_DKK
+            # Asymmetric hysteresis mirrors AutoController: curtail the instant export
+            # < 0, but once curtailing hold until the price is clearly positive so a
+            # near-zero export price can't flip the decision (and the plotted export
+            # line) every slot.
+            neg_thresh = EXPORT_RESUME_DKK if neg_active else NEGATIVE_EXPORT_DKK
+            do_neg = export_dkk < neg_thresh
+            neg_active = do_neg
             do_gc = do_hold = do_arbit = False
             if not do_neg:
                 # Grid charge: at/near the cheapest upcoming window AND SoC below threshold?
@@ -630,6 +638,7 @@ def _on_data(data: dict):
                 soc_val, cap_val, _last_solar_forecast, load_48h,
                 prices=_last_prices if _auto_controller.enabled else None,
                 gc_state=_auto_controller._grid_charging,
+                neg_state=_auto_controller._export_curtailed,
             )
             if fc:
                 _push_power_forecast(fc)
