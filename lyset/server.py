@@ -610,7 +610,20 @@ def _on_data(data: dict):
             _backfill_power_forecast(cap_val)
         if _last_sim_soc is None or abs(soc_val - _last_sim_soc) >= 1.0:
             _last_sim_soc = soc_val
+            # Drive the simulation from the SAME consumption forecast shown as the
+            # house-needs line (and consumed by the auto-controller and the backfill
+            # path above) rather than a fresh predict(). A fresh predict() carries the
+            # model's live global-bias term, which drifts above the persisted series
+            # (measured ~+420 W) and inflated the plan's overnight discharge to ~2x the
+            # real ~350 W load. In self-consumption at night grid_w=0, so batt discharge
+            # equals the load fed in — using the served forecast makes predicted
+            # discharge track predicted house needs. Overlay it onto a 48h predict() so
+            # the tail beyond the persisted ~24h horizon still fills the plan window.
             load_48h = _consumption_model.predict(time.time(), n_slots=192)
+            served = {r['ts_ms']: r['w'] for r in _last_consumption_forecast
+                      if r.get('w') is not None}
+            if served:
+                load_48h = [{**r, 'w': served.get(r['ts_ms'], r['w'])} for r in load_48h]
             fc = _simulate_soc(
                 soc_val, cap_val, _last_solar_forecast, load_48h,
                 prices=_last_prices if _auto_controller.enabled else None,
