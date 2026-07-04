@@ -56,9 +56,61 @@ def _env_float(name: str, default: float) -> float:
 
 _MIN_STANDBY_W = _env_float('CONSUMPTION_MIN_STANDBY_W', 300.0)
 
+# Robust outlier rejection for learning. house_load = active + grid − batt, and the
+# batt and meter channels are intentionally NOT sanitized upstream (see the read-layer
+# notes), so a momentary Modbus glitch on either surfaces as a multi-kW spike in one
+# 15-min slot. Left unguarded, a plain (weighted) mean bakes that spike into the slot's
+# profile — which is what left the daytime forecast jagged and inflated (adjacent slots
+# swinging ~1.8 kW) while the true expected curve is smooth. Both the seed and the
+# online update therefore winsorize a slot's inputs to centre + K·(robust σ), with an
+# absolute physical ceiling as a backstop. This rejects spikes WITHIN a slot; it never
+# blends across slots, so real time-of-day structure is preserved.
+_MAX_SLOT_W               = _env_float('CONSUMPTION_MAX_SLOT_W', 15000.0)  # W; above = glitch
+_OUTLIER_K                = 5.0     # clip values beyond centre + K·spread
+_OUTLIER_SPREAD_FLOOR_W   = 400.0   # min spread so genuinely tight slots aren't over-clipped
+_UPDATE_OUTLIER_MIN_COUNT = 5       # online clip engages only once a slot has some history
+
+# Temporal-smoothness prior on the profile. Each 15-min-of-week slot's mean is
+# estimated from only a few dozen samples of a high-variance quantity (household
+# load), so the raw per-slot estimate is noisy: adjacent slots jump by hundreds of W
+# purely from which days happened to land in each bin (measured max jump ~3 kW). The
+# TRUE expected load is smooth in time, so the forecast borrows strength from
+# neighbouring slots — a Gaussian along the time-of-day axis. This regularises the
+# estimator itself (so the house-needs line, the SoC plan, the grid/export forecast,
+# and the auto-controller all consume a de-noised expected curve); it is NOT a cosmetic
+# smoothing of any output line. σ≈1.2 slots (~18 min) removes the quarter-hour noise
+# while preserving the real morning/evening structure. 0 disables it.
+_SMOOTH_SIGMA_SLOTS = _env_float('CONSUMPTION_SMOOTH_SIGMA_SLOTS', 1.2)
+
 
 def _local_idx(dt_local: datetime) -> int:
     return dt_local.weekday() * _SLOTS_PER_DAY + dt_local.hour * 4 + dt_local.minute // 15
+
+
+def _smooth_profile_circular(profile: np.ndarray, counts: np.ndarray,
+                             sigma: float) -> np.ndarray:
+    """Gaussian-smooth the weekly profile along the time-of-day axis.
+
+    The 672-slot array is treated as circular (Sunday 23:45 wraps to Monday 00:00 —
+    adjacent indices are temporally adjacent), so the smoothing has no seam. Slots that
+    were never observed are excluded via a normalised mask, so they neither contribute
+    to nor are dragged toward zero by their neighbours. Returns a smoothed COPY; the
+    stored raw profile (and its variance/bands) is left untouched.
+    """
+    if sigma <= 0:
+        return profile
+    r = max(1, int(round(3 * sigma)))
+    kernel = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    kernel /= kernel.sum()
+
+    def _circ_conv(a: np.ndarray) -> np.ndarray:
+        padded = np.concatenate([a[-r:], a, a[:r]])
+        return np.convolve(padded, kernel, mode='valid')
+
+    mask = (counts > 0).astype(float)
+    num  = _circ_conv(profile * mask)
+    den  = _circ_conv(mask)
+    return np.where(den > 0, num / den, profile)
 
 
 class ConsumptionModel:
@@ -84,6 +136,10 @@ class ConsumptionModel:
         sparse slots retain their current values so the model degrades gracefully
         during the first days when the DB is thin.
 
+        Each slot's values are winsorised to a robust range (median + K·MAD-σ, and an
+        absolute ceiling) BEFORE the weighted mean, so glitch spikes carried in by the
+        unsanitised batt/meter channels can't inflate that slot's profile.
+
         Returns the number of slots updated.
         """
         if not records:
@@ -92,32 +148,36 @@ class ConsumptionModel:
         now_ts = max(ts for ts, _ in records)
         decay  = math.log(2) / (half_life_days * 86400)
 
-        w_sum   = np.zeros(_SLOTS_TOTAL)
-        wx_sum  = np.zeros(_SLOTS_TOTAL)
-        wx2_sum = np.zeros(_SLOTS_TOTAL)
-        cnt     = np.zeros(_SLOTS_TOTAL, dtype=int)
-
+        # Bucket each slot's (weight, value) so we can compute a robust per-slot cap
+        # before averaging — a single weighted-mean pass can't reject outliers.
+        slot_w: dict[int, list[float]] = {}
+        slot_x: dict[int, list[float]] = {}
         for ts, w in records:
-            if w is None or w < 0:
+            if w is None or w < 0 or w > _MAX_SLOT_W:
                 continue
-            dt_local = datetime.fromtimestamp(ts, tz=_TZ)
-            idx    = _local_idx(dt_local)
-            weight = math.exp(-decay * (now_ts - ts))
-            w_sum[idx]   += weight
-            wx_sum[idx]  += weight * w
-            wx2_sum[idx] += weight * w * w
-            cnt[idx]     += 1
+            idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
+            slot_w.setdefault(idx, []).append(math.exp(-decay * (now_ts - ts)))
+            slot_x.setdefault(idx, []).append(float(w))
 
         updated = 0
-        for idx in range(_SLOTS_TOTAL):
-            if cnt[idx] < 3:
+        for idx, xs in slot_x.items():
+            if len(xs) < 3:
                 continue
-            ws   = w_sum[idx]
-            mean = wx_sum[idx] / ws
-            var  = max(0.0, wx2_sum[idx] / ws - mean * mean)
+            x_arr = np.asarray(xs, dtype=float)
+            w_arr = np.asarray(slot_w[idx], dtype=float)
+            med   = float(np.median(x_arr))
+            # 1.4826·MAD ≈ σ for normal data; floor the spread so a genuinely tight
+            # slot isn't clipped to a hair, and cap at the absolute physical ceiling.
+            mad    = float(np.median(np.abs(x_arr - med)))
+            spread = max(1.4826 * mad, _OUTLIER_SPREAD_FLOOR_W)
+            cap    = min(_MAX_SLOT_W, med + _OUTLIER_K * spread)
+            x_clip = np.minimum(x_arr, cap)
+            ws     = float(w_arr.sum())
+            mean   = float((w_arr * x_clip).sum() / ws)
+            var    = max(0.0, float((w_arr * x_clip * x_clip).sum() / ws - mean * mean))
             self.profile[idx]  = max(0.0, mean)
             self.variance[idx] = var
-            self.counts[idx]   = min(float(cnt[idx]), float(_SEED_CAP))
+            self.counts[idx]   = min(float(len(xs)), float(_SEED_CAP))
             updated += 1
 
         return updated
@@ -176,6 +236,14 @@ class ConsumptionModel:
         dt_local = datetime.fromtimestamp(ts_utc, tz=_TZ)
         idx = _local_idx(dt_local)
         x   = max(0.0, watts)
+        # Reject glitch spikes before they enter the EWM (and the bias): house_load
+        # carries unsanitised batt/meter noise, so a single multi-kW blip must not
+        # yank this slot's mean. Absolute ceiling always; once the slot has some
+        # history, also clip to profile + K·σ (same winsorising as the seed).
+        x = min(x, _MAX_SLOT_W)
+        if self.counts[idx] >= _UPDATE_OUTLIER_MIN_COUNT:
+            std = math.sqrt(max(0.0, float(self.variance[idx])))
+            x   = min(x, float(self.profile[idx]) + _OUTLIER_K * max(std, _OUTLIER_SPREAD_FLOOR_W))
         # Bias update against the UNCORRECTED forecast for this slot (profile
         # mean with the standby floor, before the profile absorbs x). Measuring
         # against the raw model — not the bias-adjusted output — makes the EWM
@@ -212,6 +280,11 @@ class ConsumptionModel:
         slot_sec = 900  # 15 min
         t   = int(from_ts_utc / slot_sec) * slot_sec
         out = []
+        # Forecast off the temporally-smoothed profile so the expected curve reflects
+        # the smooth underlying load rather than per-slot sampling noise. Variance/bands
+        # stay on the raw per-slot spread (they describe real dispersion, not estimator
+        # noise), so p10/p90 still bracket the smoothed mean sensibly.
+        sm_profile = _smooth_profile_circular(self.profile, self.counts, _SMOOTH_SIGMA_SLOTS)
         for i in range(n_slots):
             ts_utc_i = t + i * slot_sec
             dt_local = datetime.fromtimestamp(ts_utc_i, tz=_TZ)
@@ -220,7 +293,7 @@ class ConsumptionModel:
                 # Global bias corrector shifts the whole forecast; the floor
                 # still applies afterwards (the house never draws less than
                 # standby, whatever the corrector says).
-                mean = float(self.profile[idx]) + self.bias
+                mean = float(sm_profile[idx]) + self.bias
                 w    = round(max(mean, _MIN_STANDBY_W), 1)
                 if self.counts[idx] >= 5 and self.variance[idx] > 0:
                     std  = math.sqrt(float(self.variance[idx]))
