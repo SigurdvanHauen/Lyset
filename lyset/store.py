@@ -210,11 +210,15 @@ def load_consumption_forecast(from_ms: int, to_ms: int) -> list[dict]:
     return [{'ts_ms': ts, 'w': w} for ts, w in rows]
 
 
-def save_power_forecast(records: list[dict], now_ms: int):
+def save_power_forecast(records: list[dict], now_ms: int, overwrite_past: bool = False):
     """
     Persist power simulation predictions.
     Past slots (ts_ms <= now_ms): INSERT OR IGNORE — keeps earliest prediction for later comparison.
     Future slots (ts_ms > now_ms): INSERT OR REPLACE — keeps latest prediction as it refines.
+
+    overwrite_past=True forces INSERT OR REPLACE on past slots too, so a corrected
+    re-simulation can flush stale/buggy frozen predictions (the past line is only ever
+    a plan overlay, not a scoring record).
     """
     with _lock:
         con = _get_con()
@@ -224,7 +228,7 @@ def save_power_forecast(records: list[dict], now_ms: int):
             gw   = r.get('grid_w')
             if soc is None:
                 continue
-            if r['ts_ms'] <= now_ms:
+            if r['ts_ms'] <= now_ms and not overwrite_past:
                 con.execute(
                     'INSERT OR IGNORE INTO power_forecast VALUES (?, ?, ?, ?)',
                     (r['ts_ms'], soc, bw, gw),

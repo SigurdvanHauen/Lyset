@@ -434,9 +434,12 @@ def _backfill_power_forecast(cap_val: float):
     Seed the power_forecast table with historical predictions so the chart
     shows a continuous line from the start of today, not just from 'now'.
 
-    Finds the earliest actual SoC reading from today in the polls table,
-    runs the simulation forward from that anchor, and stores results with
-    INSERT OR IGNORE (never overwrites genuine predictions already stored).
+    Finds the earliest actual SoC reading from today in the polls table and runs the
+    simulation forward from that anchor over the STORED forecast inputs (solar, prices,
+    consumption — which retain past timestamps, unlike the future-only _last_* caches).
+    Results OVERWRITE the past slots, so a corrected re-simulation flushes stale/buggy
+    frozen predictions (e.g. an export line that chattered under an old decision rule)
+    rather than INSERT-OR-IGNORE preserving them until they age out.
     """
     global _backfill_done
     _backfill_done = True
@@ -467,12 +470,27 @@ def _backfill_power_forecast(cap_val: float):
         return
 
     now_ms = int(time.time() * 1000)
+    end_ms = now_ms + 48 * 3_600_000
+
+    # Source the forecast inputs from the DB tables (they keep past timestamps that the
+    # future-only _last_* caches don't), so the reconstruction uses the solar and prices
+    # actually in effect for each past slot. Smooth the stored raw consumption the same
+    # way the served series is, and apply the current decision rules incl. the export
+    # hysteresis, so the regenerated past matches the fixed live plan.
+    solar_fc = store.load_solar_forecast(anchor_ts_ms, end_ms) or _last_solar_forecast
+    load_fc  = _smooth_w_timeseries(
+        store.load_consumption_forecast(anchor_ts_ms, end_ms) or _last_consumption_forecast,
+        _CONS_SMOOTH_SIGMA,
+    )
+    prices   = store.load_prices(anchor_ts_ms, end_ms) if _auto_controller.enabled else None
+
     fc = _simulate_soc(
-        anchor_soc, cap_val, _last_solar_forecast, _last_consumption_forecast,
+        anchor_soc, cap_val, solar_fc, load_fc,
+        prices=prices,
         start_ms=anchor_ts_ms,
     )
     if fc:
-        store.save_power_forecast(fc, now_ms)
+        store.save_power_forecast(fc, now_ms, overwrite_past=True)
         past_n = sum(1 for r in fc if r['ts_ms'] <= now_ms)
         log.info(
             'PowerForecast: backfilled %d past slots from SoC %.1f%% at %s',
