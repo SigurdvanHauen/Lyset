@@ -886,6 +886,7 @@ def _on_auto_command(mode: str, detail: str):
         'enabled': _auto_controller.enabled,
         'last_action': detail,
         'last_action_ts': ts,
+        'last_mode': mode,
         'cmd': {'ts': ts, 'mode': mode, 'detail': detail},
     })
 
@@ -1446,6 +1447,7 @@ async def api_automode_get():
         'enabled':        _auto_controller.enabled,
         'last_action':    _auto_controller.last_action,
         'last_action_ts': _auto_controller.last_action_ts,
+        'last_mode':      _auto_controller.last_mode,
         'commands':       cmds,
     }
 
@@ -1461,6 +1463,7 @@ async def api_automode_set(body: AutoModeRequest):
         'enabled':        _auto_controller.enabled,
         'last_action':    _auto_controller.last_action,
         'last_action_ts': _auto_controller.last_action_ts,
+        'last_mode':      _auto_controller.last_mode,
     })
     return {'ok': True, 'enabled': _auto_controller.enabled}
 
@@ -2072,6 +2075,7 @@ async def websocket_endpoint(ws: WebSocket):
             'enabled':        _auto_controller.enabled,
             'last_action':    _auto_controller.last_action,
             'last_action_ts': _auto_controller.last_action_ts,
+            'last_mode':      _auto_controller.last_mode,
         }))
         _ws_clients.add(ws)
         try:

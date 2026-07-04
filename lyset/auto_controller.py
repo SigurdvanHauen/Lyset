@@ -239,6 +239,7 @@ class AutoController:
         self.enabled:         bool            = False
         self.last_action:     str             = '—'
         self.last_action_ts:  Optional[float] = None
+        self.last_mode:       Optional[str]   = None  # last decision mode (e.g. 'export_limited')
         self._on_command:     Optional[Callable[[str, str], None]] = None
         self._grid_charging:  bool            = False  # hysteresis state
         self._export_curtailed: bool          = False  # zero-export hysteresis state
@@ -618,6 +619,7 @@ class AutoController:
 
     def _record(self, cmd: _Cmd):
         self.last_action    = cmd.detail
+        self.last_mode      = cmd.mode
         self.last_action_ts = time.time()
         log.info('AutoCtrl: %s', cmd.detail)
         if self._on_command:

@@ -450,7 +450,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
          style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:12px;cursor:pointer">
       <span style="font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap">Auto Mode</span>
       <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
-      <span id="d-export-badge" title="Whether the inverter is allowed to feed the grid (active-power-control setting) — not whether it is exporting right now" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Export&nbsp;&#8212;</span>
+      <span id="d-export-badge" title="Reflects the auto-controller's decision: Disabled only when it is deliberately restricting feed-in (negative-export curtailment). Deficit self-consumption writes zero-export at a good price but reads Allowed — surplus would export the instant it appears." style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Export&nbsp;&#8212;</span>
       <div id="d-auto-action" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No commands yet</div>
     </div>
 
@@ -1198,7 +1198,7 @@ function onData(d) {
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
 
-  renderExportBadge(d.active_power_mode, d.max_feed_grid_w);
+  renderExportBadge();
 
   refreshDashCharts();
   refreshPlanChart();
@@ -2020,20 +2020,20 @@ function onAutoHistory(commands) {
   _autoCommands = commands || [];
 }
 
-// Grid-export badge in the auto-mode bar. Reports whether the inverter is
-// *allowed* to feed the grid (its active-power-control setting, reg 47415) —
-// NOT whether power is flowing right now. 0=unlimited → enabled; 5=zero-export
-// → disabled; 6/7=power-limited → enabled but capped (a cap of 0 W = disabled).
-function renderExportBadge(mode, feedW) {
+// Grid-export badge in the auto-mode bar. Reflects the AUTO-CONTROLLER'S decision,
+// not the raw register. Only the negative-export branch (mode 'export_limited')
+// deliberately restricts feed-in; every other decision — including deficit
+// self-consumption ('sc_discharge', which writes APC mode 5 only because there is no
+// surplus) — would allow export the instant a surplus appears. So: 'export_limited' →
+// Disabled, anything else → Allowed. Auto off → Lyset isn't managing export → dash.
+let _lastAutoMode = null;   // controller's latest decision mode string
+let _autoEnabled  = false;  // whether the auto-controller is running
+
+function renderExportBadge() {
   const badge = document.getElementById('d-export-badge');
   if (!badge) return;
 
-  let enabled, note = '';
-  if (mode === 0)      { enabled = true; }
-  else if (mode === 5) { enabled = false; }
-  else if (mode === 6) { enabled = !(feedW === 0); if (enabled && typeof feedW === 'number') note = ` (max ${Math.round(feedW)} W)`; }
-  else if (mode === 7) { enabled = true; note = ' (limited)'; }
-  else {
+  if (!_autoEnabled) {
     badge.innerHTML = 'Export&nbsp;&#8212;';
     badge.style.color = 'var(--muted)';
     badge.style.borderColor = 'var(--border)';
@@ -2041,10 +2041,11 @@ function renderExportBadge(mode, feedW) {
     return;
   }
 
-  badge.textContent = 'Export ' + (enabled ? 'Enabled' : 'Disabled') + note;
-  badge.style.color       = enabled ? 'var(--success)' : 'var(--danger)';
-  badge.style.borderColor = enabled ? 'var(--success)' : 'var(--danger)';
-  badge.style.background   = enabled ? '#0d2e1a' : '#2e1416';
+  const restricted = _lastAutoMode === 'export_limited';
+  badge.textContent = 'Export ' + (restricted ? 'Disabled' : 'Allowed');
+  badge.style.color       = restricted ? 'var(--danger)' : 'var(--success)';
+  badge.style.borderColor = restricted ? 'var(--danger)' : 'var(--success)';
+  badge.style.background   = restricted ? '#2e1416' : '#0d2e1a';
 }
 
 function onAutoMode(msg) {
@@ -2054,6 +2055,13 @@ function onAutoMode(msg) {
 
   btn.textContent = msg.enabled ? '⚙ Auto: ON' : '⚙ Auto: OFF';
   btn.className   = msg.enabled ? 'on' : '';
+
+  // Track controller state for the grid-export badge (driven by the decision, not
+  // the register). last_mode rides on every auto_mode message; cmd.mode is a fallback.
+  _autoEnabled = !!msg.enabled;
+  if (msg.last_mode) _lastAutoMode = msg.last_mode;
+  else if (msg.cmd && msg.cmd.mode) _lastAutoMode = msg.cmd.mode;
+  renderExportBadge();
 
   if (msg.enabled) {
     badge.textContent = 'ON';
