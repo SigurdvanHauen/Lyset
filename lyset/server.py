@@ -372,55 +372,60 @@ def _simulate_soc(
                             reserve_kwh += deficit_w / 1000.0 * 0.25
                         do_arbit = (available_kwh - reserve_kwh) > ARBIT_MIN_EXCESS_KWH
 
+            # Each branch sets only the INTENDED battery power (+ hysteresis state);
+            # the SoC-headroom clamp and the grid/energy accounting are unified below
+            # so no branch can charge more than the pack can absorb this slot.
+            curtail_export = False   # do_neg: curtail surplus rather than export it
             if do_neg:
                 # Negative export → charge from surplus only (never import, never
                 # discharge). The export-limit overlay (47415=zero export) curtails
-                # any surplus beyond the battery's max rate, so net feed-in is 0:
-                # grid_kw is clamped to ≥0 (no export) for the forecast.
-                gc_active  = False
-                if soc >= FORCE_CHARGE_SOC_MAX or net_kw <= 0:
-                    batt_kw = 0.0
-                else:
-                    batt_kw = min(net_kw, max_power_kw)
-                grid_kw    = max(0.0, batt_kw - net_kw)  # surplus remainder curtailed, not exported
-                energy_kwh = batt_kw * SLOT_H * charge_eff
+                # any surplus beyond what the battery absorbs, so net feed-in is 0.
+                gc_active      = False
+                curtail_export = True
+                batt_kw        = 0.0 if net_kw <= 0 else min(net_kw, max_power_kw)
 
             elif do_gc:
-                gc_active  = True
-                batt_kw    = min(GRID_CHARGE_W / 1000.0, max_power_kw)
-                grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * SLOT_H * charge_eff
+                gc_active = True
+                batt_kw   = min(GRID_CHARGE_W / 1000.0, max_power_kw)
 
             elif do_hold:
-                gc_active  = False
-                batt_kw    = 0.0
-                grid_kw    = -net_kw
-                energy_kwh = 0.0
+                gc_active = False
+                batt_kw   = 0.0
 
             elif do_arbit:
-                gc_active  = False
-                batt_kw    = 0.0 if soc <= MIN_SOC_ARBIT else -min(GRID_CHARGE_W / 1000.0, max_power_kw)
-                grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * SLOT_H / discharge_eff  # batt_kw ≤ 0 → SoC falls
+                gc_active = False
+                batt_kw   = 0.0 if soc <= MIN_SOC_ARBIT else -min(GRID_CHARGE_W / 1000.0, max_power_kw)
 
             else:
-                # Self-consumption (covers negative export and the default case)
+                # Self-consumption (default): charge a surplus, discharge a deficit.
                 gc_active = False
-                if net_kw >= 0:
-                    batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
-                else:
-                    batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
-                grid_kw    = batt_kw - net_kw
-                energy_kwh = batt_kw * SLOT_H * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+                batt_kw   = min(net_kw, max_power_kw) if net_kw >= 0 else max(net_kw, -max_power_kw)
 
         else:
             # No price data — pure self-consumption
-            if net_kw >= 0:
-                batt_kw = 0.0 if soc >= 100.0 else min(net_kw, max_power_kw)
-            else:
-                batt_kw = 0.0 if soc <= min_soc else max(net_kw, -max_power_kw)
-            grid_kw    = batt_kw - net_kw
-            energy_kwh = batt_kw * SLOT_H * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+            curtail_export = False
+            batt_kw = min(net_kw, max_power_kw) if net_kw >= 0 else max(net_kw, -max_power_kw)
+
+        # ── Physical SoC clamp (shared by every branch) ───────────────────────
+        # Cap the battery power to the headroom (charging) or usable charge above
+        # min_soc (discharging) actually available in THIS 15-min slot. Without this
+        # a near-full pack was shown charging a full slot's worth it can't hold — the
+        # overshoot was silently dropped by the min(100, …) below and misreported as
+        # a charge spike at ~100% SoC. The remainder of a surplus then correctly
+        # exports (grid_kw < 0) instead of vanishing into the battery.
+        if batt_kw > 0:
+            head_kwh      = max(0.0, (100.0 - soc) / 100.0 * capacity_kwh)
+            max_charge_kw = head_kwh / (SLOT_H * charge_eff) if charge_eff > 0 else 0.0
+            batt_kw = min(batt_kw, max_charge_kw)
+        elif batt_kw < 0:
+            avail_kwh  = max(0.0, (soc - min_soc) / 100.0 * capacity_kwh)
+            max_dis_kw = avail_kwh * discharge_eff / SLOT_H
+            batt_kw = max(batt_kw, -max_dis_kw)
+
+        energy_kwh = batt_kw * SLOT_H * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
+        grid_kw    = batt_kw - net_kw
+        if curtail_export:
+            grid_kw = max(0.0, grid_kw)   # negative export: curtail surplus, never sell
 
         soc = max(min_soc, min(100.0, soc + energy_kwh / capacity_kwh * 100.0))
         result.append({
