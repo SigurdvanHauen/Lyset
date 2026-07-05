@@ -302,8 +302,26 @@ def _simulate_soc(
                 if c_win and soc < gc_soc_limit:
                     c_min = min(p['import'] for p in c_win)
                     c_max = max(p['import'] for p in c_win)
-                    do_gc = (import_dkk <= c_min + CHARGE_MARGIN_DKK
-                             and c_max > import_dkk + CHARGE_MARGIN_DKK)
+                    # Solar-aware suppression mirrors AutoController branch 2: grid-
+                    # charging only pays if SOLAR WON'T COVER THE HOUSE NEEDS before the
+                    # banked energy is due. Key on the SOONEST slot materially pricier
+                    # than now — the first the banked energy serves. Over (now, first
+                    # dear] compare forecast solar vs load; if solar ≥ load the sun
+                    # refills the pack for free (the midday full-pack charge displaced by
+                    # afternoon sun before the evening peak) — don't import.
+                    c_dear = [p for p in c_win if p['import'] > import_dkk + CHARGE_MARGIN_DKK]
+                    if import_dkk <= c_min + CHARGE_MARGIN_DKK and c_dear:
+                        first_dear = min(c_dear, key=lambda p: p['ts'])
+                        win = range(ts_ms + SLOT_MS, first_dear['ts'] + 1, SLOT_MS)
+                        c_solar_kwh = sum(
+                            solar_by_ts.get((t // SOLAR_MS + 1) * SOLAR_MS, 0.0)
+                            / 1000.0 * SLOT_H
+                            for t in win
+                        )
+                        c_load_kwh = sum(
+                            load_by_ts.get(t, 0.0) / 1000.0 * SLOT_H for t in win
+                        )
+                        do_gc = c_solar_kwh < c_load_kwh
 
                 # Hold: deficit now AND a significantly more expensive slot is coming soon
                 if not do_gc and net_kw < 0:

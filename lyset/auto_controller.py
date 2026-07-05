@@ -338,6 +338,20 @@ class AutoController:
             total += (r.get('pv_w') or 0.0) / 1000.0 * 0.5  # 30-min slot → kWh
         return total
 
+    def _expected_load_kwh(self, from_ms: int, to_ms: int) -> float:
+        """Forecast house consumption (kWh) over (from_ms, to_ms] from the latest
+        consumption forecast (15-min records)."""
+        if to_ms <= from_ms:
+            return 0.0
+        total = 0.0
+        for r in self._load_fc:
+            ts = r.get('ts_ms')
+            w  = r.get('w')
+            if ts is None or w is None or ts <= from_ms or ts > to_ms:
+                continue
+            total += w / 1000.0 * 0.25   # 15-min slot → kWh
+        return total
+
     # ── State-gated register writes ───────────────────────────────────────────
 
     def _apply(self, worker, regs: list[tuple]):
@@ -751,8 +765,26 @@ class AutoController:
         if charge_window and batt_soc < gc_threshold:
             future_min_import = min(p['import'] for p in charge_window)
             future_max_import = max(p['import'] for p in charge_window)
-            if (import_dkk <= future_min_import + _CHARGE_MARGIN_DKK
-                    and future_max_import > import_dkk + _CHARGE_MARGIN_DKK):
+            # Grid-charging only pays off if SOLAR WON'T COVER THE HOUSE NEEDS before
+            # the banked energy is due. The slots that energy serves are those
+            # materially pricier than charging now; the SOONEST of them bounds the
+            # window (a pre-dawn morning peak needs pre-dawn charging; an evening peak
+            # the midday sun can cover does not). Over (now, first dear slot] compare
+            # forecast solar against forecast load: if solar ≥ load the sun refills the
+            # pack for free — importing now is money wasted (the 11:00 full-pack charge
+            # displaced by the afternoon sun before the evening peak). Only a real net
+            # deficit (solar < load) justifies banking cheap grid energy.
+            dearer = [p for p in charge_window if p['import'] > import_dkk + _CHARGE_MARGIN_DKK]
+            price_case = (import_dkk <= future_min_import + _CHARGE_MARGIN_DKK) and bool(dearer)
+            solar_covers_load = False
+            if price_case and self._load_fc:
+                # Only judge coverage when a load forecast exists; without one, fall
+                # back to charging on the price case alone.
+                first_dear = min(dearer, key=lambda p: p['ts'])
+                solar_kwh  = self._expected_solar_kwh(now_ms, first_dear['ts'])
+                load_kwh   = self._expected_load_kwh(now_ms, first_dear['ts'])
+                solar_covers_load = solar_kwh >= load_kwh
+            if price_case and not solar_covers_load:
                 self._grid_charging = True
                 self._set_export_limit(worker, False, data)   # grid used freely
                 self._apply(worker, [
@@ -765,6 +797,17 @@ class AutoController:
                           f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
                           f'max {future_max_import:.3f} DKK, SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='grid_charge', detail=detail)
+            if price_case and solar_covers_load:
+                # Price case held but forecast solar covers the house needs before the
+                # first dear slot — the sun refills the pack for free, so importing now
+                # would just be displaced. Skip it.
+                self._grid_charging = False
+                log.info(
+                    'AutoCtrl: grid-charge suppressed — %.1f kWh PV ≥ %.1f kWh load '
+                    'before first dear slot %.3f DKK; solar covers the house, not '
+                    'importing (SoC %.0f%%)',
+                    solar_kwh, load_kwh, first_dear['import'], batt_soc,
+                )
 
         # ── 3. Hold battery for an upcoming peak (deficit only) ───────────────
         # When the house draws from the battery (no surplus) and a much more
