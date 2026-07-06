@@ -169,8 +169,14 @@ MIN_SOC_ARBIT       = 20.0   # minimum SoC before allowing arbitrage discharge
 ARBIT_HORIZON_H     = 12     # hours ahead to find cheapest import for arbitrage
 ARBIT_MIN_EXCESS_KWH = 0.30  # only discharge to grid when at least this much stored
                              # energy is surplus to upcoming self-consumption needs
-CHARGE_MARGIN_DKK   = 0.15   # import must be at least this cheaper than future max to justify charging
+CHARGE_MARGIN_DKK   = 0.15   # the deficit-period import must beat now's loss-adjusted cost by
+                             # at least this before pre-charging is worth the round-trip
 CHARGE_HORIZON_H    = 24     # hours ahead to look for price peaks that justify grid charging
+CHARGE_EFF          = 0.97   # round-trip halves used to loss-adjust grid-charge economics
+DISCHARGE_EFF       = 0.97   # (matches _simulate_soc); import_now/(chg·dis) = cost to store & retrieve
+PLAN_MIN_SOC        = 10.0   # SoC floor for the grid-charge forward sim (matches _simulate_soc);
+                             # energy below it isn't usable to cover a deficit
+GRID_CHARGE_MIN_KWH = 0.20   # ignore trivial shortfalls so a near-covered pack doesn't trickle-chatter
 HOLD_DELTA_DKK      = 0.80   # hold battery if a future slot is at least this much more expensive
 HOLD_HORIZON_H      = 6      # hours ahead to scan for an expensive upcoming slot
 MAX_HOLD_IMPORT_DKK = 1.50   # only hold battery when current import is below this
@@ -207,11 +213,72 @@ _ARBIT_HORIZON_H      = ARBIT_HORIZON_H
 _ARBIT_MIN_EXCESS_KWH = ARBIT_MIN_EXCESS_KWH
 _CHARGE_MARGIN_DKK    = CHARGE_MARGIN_DKK
 _CHARGE_HORIZON_H     = CHARGE_HORIZON_H
+_CHARGE_EFF           = CHARGE_EFF
+_DISCHARGE_EFF        = DISCHARGE_EFF
+_PLAN_MIN_SOC         = PLAN_MIN_SOC
+_GRID_CHARGE_MIN_KWH  = GRID_CHARGE_MIN_KWH
 _HOLD_DELTA_DKK       = HOLD_DELTA_DKK
 _HOLD_HORIZON_H       = HOLD_HORIZON_H
 _MAX_HOLD_IMPORT_DKK  = MAX_HOLD_IMPORT_DKK
 _MIN_SOC_HOLD         = MIN_SOC_HOLD
 _HOLD_SOLAR_REFILL_FACTOR = HOLD_SOLAR_REFILL_FACTOR
+
+
+def plan_grid_charge_shortfall(
+    slots: list,
+    start_soc: float,
+    cap_kwh: float,
+    min_soc: float,
+    import_now: float,
+    margin: float,
+    charge_eff: float = CHARGE_EFF,
+    discharge_eff: float = DISCHARGE_EFF,
+) -> tuple:
+    """Decide how much cheap energy is worth banking NOW against a coming expensive deficit.
+
+    Forward-simulates the pack over `slots` (ascending 15-min dicts with keys 'ts',
+    'import' DKK/kWh, 'solar_w', 'load_w') under plain self-consumption: a solar surplus
+    recharges the pack (free), a deficit discharges it. Returns
+    ``(shortfall_kwh, first_dear_ts)`` where:
+
+      • ``shortfall_kwh`` — stored energy the house would be forced to import while the
+        price is ABOVE the loss-adjusted cost of charging now
+        (``import_now / (chg·dis) + margin``) because the battery ran dry. This is exactly
+        the energy worth pre-charging now: banked cheap, it displaces those pricey imports.
+      • ``first_dear_ts`` — ts of the first such expensive slot the pack couldn't cover
+        (None if there is no shortfall), so the caller can wait for the cheapest slot
+        *before* the energy is needed instead of charging at the first opportunity.
+
+    Because solar refill is modelled, a deficit the midday sun will cover for free
+    produces no shortfall — that is the case we must NOT grid-charge for. Shared verbatim
+    by AutoController._decide and server._simulate_soc so the plan matches the live control.
+    """
+    SLOT_H  = 0.25
+    rt      = (charge_eff * discharge_eff) or 1.0
+    thresh  = import_now / rt + margin
+    usable  = max(0.0, (start_soc - min_soc) / 100.0 * cap_kwh)
+    cap_use = max(0.0, (100.0 - min_soc) / 100.0 * cap_kwh)
+    shortfall  = 0.0
+    first_dear = None
+    for s in slots:
+        solar_w = s.get('solar_w') or 0.0
+        load_w  = s.get('load_w')  or 0.0
+        imp     = s.get('import')
+        net_kwh = (solar_w - load_w) / 1000.0 * SLOT_H
+        if net_kwh >= 0:
+            usable = min(cap_use, usable + net_kwh * charge_eff)   # surplus recharges free
+        else:
+            draw = -net_kwh / discharge_eff                        # stored-side kWh to cover it
+            if usable >= draw:
+                usable -= draw
+            else:
+                short  = draw - usable
+                usable = 0.0
+                if imp is not None and imp > thresh:               # dry during an expensive slot
+                    shortfall += short
+                    if first_dear is None:
+                        first_dear = s['ts']
+    return shortfall, first_dear
 
 
 @dataclass
@@ -289,6 +356,20 @@ class AutoController:
             d = abs(t - ts_ms)
             if best_d is None or d < best_d:
                 best_d, best = d, (r.get('pv_w') or 0.0)
+        return best
+
+    def _load_at(self, ts_ms: int) -> float:
+        """Forecast house load (W) nearest ts_ms (nearest 15-min slot). 0 when no
+        forecast — mirrors _solar_at so the grid-charge sim can pair PV against load."""
+        best, best_d = 0.0, None
+        for r in self._load_fc:
+            t = r.get('ts_ms')
+            w = r.get('w')
+            if t is None or w is None:
+                continue
+            d = abs(t - ts_ms)
+            if best_d is None or d < best_d:
+                best_d, best = d, w
         return best
 
     def _reserve_energy_kwh(self, from_ms: int, to_ms: int, export_now: float,
@@ -732,9 +813,6 @@ class AutoController:
             cutoff = now_ms + hours * 3_600_000
             return [p for p in future_prices if p['ts'] <= cutoff]
 
-        # Hysteresis: continue grid charging up to SOC_MAX, only start below SOC_START
-        gc_threshold = _GRID_CHARGE_SOC_MAX if self._grid_charging else _GRID_CHARGE_SOC_START
-
         surplus_w = pv_w - house_load  # + = solar exceeds load
 
         # ── 1. Negative export → force-charge from the SURPLUS only ───────────
@@ -756,35 +834,38 @@ class AutoController:
                       f'(SoC {batt_soc:.0f}%, PV {pv_w:.0f} W, load {house_load:.0f} W)')
             return _Cmd(mode='export_limited', detail=detail)
 
-        # ── 2. Grid charge: bank cheap energy for a pricier period ────────────
-        # Fires when the current slot is at/near the cheapest of the next
-        # CHARGE_HORIZON_H h AND a materially more expensive slot lies ahead AND the
-        # battery has room. Forced charge so self-consumption can't discharge it
-        # back out overnight.
+        # ── 2. Grid charge: bank cheap energy to cover a coming expensive deficit ──
+        # Forward-simulate the pack over the charge horizon under self-consumption
+        # (plan_grid_charge_shortfall). If the house would run the battery dry during
+        # slots priced above the loss-adjusted cost of charging NOW, pre-charge that
+        # shortfall — cheap energy banked against the expensive evening/overnight import,
+        # sized to just meet the house until solar surplus returns, up to 100 % SoC.
+        # Solar refill is modelled, so a deficit the midday sun covers for free yields no
+        # shortfall (that is the case we must NOT import for). Forced charge so
+        # self-consumption can't discharge it back out before the peak.
         charge_window = _window(_CHARGE_HORIZON_H)
-        if charge_window and batt_soc < gc_threshold:
-            future_min_import = min(p['import'] for p in charge_window)
-            future_max_import = max(p['import'] for p in charge_window)
-            # Grid-charging only pays off if SOLAR WON'T COVER THE HOUSE NEEDS before
-            # the banked energy is due. The slots that energy serves are those
-            # materially pricier than charging now; the SOONEST of them bounds the
-            # window (a pre-dawn morning peak needs pre-dawn charging; an evening peak
-            # the midday sun can cover does not). Over (now, first dear slot] compare
-            # forecast solar against forecast load: if solar ≥ load the sun refills the
-            # pack for free — importing now is money wasted (the 11:00 full-pack charge
-            # displaced by the afternoon sun before the evening peak). Only a real net
-            # deficit (solar < load) justifies banking cheap grid energy.
-            dearer = [p for p in charge_window if p['import'] > import_dkk + _CHARGE_MARGIN_DKK]
-            price_case = (import_dkk <= future_min_import + _CHARGE_MARGIN_DKK) and bool(dearer)
-            solar_covers_load = False
-            if price_case and self._load_fc:
-                # Only judge coverage when a load forecast exists; without one, fall
-                # back to charging on the price case alone.
-                first_dear = min(dearer, key=lambda p: p['ts'])
-                solar_kwh  = self._expected_solar_kwh(now_ms, first_dear['ts'])
-                load_kwh   = self._expected_load_kwh(now_ms, first_dear['ts'])
-                solar_covers_load = solar_kwh >= load_kwh
-            if price_case and not solar_covers_load:
+        cap_kwh = data.get('batt_rated_capacity') or 5.0
+        if charge_window and batt_soc < 100.0 and cap_kwh > 0:
+            step   = 15 * 60 * 1000
+            end_ms = now_ms + _CHARGE_HORIZON_H * 3_600_000
+            gc_slots = [
+                {'ts': t, 'import': self._price_at(prices, t),
+                 'solar_w': self._solar_at(t), 'load_w': self._load_at(t)}
+                for t in range((now_ms // step + 1) * step, end_ms + 1, step)
+            ]
+            shortfall_kwh, first_dear_ts = plan_grid_charge_shortfall(
+                gc_slots, batt_soc, cap_kwh, _PLAN_MIN_SOC, import_dkk, _CHARGE_MARGIN_DKK,
+                _CHARGE_EFF, _DISCHARGE_EFF,
+            )
+            target_soc = min(100.0, batt_soc + shortfall_kwh / cap_kwh * 100.0)
+            # Charge at the cheapest slot BEFORE the energy is needed: only fire when now
+            # is within margin of the cheapest import up to the first uncovered slot, so a
+            # cheaper pre-peak slot later isn't pre-empted by importing now.
+            pre = [p['import'] for p in charge_window
+                   if p.get('import') is not None
+                   and (first_dear_ts is None or p['ts'] < first_dear_ts)]
+            price_ok = (not pre) or import_dkk <= min(pre) + _CHARGE_MARGIN_DKK
+            if shortfall_kwh > _GRID_CHARGE_MIN_KWH and batt_soc < target_soc and price_ok:
                 self._grid_charging = True
                 self._set_export_limit(worker, False, data)   # grid used freely
                 self._apply(worker, [
@@ -793,21 +874,15 @@ class AutoController:
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
                     (16, 47100, 1,              'AutoCtrl: force CHARGE'),
                 ])
-                detail = (f'Grid charging {_GRID_CHARGE_W} W '
-                          f'(import {import_dkk:.3f} DKK, min {future_min_import:.3f}, '
-                          f'max {future_max_import:.3f} DKK, SoC {batt_soc:.0f}%)')
+                detail = (f'Grid charging {_GRID_CHARGE_W} W to {target_soc:.0f}% — '
+                          f'{shortfall_kwh:.1f} kWh deficit ahead priced over '
+                          f'{import_dkk:.3f} DKK (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='grid_charge', detail=detail)
-            if price_case and solar_covers_load:
-                # Price case held but forecast solar covers the house needs before the
-                # first dear slot — the sun refills the pack for free, so importing now
-                # would just be displaced. Skip it.
-                self._grid_charging = False
-                log.info(
-                    'AutoCtrl: grid-charge suppressed — %.1f kWh PV ≥ %.1f kWh load '
-                    'before first dear slot %.3f DKK; solar covers the house, not '
-                    'importing (SoC %.0f%%)',
-                    solar_kwh, load_kwh, first_dear['import'], batt_soc,
-                )
+            self._grid_charging = False
+            if shortfall_kwh > _GRID_CHARGE_MIN_KWH and not price_ok:
+                log.info('AutoCtrl: grid-charge deferred — %.1f kWh deficit ahead but a '
+                         'cheaper slot precedes it (now %.3f > min %.3f + margin, SoC %.0f%%)',
+                         shortfall_kwh, import_dkk, min(pre), batt_soc)
 
         # ── 3. Hold battery for an upcoming peak (deficit only) ───────────────
         # When the house draws from the battery (no surplus) and a much more

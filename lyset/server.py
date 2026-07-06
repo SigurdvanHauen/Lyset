@@ -46,9 +46,11 @@ from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
     NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
-    GRID_CHARGE_SOC_START, GRID_CHARGE_SOC_MAX, GRID_CHARGE_W,
+    GRID_CHARGE_W,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
     CHARGE_MARGIN_DKK, CHARGE_HORIZON_H,
+    CHARGE_EFF, DISCHARGE_EFF, PLAN_MIN_SOC, GRID_CHARGE_MIN_KWH,
+    plan_grid_charge_shortfall,
     HOLD_DELTA_DKK, HOLD_HORIZON_H, MAX_HOLD_IMPORT_DKK, MIN_SOC_HOLD,
     HOLD_SOLAR_REFILL_FACTOR,
     ARBIT_MARGIN_DKK, MIN_SOC_ARBIT, ARBIT_HORIZON_H, ARBIT_MIN_EXCESS_KWH,
@@ -285,7 +287,6 @@ def _simulate_soc(
             import_dkk = cur_price.get('import') or 0.5
 
             future_from_here = prices_sorted[price_ptr + 1:]
-            gc_soc_limit = GRID_CHARGE_SOC_MAX if gc_active else GRID_CHARGE_SOC_START
 
             # Asymmetric hysteresis mirrors AutoController: curtail the instant export
             # < 0, but once curtailing hold until the price is clearly positive so a
@@ -296,32 +297,30 @@ def _simulate_soc(
             neg_active = do_neg
             do_gc = do_hold = do_arbit = False
             if not do_neg:
-                # Grid charge: at/near the cheapest upcoming window AND SoC below threshold?
+                # Grid charge: pre-charge for a coming expensive deficit (mirrors
+                # AutoController branch 2 via the shared plan_grid_charge_shortfall).
+                # Forward-simulate the pack over the charge horizon; if the house would
+                # run it dry during slots priced above now's loss-adjusted cost, bank that
+                # shortfall now — up to 100 % SoC, sized to meet the house until solar
+                # surplus returns. Solar refill is modelled, so a deficit the midday sun
+                # covers for free produces no shortfall (no wasteful import).
                 charge_end = ts_ms + CHARGE_HORIZON_H * 3_600_000
-                c_win = [p for p in future_from_here if p['ts'] <= charge_end]
-                if c_win and soc < gc_soc_limit:
-                    c_min = min(p['import'] for p in c_win)
-                    c_max = max(p['import'] for p in c_win)
-                    # Solar-aware suppression mirrors AutoController branch 2: grid-
-                    # charging only pays if SOLAR WON'T COVER THE HOUSE NEEDS before the
-                    # banked energy is due. Key on the SOONEST slot materially pricier
-                    # than now — the first the banked energy serves. Over (now, first
-                    # dear] compare forecast solar vs load; if solar ≥ load the sun
-                    # refills the pack for free (the midday full-pack charge displaced by
-                    # afternoon sun before the evening peak) — don't import.
-                    c_dear = [p for p in c_win if p['import'] > import_dkk + CHARGE_MARGIN_DKK]
-                    if import_dkk <= c_min + CHARGE_MARGIN_DKK and c_dear:
-                        first_dear = min(c_dear, key=lambda p: p['ts'])
-                        win = range(ts_ms + SLOT_MS, first_dear['ts'] + 1, SLOT_MS)
-                        c_solar_kwh = sum(
-                            solar_by_ts.get((t // SOLAR_MS + 1) * SOLAR_MS, 0.0)
-                            / 1000.0 * SLOT_H
-                            for t in win
-                        )
-                        c_load_kwh = sum(
-                            load_by_ts.get(t, 0.0) / 1000.0 * SLOT_H for t in win
-                        )
-                        do_gc = c_solar_kwh < c_load_kwh
+                gc_slots = [
+                    {'ts': t, 'import': _price_at(prices_sorted, t),
+                     'solar_w': solar_by_ts.get((t // SOLAR_MS + 1) * SOLAR_MS, 0.0),
+                     'load_w':  load_by_ts.get(t, 0.0)}
+                    for t in range(ts_ms + SLOT_MS, int(charge_end) + 1, SLOT_MS)
+                ]
+                shortfall_kwh, first_dear_ts = plan_grid_charge_shortfall(
+                    gc_slots, soc, capacity_kwh, min_soc, import_dkk, CHARGE_MARGIN_DKK,
+                    charge_eff, discharge_eff,
+                )
+                if shortfall_kwh > GRID_CHARGE_MIN_KWH and soc < 100.0:
+                    gc_target = min(100.0, soc + shortfall_kwh / capacity_kwh * 100.0)
+                    pre = [s['import'] for s in gc_slots if s['import'] is not None
+                           and (first_dear_ts is None or s['ts'] < first_dear_ts)]
+                    price_ok = (not pre) or import_dkk <= min(pre) + CHARGE_MARGIN_DKK
+                    do_gc = soc < gc_target and price_ok
 
                 # Hold: deficit now AND a significantly more expensive slot is coming soon
                 if not do_gc and net_kw < 0:
