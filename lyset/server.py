@@ -1061,6 +1061,12 @@ async def lifespan(app: FastAPI):
     cleaned = store.clean_soc_history()
     if cleaned:
         log.warning('Startup: cleaned %d poll row(s) with SoC outlier values', cleaned)
+    # Drop legacy anchor rows BEFORE clean_forecast_soc so its median isn't skewed by
+    # the real-SoC anchors interleaved with the predicted 15-min slots.
+    anchors = store.delete_power_forecast_anchors()
+    if anchors:
+        log.warning('Startup: removed %d legacy power-forecast anchor row(s) '
+                    '(saw-toothed the predicted SoC line)', anchors)
     cleaned_fc = store.clean_forecast_soc()
     if cleaned_fc:
         log.warning('Startup: cleaned %d forecast row(s) with SoC outlier values', cleaned_fc)

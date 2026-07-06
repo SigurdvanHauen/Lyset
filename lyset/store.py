@@ -225,12 +225,17 @@ def save_power_forecast(records: list[dict], now_ms: int, overwrite_past: bool =
     overwrite_past=True forces INSERT OR REPLACE on past slots too, so a corrected
     re-simulation can flush stale/buggy frozen predictions (the past line is only ever
     a plan overlay, not a scoring record).
+
+    The simulation's leading anchor row (batt_w None — the current-SoC start point) is
+    NOT persisted: each regeneration would drop one at a fresh odd timestamp carrying the
+    REAL SoC, and those, interleaved with the frozen predicted 15-min slots, made the
+    plotted Predicted-SoC line saw-tooth against the smooth actual line.
     """
     with _lock:
         con = _get_con()
         for r in records:
             soc  = r.get('soc')
-            if soc is None:
+            if soc is None or r.get('batt_w') is None:
                 continue
             vals = (
                 r['ts_ms'], soc, r.get('batt_w'), r.get('grid_w'),
@@ -247,12 +252,23 @@ def save_power_forecast(records: list[dict], now_ms: int, overwrite_past: bool =
         con.commit()
 
 
+def delete_power_forecast_anchors() -> int:
+    """Remove legacy simulation anchor rows (batt_w IS NULL) — the real-SoC start
+    points earlier builds persisted, which saw-toothed the plotted Predicted-SoC line.
+    Called once on startup; new saves no longer create them. Returns rows deleted."""
+    with _lock:
+        con = _get_con()
+        n = con.execute('DELETE FROM power_forecast WHERE batt_w IS NULL').rowcount
+        con.commit()
+    return n
+
+
 def load_power_forecast(from_ms: int, to_ms: int) -> list[dict]:
     with _lock:
         rows = _get_con().execute(
             'SELECT ts_ms, soc, batt_w, grid_w, soc_p10, soc_p90, '
             'batt_w_p10, batt_w_p90, grid_w_p10, grid_w_p90 FROM power_forecast '
-            'WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms',
+            'WHERE ts_ms >= ? AND ts_ms <= ? AND batt_w IS NOT NULL ORDER BY ts_ms',
             (from_ms, to_ms),
         ).fetchall()
     return [{'ts_ms': ts, 'soc': soc, 'batt_w': bw, 'grid_w': gw,
