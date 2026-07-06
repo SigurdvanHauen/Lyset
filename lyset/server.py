@@ -254,7 +254,9 @@ def _simulate_soc(
     first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
 
     soc        = start_soc
-    gc_active  = gc_state   # grid-charge hysteresis state across steps
+    gc_active  = gc_state   # grid-charge commitment state across steps
+    gc_floor   = None       # cheapest import banked this charge episode (reset by a PV
+                            # surplus) — blocks re-charging at a dearer evening slot
     neg_active = neg_state  # zero-export hysteresis state across steps
     result    = [{'ts_ms': cutoff_ms, 'soc': round(soc, 1), 'batt_w': None, 'grid_w': None}]
 
@@ -269,6 +271,8 @@ def _simulate_soc(
             continue  # beyond load forecast window — stop stepping
 
         net_kw = (pv_w - load_w) / 1000.0
+        if net_kw > 0:      # PV surplus → fresh cheap episode, clear the charge floor
+            gc_floor = None
 
         # Advance price pointer to the most recent price at or before this slot
         while (price_ptr + 1 < len(prices_sorted)
@@ -320,7 +324,15 @@ def _simulate_soc(
                     pre = [s['import'] for s in gc_slots if s['import'] is not None
                            and (first_dear_ts is None or s['ts'] < first_dear_ts)]
                     price_ok = (not pre) or import_dkk <= min(pre) + CHARGE_MARGIN_DKK
-                    do_gc = soc < gc_target and price_ok
+                    # One block, not a picket fence (mirrors AutoController): once charging
+                    # (gc_active) finish the block; otherwise START only at a cheap slot
+                    # that isn't dearer than the cheapest already banked this episode
+                    # (gc_floor + margin). The floor stops the pack sawtoothing against the
+                    # evening discharge when the overnight deficit exceeds pack capacity.
+                    not_dearer = gc_floor is None or import_dkk <= gc_floor + CHARGE_MARGIN_DKK
+                    do_gc = soc < gc_target and (gc_active or (price_ok and not_dearer))
+                    if do_gc:
+                        gc_floor = import_dkk if gc_floor is None else min(gc_floor, import_dkk)
 
                 # Hold: deficit now AND a significantly more expensive slot is coming soon
                 if not do_gc and net_kw < 0:

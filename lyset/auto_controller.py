@@ -308,7 +308,10 @@ class AutoController:
         self.last_action_ts:  Optional[float] = None
         self.last_mode:       Optional[str]   = None  # last decision mode (e.g. 'export_limited')
         self._on_command:     Optional[Callable[[str, str], None]] = None
-        self._grid_charging:  bool            = False  # hysteresis state
+        self._grid_charging:  bool            = False  # grid-charge commitment state
+        self._gc_floor_price: Optional[float] = None   # cheapest import banked this charge
+                                                       # episode; blocks re-charging at a
+                                                       # dearer slot (reset by a PV surplus)
         self._export_curtailed: bool          = False  # zero-export hysteresis state
         self._last_soc:       Optional[float] = None   # last real SoC read (37760
                                                        # drops out on ~10% of polls)
@@ -814,6 +817,10 @@ class AutoController:
             return [p for p in future_prices if p['ts'] <= cutoff]
 
         surplus_w = pv_w - house_load  # + = solar exceeds load
+        # A PV surplus marks a fresh cheap/solar episode: clear the grid-charge price
+        # floor so tomorrow's charging isn't blocked by today's cheapest banked price.
+        if surplus_w > 0:
+            self._gc_floor_price = None
 
         # ── 1. Negative export → force-charge from the SURPLUS only ───────────
         # At a negative export price we must not feed the grid. The export-limit
@@ -865,8 +872,21 @@ class AutoController:
                    if p.get('import') is not None
                    and (first_dear_ts is None or p['ts'] < first_dear_ts)]
             price_ok = (not pre) or import_dkk <= min(pre) + _CHARGE_MARGIN_DKK
-            if shortfall_kwh > _GRID_CHARGE_MIN_KWH and batt_soc < target_soc and price_ok:
+            # Charge as ONE block, not a picket fence. `want` says the pack still needs
+            # banking; then either we're mid-block (commitment — finish it, ignoring a
+            # small price bump) or we may START one — but only at a cheap slot (price_ok)
+            # that isn't dearer than the cheapest we've already banked this episode
+            # (_gc_floor_price + margin). The floor stops the plan re-buying at the
+            # evening peak every time the pack discharges a few %; it resets on a PV
+            # surplus above. Without it, an overnight deficit larger than the pack pins
+            # the target to 100 % and the pack sawtooths against every discharge.
+            want = shortfall_kwh > _GRID_CHARGE_MIN_KWH and batt_soc < target_soc
+            not_dearer = self._gc_floor_price is None or \
+                import_dkk <= self._gc_floor_price + _CHARGE_MARGIN_DKK
+            if want and (self._grid_charging or (price_ok and not_dearer)):
                 self._grid_charging = True
+                self._gc_floor_price = (import_dkk if self._gc_floor_price is None
+                                        else min(self._gc_floor_price, import_dkk))
                 self._set_export_limit(worker, False, data)   # grid used freely
                 self._apply(worker, [
                     (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
@@ -879,10 +899,12 @@ class AutoController:
                           f'{import_dkk:.3f} DKK (SoC {batt_soc:.0f}%)')
                 return _Cmd(mode='grid_charge', detail=detail)
             self._grid_charging = False
-            if shortfall_kwh > _GRID_CHARGE_MIN_KWH and not price_ok:
-                log.info('AutoCtrl: grid-charge deferred — %.1f kWh deficit ahead but a '
-                         'cheaper slot precedes it (now %.3f > min %.3f + margin, SoC %.0f%%)',
-                         shortfall_kwh, import_dkk, min(pre), batt_soc)
+            if want and not (price_ok and not_dearer):
+                log.info('AutoCtrl: grid-charge deferred — %.1f kWh deficit ahead but now '
+                         '%.3f DKK not cheap enough (min-ahead %.3f, floor %s, SoC %.0f%%)',
+                         shortfall_kwh, import_dkk, (min(pre) if pre else 0.0),
+                         f'{self._gc_floor_price:.3f}' if self._gc_floor_price else 'none',
+                         batt_soc)
 
         # ── 3. Hold battery for an upcoming peak (deficit only) ───────────────
         # When the house draws from the battery (no surplus) and a much more
