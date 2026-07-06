@@ -1371,6 +1371,33 @@ function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, power
     order: 2,
   }];
 
+  // Shared look for every prediction overlay: a dashed white mean line bracketed
+  // by a translucent white P10–P90 confidence band. pushBand() must be called
+  // right before the matching mean line so its fill:'+1' targets the P10 edge.
+  const PRED_LINE = '#FFFFFFAA';   // dashed mean forecast
+  const PRED_BAND = '#FFFFFF26';   // P10–P90 fill
+  function pushBand(labelBase, p90Pts, p10Pts) {
+    if (!(_bandsEnabled && p90Pts.length && p10Pts.length)) return;
+    datasets.push({
+      label: labelBase + ' P90', data: p90Pts,
+      borderColor: 'transparent', backgroundColor: PRED_BAND,
+      borderWidth: 0, pointRadius: 0, fill: '+1', tension: 0.3, order: 3,
+    });
+    datasets.push({
+      label: labelBase + ' P10', data: p10Pts,
+      borderColor: 'transparent', backgroundColor: 'transparent',
+      borderWidth: 0, pointRadius: 0, fill: false, tension: 0.3, order: 3,
+    });
+  }
+  function pushPredLine(lbl, pts) {
+    datasets.push({
+      label: lbl, data: pts,
+      borderColor: PRED_LINE, backgroundColor: 'transparent',
+      borderWidth: 2, borderDash: [6, 4], pointRadius: 0, pointHoverRadius: 4,
+      fill: false, tension: 0.3, order: 1,
+    });
+  }
+
   // PV Power: highlight power-limited segments using the computed system state.
   if (key === 'active_power') {
     const sH   = historyMap['_cstate_idx'] || { ts: [], val: [] };
@@ -1388,46 +1415,9 @@ function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, power
     const p90Pts = solcastSrc.filter(d => d.p90_w != null).map(d => ({ x: d.ts_ms, y: d.p90_w }));
     const p10Pts = solcastSrc.filter(d => d.p10_w != null).map(d => ({ x: d.ts_ms, y: d.p10_w }));
 
-    // P10–P90 confidence band — only rendered when bands are enabled
-    if (_bandsEnabled && p90Pts.length && p10Pts.length) {
-      datasets.push({
-        label: 'P90',
-        data: p90Pts,
-        borderColor: 'transparent',
-        backgroundColor: '#FFFFFF1A',
-        borderWidth: 0,
-        pointRadius: 0,
-        fill: '+1',
-        tension: 0.3,
-        order: 3,
-      });
-      datasets.push({
-        label: 'P10',
-        data: p10Pts,
-        borderColor: 'transparent',
-        backgroundColor: 'transparent',
-        borderWidth: 0,
-        pointRadius: 0,
-        fill: false,
-        tension: 0.3,
-        order: 3,
-      });
-    }
-
-    // Mean forecast — dashed line drawn above the band
-    datasets.push({
-      label: 'Forecast',
-      data: fcPts,
-      borderColor: '#FFFFFFAA',
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      borderDash: [6, 4],
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: false,
-      tension: 0.3,
-      order: 1,
-    });
+    // P10–P90 confidence band (below), then the dashed white mean forecast line.
+    pushBand('Solar', p90Pts, p10Pts);
+    pushPredLine('Forecast', fcPts);
   }
 
   if (hasCons) {
@@ -1435,95 +1425,34 @@ function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, power
     const consp90  = consSrc.filter(r => r.p90_w != null).map(r => ({ x: r.ts_ms, y: r.p90_w }));
     const consp10  = consSrc.filter(r => r.p10_w != null).map(r => ({ x: r.ts_ms, y: r.p10_w }));
 
-    if (_bandsEnabled && consp90.length && consp10.length) {
-      datasets.push({
-        label: 'Cons P90',
-        data: consp90,
-        borderColor: 'transparent',
-        backgroundColor: color + '1A',
-        borderWidth: 0,
-        pointRadius: 0,
-        fill: '+1',
-        tension: 0.3,
-        order: 3,
-      });
-      datasets.push({
-        label: 'Cons P10',
-        data: consp10,
-        borderColor: 'transparent',
-        backgroundColor: 'transparent',
-        borderWidth: 0,
-        pointRadius: 0,
-        fill: false,
-        tension: 0.3,
-        order: 3,
-      });
-    }
-
-    datasets.push({
-      label: 'Predicted consumption',
-      data: consPts,
-      borderColor: color + '88',
-      backgroundColor: color + '10',
-      borderWidth: 2,
-      borderDash: [6, 4],
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: false,
-      tension: 0.3,
-      order: 1,
-    });
+    pushBand('Cons', consp90, consp10);
+    pushPredLine('Predicted consumption', consPts);
   }
 
+  // Power-plan overlays (SoC / battery / grid): the plan sim now emits a P10/P90
+  // envelope per slot (optimistic = more sun + less load, pessimistic = the
+  // reverse), so each gets the same white band + dashed mean treatment.
+  const bandPts = (f) => [
+    powerSrc.filter(r => r[f + '_p90'] != null).map(r => ({ x: r.ts_ms, y: r[f + '_p90'] })),
+    powerSrc.filter(r => r[f + '_p10'] != null).map(r => ({ x: r.ts_ms, y: r[f + '_p10'] })),
+  ];
+
   if (hasSocFc) {
-    const socPts = powerSrc.filter(r => r.soc != null).map(r => ({ x: r.ts_ms, y: r.soc }));
-    datasets.push({
-      label: 'Predicted SoC',
-      data: socPts,
-      borderColor: '#34D39988',
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      borderDash: [6, 4],
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: false,
-      tension: 0.3,
-      order: 1,
-    });
+    pushBand('SoC', ...bandPts('soc'));
+    pushPredLine('Predicted SoC',
+      powerSrc.filter(r => r.soc != null).map(r => ({ x: r.ts_ms, y: r.soc })));
   }
 
   if (hasBattFc) {
-    const battPts = powerSrc.filter(r => r.batt_w != null).map(r => ({ x: r.ts_ms, y: r.batt_w }));
-    datasets.push({
-      label: 'Predicted battery power',
-      data: battPts,
-      borderColor: '#34D39988',
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      borderDash: [6, 4],
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: false,
-      tension: 0.3,
-      order: 1,
-    });
+    pushBand('Batt', ...bandPts('batt_w'));
+    pushPredLine('Predicted battery power',
+      powerSrc.filter(r => r.batt_w != null).map(r => ({ x: r.ts_ms, y: r.batt_w })));
   }
 
   if (hasGridFc) {
-    const gridPts = powerSrc.filter(r => r.grid_w != null).map(r => ({ x: r.ts_ms, y: r.grid_w }));
-    datasets.push({
-      label: 'Predicted grid power',
-      data: gridPts,
-      borderColor: '#4F8EF788',
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      borderDash: [6, 4],
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: false,
-      tension: 0.3,
-      order: 1,
-    });
+    pushBand('Grid', ...bandPts('grid_w'));
+    pushPredLine('Predicted grid power',
+      powerSrc.filter(r => r.grid_w != null).map(r => ({ x: r.ts_ms, y: r.grid_w })));
   }
 
   return datasets;
@@ -1552,8 +1481,9 @@ function openChart(key, label, unit, color) {
     label + (unit ? ' (' + unit + ')' : '')
     + (hasFc                         ? ' + Solcast forecast' : '')
     + (hasCons || hasSocFc || hasBattFc || hasGridFc ? ' + predicted' : '');
+  const hasBand = hasFc || hasCons || hasSocFc || hasBattFc || hasGridFc;
   document.getElementById('modal-fc-btn').style.display     = (key === 'active_power') ? '' : 'none';
-  document.getElementById('modal-bands-btn').style.display   = (key === 'active_power') ? '' : 'none';
+  document.getElementById('modal-bands-btn').style.display   = hasBand ? '' : 'none';
   document.getElementById('modal-smooth-btn').style.display  = '';
   _hideSavingsNav();
   _savingsOpen = false;
@@ -1702,7 +1632,7 @@ function toggleBands() {
   const btn = document.getElementById('modal-bands-btn');
   btn.textContent = 'Bands: ' + (_bandsEnabled ? 'On' : 'Off');
   btn.style.borderColor = _bandsEnabled ? 'var(--accent)' : 'var(--border)';
-  if (_modalKey === 'active_power') openChart('active_power', 'PV Power', 'W', '#F59E0B');
+  if (_modalKey) openChart(_modalKey, _modalLabel, _modalUnit, _modalColor);
 }
 
 function resetZoom() {

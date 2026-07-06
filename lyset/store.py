@@ -58,6 +58,12 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS power_forecast '
             '(ts_ms INTEGER PRIMARY KEY, soc REAL, batt_w REAL, grid_w REAL)'
         )
+        for _col in ('soc_p10', 'soc_p90', 'batt_w_p10', 'batt_w_p90',
+                     'grid_w_p10', 'grid_w_p90'):
+            try:  # migrate pre-band DBs — each confidence bound is a nullable column
+                _con.execute(f'ALTER TABLE power_forecast ADD COLUMN {_col} REAL')
+            except sqlite3.OperationalError:
+                pass  # column already exists
         _con.execute(
             # One row per local calendar day. yield_kwh = inverter daily counter (register 32114);
             # forecast_kwh = Solcast full-day sum at the time of last update.
@@ -224,32 +230,36 @@ def save_power_forecast(records: list[dict], now_ms: int, overwrite_past: bool =
         con = _get_con()
         for r in records:
             soc  = r.get('soc')
-            bw   = r.get('batt_w')
-            gw   = r.get('grid_w')
             if soc is None:
                 continue
-            if r['ts_ms'] <= now_ms and not overwrite_past:
-                con.execute(
-                    'INSERT OR IGNORE INTO power_forecast VALUES (?, ?, ?, ?)',
-                    (r['ts_ms'], soc, bw, gw),
-                )
-            else:
-                con.execute(
-                    'INSERT OR REPLACE INTO power_forecast VALUES (?, ?, ?, ?)',
-                    (r['ts_ms'], soc, bw, gw),
-                )
+            vals = (
+                r['ts_ms'], soc, r.get('batt_w'), r.get('grid_w'),
+                r.get('soc_p10'), r.get('soc_p90'),
+                r.get('batt_w_p10'), r.get('batt_w_p90'),
+                r.get('grid_w_p10'), r.get('grid_w_p90'),
+            )
+            verb = ('INSERT OR IGNORE' if r['ts_ms'] <= now_ms and not overwrite_past
+                    else 'INSERT OR REPLACE')
+            con.execute(
+                f'{verb} INTO power_forecast VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                vals,
+            )
         con.commit()
 
 
 def load_power_forecast(from_ms: int, to_ms: int) -> list[dict]:
     with _lock:
         rows = _get_con().execute(
-            'SELECT ts_ms, soc, batt_w, grid_w FROM power_forecast '
+            'SELECT ts_ms, soc, batt_w, grid_w, soc_p10, soc_p90, '
+            'batt_w_p10, batt_w_p90, grid_w_p10, grid_w_p90 FROM power_forecast '
             'WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms',
             (from_ms, to_ms),
         ).fetchall()
-    return [{'ts_ms': ts, 'soc': soc, 'batt_w': bw, 'grid_w': gw}
-            for ts, soc, bw, gw in rows]
+    return [{'ts_ms': ts, 'soc': soc, 'batt_w': bw, 'grid_w': gw,
+             'soc_p10': s10, 'soc_p90': s90,
+             'batt_w_p10': b10, 'batt_w_p90': b90,
+             'grid_w_p10': g10, 'grid_w_p90': g90}
+            for ts, soc, bw, gw, s10, s90, b10, b90, g10, g90 in rows]
 
 
 def upsert_daily_solar(date: str, yield_kwh: float | None = None, forecast_kwh: float | None = None):

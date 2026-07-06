@@ -452,6 +452,63 @@ def _simulate_soc(
 
 # ── Power forecast helpers ────────────────────────────────────────────────────
 
+def _simulate_soc_with_bands(
+    start_soc: float,
+    capacity_kwh: float,
+    solar_fc: list[dict],
+    load_fc: list[dict],
+    **kwargs,
+) -> list[dict]:
+    """Run the plan simulation for the mean forecast, then attach a P10/P90
+    confidence band to every slot (soc / batt_w / grid_w).
+
+    The band comes from re-running the same simulation over the forecast
+    uncertainty envelope:
+      • optimistic  — P90 solar + P10 load  (most sun, least house draw)
+      • pessimistic — P10 solar + P90 load  (least sun, most house draw)
+    For each field the per-slot band is [min, max] across the two envelope runs,
+    which handles every sign convention automatically (a bound that is 'high' for
+    SoC is 'low' for grid import). Where a forecast lacks P10/P90 (e.g. a stored
+    consumption series that only kept its mean), the mean is used for both bounds
+    so that field simply contributes no width — the band still reflects whatever
+    uncertainty the other input carries (solar dominates the daytime spread).
+    """
+    base = _simulate_soc(start_soc, capacity_kwh, solar_fc, load_fc, **kwargs)
+    if not base:
+        return base
+
+    def _swap(records: list[dict], mean_key: str, bound_key: str) -> list[dict]:
+        out = []
+        for r in records:
+            b = r.get(bound_key)
+            out.append(r if b is None else {**r, mean_key: b})
+        return out
+
+    solar_lo = _swap(solar_fc, 'pv_w', 'p10_w')
+    solar_hi = _swap(solar_fc, 'pv_w', 'p90_w')
+    load_lo  = _swap(load_fc,  'w',    'p10_w')
+    load_hi  = _swap(load_fc,  'w',    'p90_w')
+
+    opt  = _simulate_soc(start_soc, capacity_kwh, solar_hi, load_lo, **kwargs)
+    pess = _simulate_soc(start_soc, capacity_kwh, solar_lo, load_hi, **kwargs)
+    opt_by  = {r['ts_ms']: r for r in opt}
+    pess_by = {r['ts_ms']: r for r in pess}
+
+    for r in base:
+        o = opt_by.get(r['ts_ms'])
+        p = pess_by.get(r['ts_ms'])
+        for f in ('soc', 'batt_w', 'grid_w'):
+            ov = o.get(f) if o else None
+            pv = p.get(f) if p else None
+            if ov is None or pv is None:
+                r[f + '_p10'] = r[f + '_p90'] = None
+            else:
+                nd = 1 if f == 'soc' else 0
+                r[f + '_p10'] = round(min(ov, pv), nd)
+                r[f + '_p90'] = round(max(ov, pv), nd)
+    return base
+
+
 def _backfill_power_forecast(cap_val: float):
     """
     Seed the power_forecast table with historical predictions so the chart
@@ -507,7 +564,7 @@ def _backfill_power_forecast(cap_val: float):
     )
     prices   = store.load_prices(anchor_ts_ms, end_ms) if _auto_controller.enabled else None
 
-    fc = _simulate_soc(
+    fc = _simulate_soc_with_bands(
         anchor_soc, cap_val, solar_fc, load_fc,
         prices=prices,
         start_ms=anchor_ts_ms,
@@ -523,21 +580,20 @@ def _backfill_power_forecast(cap_val: float):
 
 
 def _smooth_forecast_soc(records: list[dict]) -> list[dict]:
-    """Apply 5-point sliding median to the soc field of a forecast list."""
+    """Apply a 5-point sliding median to the soc mean and its P10/P90 band edges so
+    the confidence band tracks the same de-noised line the mean is drawn on."""
     HALF = 2
-    socs = [r['soc'] for r in records if r.get('soc') is not None]
-    if len(socs) < 3:
-        return records
-    n = len(socs)
-    smoothed = [round(statistics.median(socs[max(0, i-HALF):min(n, i+HALF+1)]), 1) for i in range(n)]
-    j = 0
-    result = []
-    for r in records:
-        if r.get('soc') is not None:
-            result.append({**r, 'soc': smoothed[j]})
-            j += 1
-        else:
-            result.append(r)
+    result = [dict(r) for r in records]
+    for key in ('soc', 'soc_p10', 'soc_p90'):
+        idx  = [i for i, r in enumerate(result) if r.get(key) is not None]
+        vals = [result[i][key] for i in idx]
+        n    = len(vals)
+        if n < 3:
+            continue
+        smoothed = [round(statistics.median(vals[max(0, k-HALF):min(n, k+HALF+1)]), 1)
+                    for k in range(n)]
+        for k, i in enumerate(idx):
+            result[i][key] = smoothed[k]
     return result
 
 
@@ -675,7 +731,7 @@ def _on_data(data: dict):
                       if r.get('w') is not None}
             if served:
                 load_48h = [{**r, 'w': served.get(r['ts_ms'], r['w'])} for r in load_48h]
-            fc = _simulate_soc(
+            fc = _simulate_soc_with_bands(
                 soc_val, cap_val, _last_solar_forecast, load_48h,
                 prices=_last_prices if _auto_controller.enabled else None,
                 gc_state=_auto_controller._grid_charging,
