@@ -558,9 +558,11 @@ def _backfill_power_forecast(cap_val: float):
     # way the served series is, and apply the current decision rules incl. the export
     # hysteresis, so the regenerated past matches the fixed live plan.
     solar_fc = store.load_solar_forecast(anchor_ts_ms, end_ms) or _last_solar_forecast
-    load_fc  = _smooth_w_timeseries(
+    # _merge_cons_bands smooths 'w' (as before) AND attaches the p10/p90 band, so the
+    # backfilled past power plan carries a load-uncertainty envelope too, not just solar.
+    load_fc  = _merge_cons_bands(
         store.load_consumption_forecast(anchor_ts_ms, end_ms) or _last_consumption_forecast,
-        _CONS_SMOOTH_SIGMA,
+        _cons_band_predict(),
     )
     prices   = store.load_prices(anchor_ts_ms, end_ms) if _auto_controller.enabled else None
 
@@ -781,30 +783,63 @@ def _smooth_w_timeseries(records: list[dict], sigma: float) -> list[dict]:
     return out
 
 
-def _merge_cons_bands(records: list[dict], future: list[dict]) -> list[dict]:
+def _cons_band_predict() -> list[dict]:
+    """One full week of predictions (672 × 15-min), used only as a band source.
+
+    The consumption band is periodic over the hour-of-week and bias-independent, so a
+    single week forward from now contains every (weekday, hour, quarter) key exactly
+    once — enough to give ANY record a band, past or future, without predicting the
+    past. Returns [] when no model is loaded."""
+    if not _consumption_model:
+        return []
+    return _consumption_model.predict(time.time(), n_slots=7 * 96)
+
+
+def _cons_band_index(band_src: list[dict]) -> dict:
+    """Index a band-source predict by hour-of-week → (halfwidth_lo, halfwidth_hi).
+
+    Half-widths (mean−p10, p90−mean) are σ-based and bias-independent, so keying on the
+    local (weekday, hour, quarter-hour) lets a one-week source band ANY timestamp."""
+    idx: dict = {}
+    for pr in band_src:
+        p10, p90, w = pr.get('p10_w'), pr.get('p90_w'), pr.get('w')
+        if p10 is None or p90 is None or w is None:
+            continue
+        dt  = datetime.fromtimestamp(pr['ts_ms'] / 1000, tz=_TZ_LOCAL)
+        key = (dt.weekday(), dt.hour, dt.minute // 15)
+        idx.setdefault(key, (w - p10, p90 - w))
+    return idx
+
+
+def _merge_cons_bands(records: list[dict], band_src: list[dict]) -> list[dict]:
     """Attach a p10/p90 confidence band to each stored consumption record.
 
     The DB keeps only the mean 'w' (frozen at first write via INSERT OR IGNORE); the
-    σ-based band comes from the fresh `future` predict(). Because the fresh predict
-    carries the model's *current* global bias while 'w' was frozen under an earlier
-    bias, transplanting the raw p10/p90 leaves the band off-centre from the displayed
-    line. Transplant only the HALF-WIDTHS (p90−mean, mean−p10 — σ-based and
-    bias-independent) onto the displayed 'w' so the band brackets the dashed mean line.
+    σ-based band comes from a fresh predict(). Because the fresh predict carries the
+    model's *current* global bias while 'w' was frozen under an earlier bias,
+    transplanting the raw p10/p90 leaves the band off-centre from the displayed line.
+    Transplant only the HALF-WIDTHS (p90−mean, mean−p10 — σ-based and bias-independent)
+    onto the displayed 'w' so the band brackets the dashed mean line.
+
+    The band is looked up by HOUR-OF-WEEK (not exact ts) so PAST slots get a band too —
+    a now-forward predict never matched a past timestamp, which is why the past portion
+    of the consumption plot showed no band. `band_src` should span ≥ 1 week.
 
     The 'w' is first smoothed along time so the served line (and everything that
     consumes it) is de-noised even where the frozen rows still hold raw per-slot noise.
     """
-    records    = _smooth_w_timeseries(records, _CONS_SMOOTH_SIGMA)
-    pred_by_ts = {r['ts_ms']: r for r in future}
+    records  = _smooth_w_timeseries(records, _CONS_SMOOTH_SIGMA)
+    band_idx = _cons_band_index(band_src)
     out = []
     for r in records:
-        pr = pred_by_ts.get(r['ts_ms'])
-        if (pr and r.get('w') is not None and pr.get('w') is not None
-                and pr.get('p10_w') is not None and pr.get('p90_w') is not None):
-            w = r['w']
+        w   = r.get('w')
+        dt  = (datetime.fromtimestamp(r['ts_ms'] / 1000, tz=_TZ_LOCAL)
+               if r.get('ts_ms') is not None else None)
+        hw  = band_idx.get((dt.weekday(), dt.hour, dt.minute // 15)) if dt else None
+        if w is not None and hw is not None:
             out.append({**r,
-                        'p10_w': round(max(0.0, w - (pr['w'] - pr['p10_w'])), 1),
-                        'p90_w': round(w + (pr['p90_w'] - pr['w']), 1)})
+                        'p10_w': round(max(0.0, w - hw[0]), 1),
+                        'p90_w': round(w + hw[1], 1)})
         else:
             out.append({**r, 'p10_w': None, 'p90_w': None})
     return out
@@ -824,7 +859,7 @@ def _save_model_and_regen():
     # re-centred on the displayed mean by _merge_cons_bands (see its docstring).
     now_ms = int(time.time() * 1000)
     combined = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
-    _last_consumption_forecast = _merge_cons_bands(combined or future, future)
+    _last_consumption_forecast = _merge_cons_bands(combined or future, _cons_band_predict())
     _auto_controller.set_consumption_forecast(_last_consumption_forecast)
     _push({'type': 'consumption_forecast', 'payload': _last_consumption_forecast})
 
@@ -1127,7 +1162,7 @@ async def lifespan(app: FastAPI):
         now_ms = int(time.time() * 1000)
         stored = store.load_consumption_forecast(now_ms - 86_400_000, now_ms + 86_400_000)
         # Bands re-centred on the displayed mean by _merge_cons_bands (DB only keeps 'w')
-        _last_consumption_forecast = _merge_cons_bands(stored or future, future)
+        _last_consumption_forecast = _merge_cons_bands(stored or future, _cons_band_predict())
         _auto_controller.set_consumption_forecast(_last_consumption_forecast)
 
     # Restore stored power forecast from DB
@@ -1359,8 +1394,7 @@ async def api_consumption_forecast(full: int = 0):
     # DB rows carry only the mean 'w'; attach the (re-centred) p10/p90 band from a
     # fresh predict so the expanded modal chart shows confidence bands too.
     if data and _consumption_model:
-        future = _consumption_model.predict(time.time(), n_slots=192)
-        data = _merge_cons_bands(data, future)
+        data = _merge_cons_bands(data, _cons_band_predict())
     return {
         'forecast': data if data else _last_consumption_forecast,
         'coverage': _consumption_model.coverage if _consumption_model else 0,
