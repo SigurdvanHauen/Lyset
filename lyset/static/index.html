@@ -504,6 +504,10 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-top"><div class="card-lbl">House Load</div><div class="card-times" id="t-d-load"></div></div>
         <div class="card-val" id="d-load">&#8212;<span class="unit">W</span></div>
       </div>
+      <div class="card acc">
+        <div class="card-top"><div class="card-lbl">EV Power</div></div>
+        <div class="card-val" id="d-ev-power">&#8212;<span class="unit">kW</span></div>
+      </div>
     </div>
 
     <div class="split-cols">
@@ -1121,6 +1125,9 @@ async function loadEvChargerPower() {
 
   const pts  = (j.power || []).map(p => ({ x: p.ts_ms, y: p.kw, dt: p.dt_min }));
   const win  = _dashWindow();
+
+  // Power Flow "EV Power" card = the most recent derived interval (0 kW when idle).
+  setCard('d-ev-power', pts.length ? pts[pts.length - 1].y : null, 2);
 
   if (_evPowerChart) {
     _evPowerChart.data.datasets[0].data = pts;
