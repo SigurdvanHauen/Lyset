@@ -158,6 +158,14 @@ SCHEMA: list[dict] = [
              'discharge to the grid for arbitrage. Measured against the most expensive upcoming '
              'import the stored energy could otherwise offset, so the trade can never lose money to '
              'self-consumption. 0 = break-even allowed; higher = more conservative. Takes effect immediately.'},
+            {'key': 'EV_GREEN_CHARGING', 'label': 'EV green charging (allow inverter export)', 'type': 'bool',
+             'default': '0', 'help': 'Stops Lyset forcing the inverter to "zero-power grid connection" '
+             '(Active Power Control mode 5). That zero-export mode is what makes Huawei refuse to enable '
+             'the charger’s "PV/Green power preferred" mode ("output power limited to 0.0 kW") and '
+             'starves it of visible surplus. With this ON the inverter is held unlimited (mode 0) so the '
+             'charger can soak solar surplus. Trade-off: at NEGATIVE export prices, surplus the car isn’t '
+             'absorbing leaks to the grid at a loss instead of being curtailed (Lyset still force-charges the '
+             'battery to soak most of it). Takes effect immediately.'},
         ],
     },
 ]

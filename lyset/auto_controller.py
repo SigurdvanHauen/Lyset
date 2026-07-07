@@ -102,6 +102,23 @@ def arbitrage_enabled() -> bool:
     return os.getenv('ARBITRAGE_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off', '')
 
 
+def ev_green_charging() -> bool:
+    """Whether to hold the inverter's Active Power Control at UNLIMITED (mode 0)
+    instead of ever forcing zero-power grid connection (mode 5).
+
+    Mode 5 ("zero export limitation") is what Huawei's EV charger reports as
+    "inverter output power has been limited to 0.0 kW" and refuses to enable its
+    "PV/Green power preferred" mode over — and it also curtails PV to local load,
+    so the charger sees no surplus to soak. With this ON, _set_export_limit()
+    never asserts mode 5, so Huawei's native green-charging can engage and route
+    solar surplus to the car. Trade-off (user chose to accept it): at a negative
+    export price, surplus the car isn't taking leaks to grid at a loss rather
+    than being curtailed — but the battery force-charge in the negative-export
+    branch still soaks most of it. Toggled from Settings → Auto controller;
+    default OFF. Read live so a Settings save applies without a restart."""
+    return os.getenv('EV_GREEN_CHARGING', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def arbitrage_min_gain() -> float:
     """Minimum predicted round-trip gain (as a fraction — 0.05 = 5 %) required
     before the planner will discharge the battery to the grid for arbitrage.
@@ -481,6 +498,14 @@ class AutoController:
         single-client SDongle. In that case fall back to the optimistic _apply cache:
         write once, then re-assert only on the periodic resync.
         """
+        # EV green charging: never force zero-export — Huawei's charger refuses
+        # "PV power preferred" while the inverter is at mode 5 ("output power
+        # limited to 0.0 kW") and can't see surplus to soak. Hold mode 0 so the
+        # feature works; the negative-export branch still force-charges the
+        # battery, it just doesn't curtail the residual (accepted trade-off).
+        if zero_export and ev_green_charging():
+            zero_export = False
+
         # Record the commanded state so the negative-export decision can apply
         # hysteresis (every branch calls this exactly once per tick, so it always
         # reflects reality).
