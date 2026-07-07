@@ -1669,6 +1669,18 @@ async def api_ev_charger_daily(days: int = 30):
     return {'daily': data}
 
 
+@app.get('/api/ev/charger/power')
+async def api_ev_charger_power(hours: int = 24):
+    """EV charging power (kW) over time, derived from the lifetime energy
+    counter's rise between polls (the cloud gives no live power). Average per
+    poll interval, anchored at interval end. hours clamped to 1-720 (30 d)."""
+    hours = max(1, min(720, hours))
+    now = time.time()
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, store.load_ev_charge_power, now - hours * 3600, now)
+    return {'power': data}
+
+
 @app.get('/api/ev/charger/summary')
 async def api_ev_charger_summary():
     """kWh charged today / this week / this month / this year + the lifetime

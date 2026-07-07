@@ -406,6 +406,51 @@ def load_ev_energy_summary() -> dict:
     }
 
 
+def load_ev_charge_power(from_ts: float, to_ts: float) -> list[dict]:
+    """Derived EV charging power (kW) over time, for the Dashboard trend chart.
+
+    FusionSolar's real-time payload for this charger carries NO instantaneous
+    power signal — only the lifetime cumulative 'Total Energy Charged' counter.
+    So power is reconstructed as the AVERAGE over each poll interval:
+    kW = Δcounter_kwh / Δt_hours between consecutive samples. This is therefore
+    a ~5-min-average (the cloud poll cadence), not a live reading; a point is
+    anchored at the interval END and meant to be drawn stepped-before so the
+    step spans the interval it summarises.
+
+    A sample just before `from_ts` is included as the opening baseline so the
+    first in-window interval still gets a value. Negative deltas (counter jitter
+    or a device reset) clamp to 0; a physically-impossible spike above 30 kW
+    (22 kW rated) is treated as a counter anomaly and dropped.
+    """
+    with _lock:
+        con = _get_con()
+        seed = con.execute(
+            'SELECT ts, total_energy_kwh FROM ev_charger_polls '
+            'WHERE ts < ? AND total_energy_kwh IS NOT NULL ORDER BY ts DESC LIMIT 1',
+            (from_ts,),
+        ).fetchone()
+        rows = con.execute(
+            'SELECT ts, total_energy_kwh FROM ev_charger_polls '
+            'WHERE ts >= ? AND ts <= ? AND total_energy_kwh IS NOT NULL ORDER BY ts',
+            (from_ts, to_ts),
+        ).fetchall()
+
+    samples = ([seed] if seed else []) + rows
+    out: list[dict] = []
+    for (t0, e0), (t1, e1) in zip(samples, samples[1:]):
+        dt_h = (t1 - t0) / 3600.0
+        if dt_h <= 0:
+            continue
+        kw = (e1 - e0) / dt_h
+        if kw < 0:
+            kw = 0.0            # counter jitter or a reset — not real discharge
+        if kw > 30.0:
+            continue            # impossible for a 22 kW charger — bad sample
+        out.append({'ts_ms': int(t1 * 1000), 'kw': round(kw, 3),
+                    'dt_min': round((t1 - t0) / 60.0, 1)})
+    return out
+
+
 def save_auto_command(ts: float, mode: str, detail: str):
     """Append one auto-controller decision to the command log."""
     with _lock:

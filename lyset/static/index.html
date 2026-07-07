@@ -975,6 +975,7 @@ function dispatch(msg) {
 
 // ── EV Charger: current status + history chart (FusionSolar cloud poller) ─────
 let _evChargerChart = null;
+let _evPowerChart = null;
 
 function _evFmtTs(ts) {
   if (!ts) return '—';
@@ -1018,6 +1019,7 @@ function onEvChargerData(payload) {
   _renderEvChargerCurrent(payload, null);   // "today" needs a DB round-trip for the day min/max
   loadEvChargerState();                     // refresh with the derived today figure
   loadEvChargerDaily();                     // refresh today's bar on the chart
+  loadEvChargerPower();                      // refresh the charge-power trend
   loadEvSummary();                          // refresh the Dashboard EV cards
 }
 
@@ -1097,6 +1099,74 @@ async function loadEvChargerDaily() {
           callbacks: {
             title: ctx => new Date(ctx[0].label).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'long' }),
             label: ctx => ` ${ctx.parsed.y.toFixed(2)} kWh charged`,
+          },
+        },
+      },
+    },
+  });
+}
+
+// EV charge power (kW) over time. Derived server-side from the lifetime energy
+// counter (Δkwh/Δt per poll) — the cloud exposes no live power — so it's a
+// ~5-min-average, drawn stepped-before so each step spans the interval it covers.
+async function loadEvChargerPower() {
+  const canvas = document.getElementById('ev-power-chart');
+  if (!canvas) return;
+  let j;
+  try {
+    const r = await fetch('/api/ev/charger/power?hours=24');
+    if (!r.ok) return;
+    j = await r.json();
+  } catch (e) { return; }
+
+  const pts  = (j.power || []).map(p => ({ x: p.ts_ms, y: p.kw, dt: p.dt_min }));
+  const win  = _dashWindow();
+
+  if (_evPowerChart) {
+    _evPowerChart.data.datasets[0].data = pts;
+    _evPowerChart.options.scales.x.min = win.min;
+    _evPowerChart.options.scales.x.max = win.max;
+    _evPowerChart.update('none');
+    return;
+  }
+  _evPowerChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { datasets: [{
+      label: 'Charge power (kW)',
+      data: pts,
+      stepped: 'before',
+      borderColor: '#A78BFA', borderWidth: 2,
+      backgroundColor: 'rgba(167,139,250,0.14)', fill: true,
+      pointRadius: 0, pointHoverRadius: 4,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          type: 'linear', min: win.min, max: win.max,
+          ticks: {
+            color: '#8892AA', maxTicksLimit: 7, font: { size: 9 },
+            callback: v => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          beginAtZero: true, grace: '10%',
+          title: { display: true, text: 'kW', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 9 }, maxTicksLimit: 6 },
+          grid:  { color: '#2D3555' },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA', bodyColor: '#E2E8F4',
+          borderColor: '#2D3555', borderWidth: 1, padding: 8,
+          callbacks: {
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleTimeString(),
+            label: ctx => ` ${ctx.parsed.y.toFixed(2)} kW` +
+              (ctx.raw && ctx.raw.dt != null ? ` (avg over ${ctx.raw.dt} min)` : ''),
           },
         },
       },
@@ -1265,6 +1335,24 @@ function buildDashChartCells() {
   evCell.appendChild(evHead);
   evCell.appendChild(evBox);
   wrap.appendChild(evCell);
+
+  // 7th cell: EV charge power over time. Derived (Δcounter/Δt) — the cloud
+  // gives no live power — so it's a ~5-min-average, drawn stepped over each
+  // poll interval. Hosts ev-power-chart, drawn by loadEvChargerPower().
+  const epCell = document.createElement('div');
+  epCell.className = 'dash-chart-cell';
+  epCell.style.cursor = 'default';
+  const epHead = document.createElement('div');
+  epHead.className = 'dash-chart-title';
+  epHead.textContent = 'EV Charge Power (kW)';
+  const epBox = document.createElement('div');
+  epBox.className = 'dash-chart-box';
+  const epCanvas = document.createElement('canvas');
+  epCanvas.id = 'ev-power-chart';
+  epBox.appendChild(epCanvas);
+  epCell.appendChild(epHead);
+  epCell.appendChild(epBox);
+  wrap.appendChild(epCell);
 }
 
 function renderDashCharts() {
@@ -1325,7 +1413,8 @@ function renderDashCharts() {
       },
     });
   }
-  loadEvChargerDaily();   // draw/refresh the 6th (EV) cell
+  loadEvChargerDaily();   // draw/refresh the 6th (EV daily-kWh) cell
+  loadEvChargerPower();   // draw/refresh the 7th (EV charge-power) cell
 }
 
 // Cheap in-place refresh of the actual series (datasets[0]) on each poll; a full
