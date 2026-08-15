@@ -166,6 +166,16 @@ SCHEMA: list[dict] = [
              'charger can soak solar surplus. Trade-off: at NEGATIVE export prices, surplus the car isn’t '
              'absorbing leaks to the grid at a loss instead of being curtailed (Lyset still force-charges the '
              'battery to soak most of it). Takes effect immediately.'},
+            {'key': 'EV_LOCK_ENABLED', 'label': 'Lock battery while EV charges', 'type': 'bool',
+             'default': '0', 'help': 'Blocks the battery from discharging (charging from PV surplus still '
+             'works) whenever Lyset detects the EV charger drawing power, so charging the car doesn\'t drain '
+             'the house battery. Detection combines a fast house-load spike heuristic (Modbus, ~45s reaction) '
+             'with the FusionSolar cloud EV status (5+ min interval, used to auto-release a false trigger '
+             'from another large appliance) — see the threshold field below. Takes effect immediately.'},
+            {'key': 'EV_LOCK_LOAD_THRESHOLD_W', 'label': 'EV lock load threshold (W)', 'type': 'number',
+             'default': '9000', 'help': 'House load above this, sustained for ~45s, is treated as the EV '
+             'charging. Set below your EV charger\'s lowest charging rate and above your other large '
+             'household loads (oven, kettle, dryer).'},
         ],
     },
 ]

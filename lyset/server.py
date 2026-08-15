@@ -95,6 +95,7 @@ _ev_charger_worker: Optional[EVChargerWorker] = None
 _last_ev_charger_data: dict = {}
 _ev_charger_status: str = 'Not configured'
 _ev_charger_status_ok: bool = False
+_ev_charger_prev_energy: Optional[float] = None  # last total_energy_charged, for _derive_ev_charging
 _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
 
 # Accumulator: collect 10-s Modbus samples within the current 15-min slot
@@ -988,11 +989,31 @@ def _on_solcast_status(msg: str, ok: bool):
     _solcast_status_ok = ok
 
 
+def _derive_ev_charging(data: dict) -> Optional[bool]:
+    """Best-effort 'is the EV charger drawing power right now' cross-check from a
+    FusionSolar cloud poll, fed to AutoController.set_ev_charger_status(). The API
+    exposes no live power or session status (see ev_charger.py's module docstring),
+    so this compares the cumulative 'Total Energy Charged' counter across
+    consecutive polls: any increase is unambiguous proof current flowed during that
+    window; no increase on a fresh poll is treated as 'not charging'. Returns None
+    (unknown) until two readings exist to compare, or when the field is absent."""
+    global _ev_charger_prev_energy
+    energy = data.get('total_energy_charged')
+    if not isinstance(energy, (int, float)):
+        return None
+    prev = _ev_charger_prev_energy
+    _ev_charger_prev_energy = energy
+    if prev is None:
+        return None
+    return energy > prev + 0.001  # epsilon against float noise
+
+
 def _on_ev_charger_data(data: dict):
     global _last_ev_charger_data
     ts = data.get('_timestamp', time.time())
     _last_ev_charger_data = data
     store.save_ev_charger_poll(ts, data)
+    _auto_controller.set_ev_charger_status(_derive_ev_charging(data))
     _push({'type': 'ev_charger_data', 'payload': data})
 
 
@@ -1012,6 +1033,8 @@ def _on_auto_command(mode: str, detail: str):
         'last_action': detail,
         'last_action_ts': ts,
         'last_mode': mode,
+        'ev_locked': _auto_controller.ev_locked,
+        'ev_lock_reason': _auto_controller.ev_lock_reason,
         'cmd': {'ts': ts, 'mode': mode, 'detail': detail},
     })
 
@@ -1578,6 +1601,8 @@ async def api_automode_get():
         'last_action':    _auto_controller.last_action,
         'last_action_ts': _auto_controller.last_action_ts,
         'last_mode':      _auto_controller.last_mode,
+        'ev_locked':      _auto_controller.ev_locked,
+        'ev_lock_reason': _auto_controller.ev_lock_reason,
         'commands':       cmds,
     }
 
@@ -1594,6 +1619,8 @@ async def api_automode_set(body: AutoModeRequest):
         'last_action':    _auto_controller.last_action,
         'last_action_ts': _auto_controller.last_action_ts,
         'last_mode':      _auto_controller.last_mode,
+        'ev_locked':      _auto_controller.ev_locked,
+        'ev_lock_reason': _auto_controller.ev_lock_reason,
     })
     return {'ok': True, 'enabled': _auto_controller.enabled}
 
@@ -2218,6 +2245,8 @@ async def websocket_endpoint(ws: WebSocket):
             'last_action':    _auto_controller.last_action,
             'last_action_ts': _auto_controller.last_action_ts,
             'last_mode':      _auto_controller.last_mode,
+            'ev_locked':      _auto_controller.ev_locked,
+            'ev_lock_reason': _auto_controller.ev_lock_reason,
         }))
         _ws_clients.add(ws)
         try:

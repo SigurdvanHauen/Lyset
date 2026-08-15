@@ -119,6 +119,27 @@ def ev_green_charging() -> bool:
     return os.getenv('EV_GREEN_CHARGING', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def ev_lock_enabled() -> bool:
+    """Whether Lyset may automatically block the battery from discharging while
+    it detects the EV charger drawing power (charging from PV surplus still
+    works — only discharge is blocked). Off by default. Toggled from Settings
+    → Auto controller; read live so a Settings save applies without a restart.
+    """
+    return os.getenv('EV_LOCK_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def ev_lock_load_threshold_w() -> float:
+    """House-load level (W) above which a sustained draw is treated as 'the EV
+    is probably charging' by the fast load-spike heuristic in _update_ev_lock().
+    Default 9000 W — below this user's EV charging rate (10 kW+) but above
+    their other large household loads. Settings → Auto controller; read live.
+    """
+    try:
+        return max(0.0, float(os.getenv('EV_LOCK_LOAD_THRESHOLD_W', '9000')))
+    except (TypeError, ValueError):
+        return 9000.0
+
+
 def arbitrage_min_gain() -> float:
     """Minimum predicted round-trip gain (as a fraction — 0.05 = 5 %) required
     before the planner will discharge the battery to the grid for arbitrage.
@@ -207,6 +228,13 @@ HOLD_SOLAR_REFILL_FACTOR = 1.0
 _EVAL_INTERVAL_S = 15
 _SC_DEBOUNCE_TICKS = 3   # ticks (45 s) the surplus/deficit sign must persist before
                          # the default self-consumption branch switches sides
+
+_EV_LOCK_SUSTAIN_TICKS  = 3     # ticks (45 s @ _EVAL_INTERVAL_S) the house-load spike
+                                # heuristic must hold before engaging/releasing the EV
+                                # lock — filters out short spikes (kettle, toaster) and
+                                # read glitches.
+_EV_LOCK_RELEASE_FACTOR = 0.6   # release threshold = load threshold × this (hysteresis
+                                # so the lock doesn't chatter right at the edge).
 
 # Private aliases for internal use
 _NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
@@ -338,9 +366,77 @@ class AutoController:
         self._tick:           int             = 0
         self._solar_fc:       list[dict]      = []     # latest Solcast forecast
         self._load_fc:        list[dict]      = []     # latest consumption forecast
+        self.ev_locked:       bool            = False  # battery discharge currently blocked
+        self.ev_lock_reason:  str             = ''      # human-readable reason for the UI
+        self._ev_load_streak_on:  int             = 0   # consecutive ticks load > threshold
+        self._ev_load_streak_off: int             = 0   # consecutive ticks load < release threshold
+        self._ev_cloud_charging:  Optional[bool]  = None  # latest FusionSolar cross-check signal
 
     def set_command_callback(self, cb: Callable[[str, str], None]):
         self._on_command = cb
+
+    def set_ev_charger_status(self, charging: Optional[bool]):
+        """Latest 'is the EV charger drawing power' signal derived from the
+        FusionSolar cloud poll (server._on_ev_charger_data — compares the
+        charger's cumulative energy counter across polls). None means no
+        charger configured or not enough data yet to tell. Cross-checked
+        against the fast load-spike heuristic in _update_ev_lock(): used only
+        to confirm an immediate lock or release an early false-positive, never
+        as the sole trigger, since it updates at best every few minutes."""
+        self._ev_cloud_charging = charging
+
+    def _update_ev_lock(self, house_load: float) -> bool:
+        """
+        Decide whether the battery should be locked against discharge because
+        the EV charger looks like it's drawing power. Combines two signals:
+
+          • Fast load-spike heuristic (this tick's Modbus read): house_load
+            above ev_lock_load_threshold_w() for _EV_LOCK_SUSTAIN_TICKS
+            consecutive ticks (45 s) engages the lock; below threshold ×
+            _EV_LOCK_RELEASE_FACTOR for the same span releases it. Reacts in
+            under a minute but can't distinguish the EV from any other big
+            load (oven, kettle, dryer).
+          • FusionSolar cloud EV status (set_ev_charger_status(), polled
+            every 5+ min): an explicit 'not charging' reading releases the
+            lock immediately even if the load is still high — the spike
+            wasn't the EV after all. An explicit 'charging' reading engages
+            the lock immediately as a belt-and-braces confirmation. Absent/
+            unconfigured (None) never engages or releases on its own — pure
+            fallback to the heuristic.
+
+        Updates self.ev_locked / self.ev_lock_reason and returns the new state.
+        """
+        threshold = ev_lock_load_threshold_w()
+        release_threshold = threshold * _EV_LOCK_RELEASE_FACTOR
+
+        if house_load > threshold:
+            self._ev_load_streak_on += 1
+            self._ev_load_streak_off = 0
+        elif house_load < release_threshold:
+            self._ev_load_streak_off += 1
+            self._ev_load_streak_on = 0
+        else:
+            self._ev_load_streak_on = 0
+            self._ev_load_streak_off = 0
+
+        cloud_charging = self._ev_cloud_charging
+
+        if not self.ev_locked:
+            if self._ev_load_streak_on >= _EV_LOCK_SUSTAIN_TICKS:
+                self.ev_locked = True
+                self.ev_lock_reason = f'load {house_load:.0f} W sustained > {threshold:.0f} W'
+            elif cloud_charging is True:
+                self.ev_locked = True
+                self.ev_lock_reason = 'FusionSolar reports EV charger active'
+        else:
+            if cloud_charging is False:
+                self.ev_locked = False
+                self.ev_lock_reason = ''
+            elif self._ev_load_streak_off >= _EV_LOCK_SUSTAIN_TICKS:
+                self.ev_locked = False
+                self.ev_lock_reason = ''
+
+        return self.ev_locked
 
     def set_solar_forecast(self, fc: list[dict]):
         """Latest Solcast forecast ([{ts_ms, pv_w}, ...], 30-min period_end UTC).
@@ -667,7 +763,7 @@ class AutoController:
         if wm is not None and int(round(wm)) != 2:
             worker.write_u16(47086, 2, 'AutoCtrl: mode=max self-consumption')
 
-    def _ensure_power_limits(self, worker, data: dict):
+    def _ensure_power_limits(self, worker, data: dict, max_discharge_w: Optional[float] = None):
         """
         Keep the battery's max charge / max discharge power (47075 / 47077) at the
         full rate. These are GLOBAL limits that cap the battery in every mode — a low
@@ -676,13 +772,21 @@ class AutoController:
         branches used to set them only when forcing; asserting them here makes them
         right in self-consumption too.
 
+        `max_discharge_w`, when given, overrides the normal full-rate discharge
+        target — the EV lock passes 0 here as a hardware-level belt-and-braces
+        measure (on top of _decide() skipping the arbitrage branch and forcing idle
+        instead of self-consumption-with-discharge while locked), in case a forced
+        discharge command elsewhere doesn't respect this cap the way self-consumption
+        does.
+
         Read-back driven where the SDongle exposes the registers (re-issue only when
         the polled value is wrong); optimistic fallback (state-gated _apply) when they
         don't read back, so they're still set at least once per resync.
         """
+        discharge_target = _BATT_MAX_DISCHARGE_W if max_discharge_w is None else max_discharge_w
         for addr, key, target in (
             (47075, 'max_charge_power',    _BATT_MAX_CHARGE_W),
-            (47077, 'max_discharge_power', _BATT_MAX_DISCHARGE_W),
+            (47077, 'max_discharge_power', discharge_target),
         ):
             cur = data.get(key)
             if cur is None:
@@ -707,6 +811,10 @@ class AutoController:
         self._grid_charging = False
         self._sc_surplus = False
         self._sc_streak = 0
+        self.ev_locked = False
+        self.ev_lock_reason = ''
+        self._ev_load_streak_on = 0
+        self._ev_load_streak_off = 0
         self._applied.clear()
         log.info('AutoCtrl: disabled — restoring defaults')
         if worker and worker.is_alive():
@@ -788,6 +896,18 @@ class AutoController:
         grid_w     = data.get('meter_active_power') or 0.0  # +import / -export
         batt_w     = data.get('batt_power') or 0.0           # +charge / -discharge
 
+        # EV discharge lock — evaluated every tick so the state (and dashboard badge)
+        # stay current even on ticks where it doesn't change which branch fires below.
+        if ev_lock_enabled():
+            ev_lock_active = self._update_ev_lock(house_load)
+        else:
+            if self.ev_locked or self._ev_load_streak_on or self._ev_load_streak_off:
+                self.ev_locked = False
+                self.ev_lock_reason = ''
+                self._ev_load_streak_on = 0
+                self._ev_load_streak_off = 0
+            ev_lock_active = False
+
         # Active price slot in Danish local time — lets us verify the controller is
         # matching the correct hour (now_ms and price ts are both UTC epoch ms).
         try:
@@ -810,8 +930,9 @@ class AutoController:
         dis_lbl  = f'{dis_lim:.0f}' if dis_lim is not None else '?'
 
         log.info(
-            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s  feed=%sW  disLim=%sW',
+            'AutoCtrl: slot=%s  import=%.3f  export=%.3f  PV=%.0fW  grid=%+.0fW  load=%.0fW  SoC=%.1f%%  batt=%+.0fW  apc=%s  feed=%sW  disLim=%sW  evLock=%s',
             slot_lbl, import_dkk, export_dkk, pv_w, grid_w, house_load, batt_soc, batt_w, apc_lbl, feed_lbl, dis_lbl,
+            f'{self.ev_lock_reason}' if ev_lock_active else 'off',
         )
 
         # Periodically clear the applied-state cache so the next _apply() re-asserts
@@ -821,8 +942,9 @@ class AutoController:
             self._applied.clear()
 
         # Keep the battery's max charge/discharge power at the full rate in every mode
-        # (a low max-discharge-power pins native self-consumption to a trickle).
-        self._ensure_power_limits(worker, data)
+        # (a low max-discharge-power pins native self-consumption to a trickle) — unless
+        # the EV lock is active, in which case cap discharge at 0 W (charging unaffected).
+        self._ensure_power_limits(worker, data, max_discharge_w=0 if ev_lock_active else None)
 
         # Grid export limitation (47415) is decided PER BRANCH below, each calling
         # _set_export_limit exactly once before returning — so at most one export
@@ -985,7 +1107,7 @@ class AutoController:
         # bar there is by construction no upcoming slot pricier than export_now, so
         # the reserve is ~0 and this just prevents deep-cycling for a marginal gain.
         arbit_window = _window(_ARBIT_HORIZON_H)
-        if arbitrage_enabled() and arbit_window and batt_soc > _MIN_SOC_ARBIT:
+        if not ev_lock_active and arbitrage_enabled() and arbit_window and batt_soc > _MIN_SOC_ARBIT:
             opportunity_cost   = max(p['import'] for p in arbit_window)  # best self-consumption value
             min_gain           = arbitrage_min_gain()
             threshold          = opportunity_cost * (1.0 + min_gain)
@@ -1064,6 +1186,21 @@ class AutoController:
                       f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                       f'surplus {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
             return _Cmd(mode='export_unlimited', detail=detail)
+        if ev_lock_active:
+            # Deficit while the EV lock is active: normal self-consumption would
+            # discharge the battery to cover it (exactly what the lock exists to
+            # prevent), so force-idle instead and let the grid cover the load. No
+            # export risk during a deficit, so the cap is left unlimited.
+            self._set_export_limit(worker, False, data)
+            self._apply(worker, [
+                (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                (16, 47086, 1, 'AutoCtrl: mode=forced'),
+                (16, 47100, 0, 'AutoCtrl: force IDLE (EV lock)'),
+            ])
+            detail = (f'EV lock: battery idle, grid covers load ({self.ev_lock_reason}) '
+                      f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
+                      f'deficit {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
+            return _Cmd(mode='ev_locked', detail=detail)
         self._set_export_limit(worker, True, data)        # mode 5: zero export limitation
         self._set_self_consumption(worker, data)
         detail = (f'Self-consumption: zero-export, battery covers load (mode 2 + APC 5) '

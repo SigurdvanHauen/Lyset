@@ -451,6 +451,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
       <span style="font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap">Auto Mode</span>
       <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
       <span id="d-export-badge" title="Reflects the auto-controller's decision: Disabled only when it is deliberately restricting feed-in (negative-export curtailment). Deficit self-consumption writes zero-export at a good price but reads Allowed — surplus would export the instant it appears." style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Export&nbsp;&#8212;</span>
+      <span id="d-ev-lock-badge" title="Battery lock: blocks discharge while Lyset detects the EV charger drawing power (Settings → Auto controller). Charging from PV surplus is unaffected." style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Batt&nbsp;&#8212;</span>
       <div id="d-auto-action" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No commands yet</div>
     </div>
 
@@ -778,8 +779,9 @@ const AUTO_MODES = [
   { label: 'Arb. Discharge',   color: '#F87171' },  // 4: arbit_discharge
   { label: 'SC Discharge',     color: '#6EE7B7' },  // 5: sc_discharge
   { label: 'Battery Idle',     color: '#6B7280' },  // 6: battery_idle
+  { label: 'EV Locked',        color: '#FB923C' },  // 7: ev_locked
 ];
-const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4, sc_discharge: 5, battery_idle: 6 };
+const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4, sc_discharge: 5, battery_idle: 6, ev_locked: 7 };
 let _smoothEnabled = true;   // default: smoothing on
 let _bandsEnabled  = true;   // default: confidence bands on
 
@@ -2054,6 +2056,34 @@ function onAutoHistory(commands) {
 // Disabled, anything else → Allowed. Auto off → Lyset isn't managing export → dash.
 let _lastAutoMode = null;   // controller's latest decision mode string
 let _autoEnabled  = false;  // whether the auto-controller is running
+let _evLocked     = false;  // battery discharge currently blocked (EV lock)
+let _evLockReason = '';     // human-readable reason, from the controller
+
+// Battery-lock badge in the auto-mode bar. Reflects AutoController.ev_locked
+// directly (not the decision mode) so it stays accurate even on ticks whose
+// firing branch doesn't happen to be 'ev_locked' (e.g. still charging from
+// surplus while the EV is plugged in).
+function renderEvLockBadge() {
+  const badge = document.getElementById('d-ev-lock-badge');
+  if (!badge) return;
+
+  if (!_autoEnabled) {
+    badge.innerHTML = 'Batt&nbsp;&#8212;';
+    badge.style.color = 'var(--muted)';
+    badge.style.borderColor = 'var(--border)';
+    badge.style.background = 'var(--surf2)';
+    badge.title = 'Battery lock status (auto mode is off)';
+    return;
+  }
+
+  badge.textContent = _evLocked ? 'Batt Locked' : 'Batt Unlocked';
+  badge.style.color       = _evLocked ? 'var(--danger)' : 'var(--success)';
+  badge.style.borderColor = _evLocked ? 'var(--danger)' : 'var(--success)';
+  badge.style.background   = _evLocked ? '#2e1416' : '#0d2e1a';
+  badge.title = _evLocked
+    ? ('Battery discharge locked — ' + (_evLockReason || 'EV charging detected'))
+    : 'Battery free to discharge normally';
+}
 
 function renderExportBadge() {
   const badge = document.getElementById('d-export-badge');
@@ -2088,6 +2118,10 @@ function onAutoMode(msg) {
   if (msg.last_mode) _lastAutoMode = msg.last_mode;
   else if (msg.cmd && msg.cmd.mode) _lastAutoMode = msg.cmd.mode;
   renderExportBadge();
+
+  if (typeof msg.ev_locked === 'boolean') _evLocked = msg.ev_locked;
+  if (typeof msg.ev_lock_reason === 'string') _evLockReason = msg.ev_lock_reason;
+  renderEvLockBadge();
 
   if (msg.enabled) {
     badge.textContent = 'ON';
