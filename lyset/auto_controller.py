@@ -122,10 +122,14 @@ def ev_green_charging() -> bool:
 def ev_lock_enabled() -> bool:
     """Whether Lyset may automatically block the battery from discharging while
     it detects the EV charger drawing power (charging from PV surplus still
-    works — only discharge is blocked). Off by default. Toggled from Settings
-    → Auto controller; read live so a Settings save applies without a restart.
-    """
-    return os.getenv('EV_LOCK_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+    works — only discharge is blocked). On by default. Independent of
+    ev_green_charging() — that flag only affects the export-limit register
+    (47415) via _set_export_limit; the lock's discharge-blocking (47077 cap,
+    forced-idle override, skipping arbitrage) never reads it, and the lock's
+    own branches always pass their own export decision explicitly. Toggled
+    from Settings → Auto controller; read live so a Settings save applies
+    without a restart."""
+    return os.getenv('EV_LOCK_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def ev_lock_load_threshold_w() -> float:
