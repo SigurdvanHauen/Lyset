@@ -505,7 +505,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <div class="card-top"><div class="card-lbl">House Load</div><div class="card-times" id="t-d-load"></div></div>
         <div class="card-val" id="d-load">&#8212;<span class="unit">W</span></div>
       </div>
-      <div class="card acc">
+      <div class="card acc clickable" onclick="openEvPowerModal()">
         <div class="card-top"><div class="card-lbl">EV Power</div></div>
         <div class="card-val" id="d-ev-power">&#8212;<span class="unit">kW</span></div>
       </div>
@@ -1183,6 +1183,101 @@ async function loadEvChargerPower() {
       },
     },
   });
+}
+
+// Click-to-expand modal for the EV Power card. Reuses the shared modal DOM
+// (like openDailyYieldModal()) rather than openChart()'s KEY_MAP/buildMetricDatasets
+// machinery, since EV charge power is a derived series (from ev_charger_polls'
+// cumulative energy counter, not a raw polled register) with its own endpoint.
+// Same two-step pattern as the per-metric charts: show the current default
+// span (24h, matching the dashboard's small trend widget) immediately, then
+// background-fetch full retained history and swap it in once loaded — so the
+// default view on open is unchanged, but scrolling/zooming out reaches
+// everything ever recorded.
+async function openEvPowerModal() {
+  document.getElementById('modal-title').textContent = 'EV Charge Power';
+  document.getElementById('modal-fc-btn').style.display     = 'none';
+  document.getElementById('modal-bands-btn').style.display  = 'none';
+  document.getElementById('modal-smooth-btn').style.display = 'none';
+  document.getElementById('modal-overlay').classList.add('active');
+  if (_modalChart) { _modalChart.destroy(); _modalChart = null; }
+  _modalKey = 'ev_power';
+
+  let pts = [];
+  try {
+    const r = await fetch('/api/ev/charger/power?hours=24');
+    if (r.ok) {
+      const j = await r.json();
+      pts = (j.power || []).map(p => ({ x: p.ts_ms, y: p.kw, dt: p.dt_min }));
+    }
+  } catch (e) { /* start empty; the modal still opens */ }
+
+  _modalChart = new Chart(document.getElementById('modal-canvas').getContext('2d'), {
+    type: 'line',
+    data: { datasets: [{
+      label: 'Charge power (kW)',
+      data: pts,
+      stepped: 'before',
+      borderColor: '#A78BFA', borderWidth: 2,
+      backgroundColor: 'rgba(167,139,250,0.14)', fill: true,
+      pointRadius: 0, pointHoverRadius: 4,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1C2032', titleColor: '#8892AA', bodyColor: '#E2E8F4',
+          borderColor: '#2D3555', borderWidth: 1, padding: 10,
+          callbacks: {
+            title: ctx => new Date(ctx[0].parsed.x).toLocaleString([], {
+              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+            }),
+            label: ctx => ` ${ctx.parsed.y.toFixed(2)} kW` +
+              (ctx.raw && ctx.raw.dt != null ? ` (avg over ${ctx.raw.dt} min)` : ''),
+          },
+        },
+        zoom: {
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          pan:  { enabled: true, mode: 'x' },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8892AA', font: { size: 10 }, maxTicksLimit: 10,
+            callback: v => new Date(v).toLocaleString([], {
+              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+            }),
+          },
+          grid: { color: '#2D3555' },
+        },
+        y: {
+          beginAtZero: true, grace: '10%',
+          title: { display: true, text: 'kW', color: '#8892AA', font: { size: 10 } },
+          ticks: { color: '#8892AA', font: { size: 10 } },
+          grid:  { color: '#2D3555' },
+        },
+      },
+    },
+  });
+
+  fetchEvPowerFull();
+}
+
+async function fetchEvPowerFull() {
+  try {
+    const r = await fetch('/api/ev/charger/power?full=1');
+    if (!r.ok) return;
+    const j = await r.json();
+    const pts = (j.power || []).map(p => ({ x: p.ts_ms, y: p.kw, dt: p.dt_min }));
+    if (_modalChart && _modalKey === 'ev_power') {
+      _modalChart.data.datasets[0].data = pts;
+      _modalChart.update('none');
+    }
+  } catch (e) { /* leave the 24h view in place on failure */ }
 }
 
 // ── Connection ────────────────────────────────────────────────────────────────
@@ -2419,9 +2514,45 @@ function planSmoothOverlayClick(e) {
 
 // Past measured series in kW: pull from historyMap, keep only ts ≤ now, smooth in
 // W (integer-rounded), then convert to kW. `pick` maps signed W → the W value we want.
+// Full-history cache for the Plan chart's actual-data series, independent of
+// the per-metric modal's _modalFull (which only ever holds one key at a time —
+// the Plan chart needs all five simultaneously). Populated once via
+// fetchPlanFullHistory() and merged with the live rolling historyMap[key] the
+// same way mergedSeries() does for the modal charts (full history up to where
+// the live window begins, then live from there) — so panning/zooming the Plan
+// chart back past the live ~24h window reaches real history instead of empty
+// space, without changing its default view (still centred −6h/+12h on open).
+const _planFullHistory = {};
+const _PLAN_HISTORY_KEYS = ['active_power', 'house_load', 'batt_power', 'meter_active_power', 'batt_soc'];
+
+async function fetchPlanFullHistory() {
+  for (const key of _PLAN_HISTORY_KEYS) {
+    try {
+      const r = await fetch('/api/history/series?key=' + encodeURIComponent(key));
+      if (!r.ok) continue;
+      const j = await r.json();
+      _planFullHistory[key] = { ts: j.points.map(p => p[0]), val: j.points.map(p => p[1]) };
+    } catch (e) { /* leave that key without full history on failure */ }
+  }
+  refreshPlanChart();
+}
+
+function _planMergedHistory(key) {
+  const live = historyMap[key] || { ts: [], val: [] };
+  const full = _planFullHistory[key];
+  if (!full || !full.ts.length) return live;
+  const liveFirst = live.ts.length ? live.ts[0] : Infinity;
+  const ts = [], val = [];
+  for (let i = 0; i < full.ts.length; i++) {
+    if (full.ts[i] < liveFirst) { ts.push(full.ts[i]); val.push(full.val[i]); }
+  }
+  for (let i = 0; i < live.ts.length; i++) { ts.push(live.ts[i]); val.push(live.val[i]); }
+  return { ts, val };
+}
+
 function _planPastKW(histKey, pick, seriesKey) {
   const now = Date.now();
-  const h = historyMap[histKey] || { ts: [], val: [] };
+  const h = _planMergedHistory(histKey);
   let pts = [];
   for (let i = 0; i < h.ts.length; i++) {
     if (h.ts[i] <= now) pts.push({ x: h.ts[i], y: pick(h.val[i]) });
@@ -2597,7 +2728,7 @@ function buildPlanSeries() {
   // SOC (right axis, %): past actual + future plan
   const now = Date.now();
   const socPast = [];
-  const sh = historyMap['batt_soc'] || { ts: [], val: [] };
+  const sh = _planMergedHistory('batt_soc');
   for (let i = 0; i < sh.ts.length; i++) if (sh.ts[i] <= now) socPast.push({ x: sh.ts[i], y: sh.val[i] });
   const socFut = _powerForecast
     .filter(r => r.ts_ms >= now && r.soc != null)
@@ -3870,6 +4001,7 @@ connectWS();
 loadEvSummary();
 renderPlanChart();   // plan chart now lives on the dashboard, so draw it on load
 renderDashCharts();  // build the 3×2 trend grid (incl. the EV cell) immediately
+fetchPlanFullHistory();  // background-load full history for the Plan chart's pan/zoom
 setInterval(updateMeta, 1000);
 
 fetch('/api/state').then(r => r.json()).then(s => {

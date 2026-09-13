@@ -1740,14 +1740,17 @@ async def api_ev_charger_daily(days: int = 30):
 
 
 @app.get('/api/ev/charger/power')
-async def api_ev_charger_power(hours: int = 24):
+async def api_ev_charger_power(hours: int = 24, full: bool = False):
     """EV charging power (kW) over time, derived from the lifetime energy
     counter's rise between polls (the cloud gives no live power). Average per
-    poll interval, anchored at interval end. hours clamped to 1-720 (30 d)."""
-    hours = max(1, min(720, hours))
+    poll interval, anchored at interval end. hours clamped to 1-720 (30 d)
+    unless full=1, which ignores hours and returns everything retained —
+    powers the EV Power chart's background full-history backfill, same
+    pattern as /api/history/series for the Modbus-polled metrics."""
     now = time.time()
+    from_ts = 0.0 if full else now - max(1, min(720, hours)) * 3600
     loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, store.load_ev_charge_power, now - hours * 3600, now)
+    data = await loop.run_in_executor(None, store.load_ev_charge_power, from_ts, now)
     return {'power': data}
 
 
