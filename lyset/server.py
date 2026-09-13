@@ -685,17 +685,28 @@ def _on_data(data: dict):
                 kept = srt[trim:len(srt) - trim] if trim else srt
                 avg_w = sum(kept) / len(kept)
                 slot_ts = _slot_key * 900.0
-                # EV-charging slots are excluded from the HOUSE profile: the
-                # SCharger (22 kW) meters as house load, and one session would
-                # blow the slot's EWM (and every forecast/reserve computed from
-                # it) for weeks. Until the charger is metered separately, any
-                # slot above the threshold is treated as EV + house and skipped.
-                if avg_w > _ev_slot_threshold_w():
+                threshold = _ev_slot_threshold_w()
+                # EV-charging slots are excluded from the baseline HOUSE profile:
+                # the SCharger (22 kW) meters as house load, and one session would
+                # blow the slot's EWM (and every forecast/reserve computed from it)
+                # for weeks. Until the charger is metered separately, any slot above
+                # the threshold is treated as EV + house and skipped for the baseline.
+                #
+                # It's still fed to update_ev_addon() every slot (exceeding or not)
+                # so the model separately learns the EXPECTED extra load this
+                # time-of-week — e.g. "charges most weekday afternoons" — and
+                # predict() adds that back onto the baseline. Without this, the
+                # forecast fed to grid-charge/arbitrage-reserve planning represented
+                # only "load with no EV ever", silently blind to a charging session
+                # the planner could otherwise have pre-charged cheap energy for.
+                if avg_w > threshold:
                     log.info('ConsumptionModel: slot %.0f W > %.0f W — assumed EV '
-                             'charging, not learned', avg_w, _ev_slot_threshold_w())
+                             'charging, baseline not updated (addon still learns it)',
+                             avg_w, threshold)
                 else:
                     _consumption_model.update(slot_ts, avg_w)
-                    _save_model_and_regen()
+                _consumption_model.update_ev_addon(slot_ts, avg_w, threshold)
+                _save_model_and_regen()
             _slot_samples = [grid_import_w]
             _slot_key = key
         else:
@@ -1201,13 +1212,16 @@ async def lifespan(app: FastAPI):
     # consumption and differs from D06 whenever solar is producing.
     poll_records = store.load_house_load_history()
     if poll_records:
-        n_updated = _consumption_model.seed_from_polls(poll_records)
+        n_updated = _consumption_model.seed_from_polls(
+            poll_records, ev_threshold_w=_ev_slot_threshold_w())
         try:
             _consumption_model.save(_MODEL_PATH)
         except Exception as exc:
             log.warning('ConsumptionModel: save after DB seed failed — %s', exc)
-        log.info('ConsumptionModel: re-seeded from %d poll records, %d slots updated, coverage %d/672',
-                 len(poll_records), n_updated, _consumption_model.coverage)
+        ev_slots = int((_consumption_model.ev_counts > 0).sum())
+        log.info('ConsumptionModel: re-seeded from %d poll records, %d baseline slots '
+                 'updated, %d EV-addon slots seeded, coverage %d/672',
+                 len(poll_records), n_updated, ev_slots, _consumption_model.coverage)
 
     if _consumption_model and _consumption_model.coverage > 0:
         future = _consumption_model.predict(time.time())

@@ -233,6 +233,15 @@ _EVAL_INTERVAL_S = 15
 _SC_DEBOUNCE_TICKS = 3   # ticks (45 s) the surplus/deficit sign must persist before
                          # the default self-consumption branch switches sides
 
+_SOC_STALE_AFTER_S = 600.0  # matches sanitize.py's own HOLD_MAX_S for batt_soc — that
+                            # module already holds a dropped-out SoC register for up to
+                            # 600s before a poll's 'batt_soc' goes absent, so by the time
+                            # _decide() sees it missing the reading is ALREADY at least
+                            # that old. Without a second cap here, this carry-forward
+                            # reused it indefinitely — found via a 3+ hour real register
+                            # dropout (2026-09-09) where the auto-controller would have
+                            # kept deciding off a stale reading with no limit at all.
+
 _EV_LOCK_SUSTAIN_TICKS  = 3     # ticks (45 s @ _EVAL_INTERVAL_S) the house-load spike
                                 # heuristic must hold before engaging/releasing the EV
                                 # lock — filters out short spikes (kettle, toaster) and
@@ -364,6 +373,8 @@ class AutoController:
         self._export_curtailed: bool          = False  # zero-export hysteresis state
         self._last_soc:       Optional[float] = None   # last real SoC read (37760
                                                        # drops out on ~10% of polls)
+        self._last_soc_ts:    Optional[float] = None   # time.time() of that reading —
+                                                       # bounds how long it may be reused
         self._sc_surplus:     bool            = False  # debounced branch-5 state
         self._sc_streak:      int             = 0      # ticks disagreeing with it
         self._applied:        dict[int, int]  = {}     # addr → last value written
@@ -897,15 +908,24 @@ class AutoController:
         # polls. A literal default here (the old `or 50.0`) fed fake data into real
         # decisions — arbitrage discharge fired at an actual SoC of 5% and grid
         # charge at an actual 100% (both refused by the BMS, but wrong branches).
-        # Carry the last real reading instead; before the first one, skip the tick.
+        # Carry the last real reading instead — but only while it's fresh enough to
+        # trust (_SOC_STALE_AFTER_S). Before the first one, or once it's gone stale,
+        # skip the tick rather than deciding off a reading that could by now be
+        # hours old (a real multi-hour register dropout on 2026-09-09 showed this
+        # carry-forward previously had no expiry at all).
         batt_soc = data.get('batt_soc')
         if batt_soc is None:
-            if self._last_soc is None:
-                log.info('AutoCtrl: no SoC reading yet — skipping tick')
+            stale = (self._last_soc is None or self._last_soc_ts is None
+                     or (time.time() - self._last_soc_ts) > _SOC_STALE_AFTER_S)
+            if stale:
+                log.info('AutoCtrl: no SoC reading (%s) — skipping tick',
+                         'never had one' if self._last_soc is None
+                         else f'last one is {time.time() - self._last_soc_ts:.0f}s old')
                 return None
             batt_soc = self._last_soc
         else:
             self._last_soc = batt_soc
+            self._last_soc_ts = time.time()
         grid_w     = data.get('meter_active_power') or 0.0  # +import / -export
         batt_w     = data.get('batt_power') or 0.0           # +charge / -discharge
 

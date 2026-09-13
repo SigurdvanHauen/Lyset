@@ -120,6 +120,18 @@ class ConsumptionModel:
         self.variance = np.zeros(_SLOTS_TOTAL, dtype=float)   # EWM variance (W²)
         self.counts   = np.zeros(_SLOTS_TOTAL, dtype=float)   # effective observation count
         self.bias     = 0.0                                   # W — EWM of (actual − forecast)
+        # Per-slot EWM of the EV-charging (or other big-appliance) contribution:
+        # max(0, actual − profile) on a slot whose load exceeded the EV threshold,
+        # 0 on every other slot that same time-of-week. Updated every slot (not
+        # just exceeding ones), so it converges to the PROBABILITY-WEIGHTED expected
+        # extra load — e.g. "charges most days at 900W avg extra" rather than the
+        # excluded-entirely treatment update()/seed_from_polls() give the baseline.
+        # See update_ev_addon() / predict(). Kept as a separate array rather than
+        # folded into `profile` so the baseline keeps meaning "load with no EV" —
+        # useful on its own (e.g. worst-case planning) — while predict() serves
+        # profile + ev_addon as the realistic expected total.
+        self.ev_addon  = np.zeros(_SLOTS_TOTAL, dtype=float)
+        self.ev_counts = np.zeros(_SLOTS_TOTAL, dtype=float)
 
     # ── seeding from DB history ───────────────────────────────────────────────
 
@@ -127,6 +139,7 @@ class ConsumptionModel:
         self,
         records: list[tuple[float, float]],
         half_life_days: float = _HALF_LIFE_DAYS,
+        ev_threshold_w: Optional[float] = None,
     ) -> int:
         """
         Build profile from actual house_load poll records: [(ts_utc, watts), ...].
@@ -140,7 +153,12 @@ class ConsumptionModel:
         absolute ceiling) BEFORE the weighted mean, so glitch spikes carried in by the
         unsanitised batt/meter channels can't inflate that slot's profile.
 
-        Returns the number of slots updated.
+        When ev_threshold_w is given, also (re)seeds ev_addon in bulk from the same
+        records — see _seed_ev_addon() — so a restart doesn't reset the EV-addon to 0
+        and wait weeks for update_ev_addon() to reconverge it from scratch.
+
+        Returns the number of BASELINE slots updated (ev_addon seeding, when it runs,
+        is reported only via its own log line — see server.py).
         """
         if not records:
             return 0
@@ -180,7 +198,42 @@ class ConsumptionModel:
             self.counts[idx]   = min(float(len(xs)), float(_SEED_CAP))
             updated += 1
 
+        if ev_threshold_w is not None:
+            self._seed_ev_addon(records, ev_threshold_w, now_ts, decay)
+
         return updated
+
+    def _seed_ev_addon(self, records: list[tuple[float, float]], threshold_w: float,
+                       now_ts: float, decay: float):
+        """
+        Bulk version of update_ev_addon()'s logic: for each time-of-week slot,
+        weighted-average max(0, w − profile[idx]) on records that exceeded
+        threshold_w, and 0 on records that didn't — the same "probability-weighted
+        expected extra load" the online path converges to, computed in one pass
+        over history. Requires self.profile to already reflect this seed pass (the
+        baseline loop above must run first) since that's what "excess" is measured
+        against. Same recency half-life as the baseline seed.
+        """
+        slot_w: dict[int, list[float]] = {}
+        slot_x: dict[int, list[float]] = {}
+        for ts, w in records:
+            if w is None or w < 0 or w > _MAX_SLOT_W:
+                continue
+            idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
+            contrib = max(0.0, w - float(self.profile[idx])) if w > threshold_w else 0.0
+            slot_w.setdefault(idx, []).append(math.exp(-decay * (now_ts - ts)))
+            slot_x.setdefault(idx, []).append(contrib)
+
+        for idx, xs in slot_x.items():
+            if len(xs) < 3:
+                continue
+            w_arr = np.asarray(slot_w[idx], dtype=float)
+            x_arr = np.asarray(xs, dtype=float)
+            ws = float(w_arr.sum())
+            if ws <= 0:
+                continue
+            self.ev_addon[idx]  = float((w_arr * x_arr).sum() / ws)
+            self.ev_counts[idx] = min(float(len(xs)), float(_SEED_CAP))
 
     # ── legacy Excel seed (kept for back-compat) ──────────────────────────────
 
@@ -265,6 +318,35 @@ class ConsumptionModel:
             )
         self.counts[idx] = min(self.counts[idx] + 1, 1000)
 
+    def update_ev_addon(self, ts_utc: float, watts: float, threshold_w: float):
+        """
+        Update the per-slot EV-addon EWM with one completed 15-min slot average.
+
+        Call this for EVERY slot — including ones at/below threshold_w — right
+        alongside (but regardless of) update(). A slot whose average exceeded
+        threshold_w contributes its excess over the current baseline profile
+        (max(0, watts − profile[idx])); every other slot contributes 0. EWM-ing
+        that mix (not just the exceeding slots) is what makes ev_addon converge to
+        the EXPECTED extra load for this time-of-week — e.g. an EV that charges on
+        roughly half the days nets out to about half its per-session excess — matching
+        how forward planning (grid-charge sizing, arbitrage reserve) should treat an
+        uncertain future session: as a probability-weighted addition, not as either
+        fully present or fully absent.
+
+        Uses the SAME outlier ceiling as update() (_MAX_SLOT_W) so a genuine glitch
+        can't be mistaken for an oversized EV session.
+        """
+        dt_local = datetime.fromtimestamp(ts_utc, tz=_TZ)
+        idx = _local_idx(dt_local)
+        x = min(max(0.0, watts), _MAX_SLOT_W)
+        baseline = float(self.profile[idx]) if self.counts[idx] >= 1 else _MIN_STANDBY_W
+        contrib = max(0.0, x - baseline) if x > threshold_w else 0.0
+        if self.ev_counts[idx] < 1:
+            self.ev_addon[idx] = contrib
+        else:
+            self.ev_addon[idx] = (1 - self.alpha) * self.ev_addon[idx] + self.alpha * contrib
+        self.ev_counts[idx] = min(self.ev_counts[idx] + 1, 1000)
+
     # ── prediction ───────────────────────────────────────────────────────────
 
     def predict(self, from_ts_utc: float, n_slots: int = 96) -> list[dict]:
@@ -285,6 +367,11 @@ class ConsumptionModel:
         # stay on the raw per-slot spread (they describe real dispersion, not estimator
         # noise), so p10/p90 still bracket the smoothed mean sensibly.
         sm_profile = _smooth_profile_circular(self.profile, self.counts, _SMOOTH_SIGMA_SLOTS)
+        # Same smoothing for the EV addon — a lone slot with a couple of observed
+        # sessions shouldn't spike against a flat neighbourhood, and it lets a new
+        # session gradually "bleed" into adjacent quarter-hours the way the baseline
+        # profile already does.
+        sm_ev_addon = _smooth_profile_circular(self.ev_addon, self.ev_counts, _SMOOTH_SIGMA_SLOTS)
         for i in range(n_slots):
             ts_utc_i = t + i * slot_sec
             dt_local = datetime.fromtimestamp(ts_utc_i, tz=_TZ)
@@ -292,8 +379,11 @@ class ConsumptionModel:
             if self.counts[idx] > 0:
                 # Global bias corrector shifts the whole forecast; the floor
                 # still applies afterwards (the house never draws less than
-                # standby, whatever the corrector says).
-                mean = float(sm_profile[idx]) + self.bias
+                # standby, whatever the corrector says). ev_addon is the expected
+                # (probability-weighted) extra load from a recurring big session
+                # (EV charging) at this time-of-week — see update_ev_addon().
+                ev = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
+                mean = float(sm_profile[idx]) + self.bias + ev
                 w    = round(max(mean, _MIN_STANDBY_W), 1)
                 if self.counts[idx] >= 5 and self.variance[idx] > 0:
                     std  = math.sqrt(float(self.variance[idx]))
@@ -302,8 +392,12 @@ class ConsumptionModel:
                 else:
                     p10 = p90 = None
             else:
-                # No data for this slot yet — standby baseline plus bias.
-                w   = round(max(_MIN_STANDBY_W + self.bias, _MIN_STANDBY_W), 1)
+                # No baseline data for this slot yet — standby baseline plus bias
+                # (plus ev_addon, on the rare chance it has data the baseline doesn't:
+                # every historical slot at this time-of-week happened to be excluded
+                # from the baseline as EV-sized).
+                ev  = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
+                w   = round(max(_MIN_STANDBY_W + self.bias + ev, _MIN_STANDBY_W), 1)
                 p10 = p90 = None
             out.append({'ts_ms': ts_utc_i * 1000, 'w': w, 'p10_w': p10, 'p90_w': p90})
         return out
@@ -317,19 +411,25 @@ class ConsumptionModel:
 
     def save(self, path: Path):
         path.write_text(json.dumps({
-            'alpha':    self.alpha,
-            'profile':  self.profile.tolist(),
-            'variance': self.variance.tolist(),
-            'counts':   self.counts.tolist(),
-            'bias':     self.bias,
+            'alpha':     self.alpha,
+            'profile':   self.profile.tolist(),
+            'variance':  self.variance.tolist(),
+            'counts':    self.counts.tolist(),
+            'bias':      self.bias,
+            'ev_addon':  self.ev_addon.tolist(),
+            'ev_counts': self.ev_counts.tolist(),
         }))
 
     @classmethod
     def load(cls, path: Path) -> ConsumptionModel:
         d = json.loads(path.read_text())
         m = cls(alpha=d.get('alpha', _DEFAULT_ALPHA))
-        m.profile  = np.array(d['profile'],  dtype=float)
-        m.variance = np.array(d.get('variance', [0.0] * _SLOTS_TOTAL), dtype=float)
-        m.counts   = np.array(d['counts'],   dtype=float)
-        m.bias     = max(-_BIAS_CLAMP_W, min(_BIAS_CLAMP_W, float(d.get('bias', 0.0))))
+        m.profile    = np.array(d['profile'],  dtype=float)
+        m.variance   = np.array(d.get('variance', [0.0] * _SLOTS_TOTAL), dtype=float)
+        m.counts     = np.array(d['counts'],   dtype=float)
+        m.bias       = max(-_BIAS_CLAMP_W, min(_BIAS_CLAMP_W, float(d.get('bias', 0.0))))
+        # Absent on a model file saved before the EV-addon was added — starts at 0
+        # (no addon yet) and converges from live updates same as a fresh install.
+        m.ev_addon   = np.array(d.get('ev_addon',  [0.0] * _SLOTS_TOTAL), dtype=float)
+        m.ev_counts  = np.array(d.get('ev_counts', [0.0] * _SLOTS_TOTAL), dtype=float)
         return m
