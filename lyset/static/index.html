@@ -700,6 +700,7 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         <span id="modal-day-label" style="font-size:12px;color:var(--text);align-self:center;min-width:130px;text-align:center;display:none"></span>
         <button id="modal-day-next" onclick="savingsDayStep(1)" title="Next day" style="font-size:14px;padding:4px 11px;display:none">&#8250;</button>
         <button id="modal-fc-btn" onclick="refreshForecast()" style="font-size:11px;padding:4px 10px;display:none">Refresh forecast</button>
+        <button id="modal-pred-btn" onclick="toggleModalPred()" title="Show/hide the predicted line and its confidence band" style="font-size:11px;padding:4px 10px;display:none;border-color:var(--accent)">Predicted: On</button>
         <button id="modal-bands-btn" onclick="toggleBands()" style="font-size:11px;padding:4px 10px;display:none;border-color:var(--accent)">Bands: On</button>
         <button id="modal-smooth-btn" onclick="toggleSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
         <button onclick="resetZoom()" style="font-size:11px;padding:4px 10px">Reset zoom</button>
@@ -786,6 +787,7 @@ const AUTO_MODES = [
 const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4, sc_discharge: 5, battery_idle: 6, ev_locked: 7 };
 let _smoothEnabled = true;   // default: smoothing on
 let _bandsEnabled  = true;   // default: confidence bands on
+let _modalPredEnabled = true;   // default: predicted line + band on (matches prior always-shown behaviour)
 
 // Centered moving average; null points are skipped but their x is preserved.
 function smoothPoints(pts, halfWin, round = true) {
@@ -1572,6 +1574,7 @@ function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, power
   const PRED_LINE = '#FFFFFFAA';   // dashed mean forecast
   const PRED_BAND = '#FFFFFF26';   // P10–P90 fill
   function pushBand(labelBase, p90Pts, p10Pts) {
+    if (!_modalPredEnabled) return;
     if (!(_bandsEnabled && p90Pts.length && p10Pts.length)) return;
     datasets.push({
       label: labelBase + ' P90', data: p90Pts,
@@ -1585,6 +1588,7 @@ function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, power
     });
   }
   function pushPredLine(lbl, pts) {
+    if (!_modalPredEnabled) return;
     datasets.push({
       label: lbl, data: pts,
       borderColor: PRED_LINE, backgroundColor: 'transparent',
@@ -1678,6 +1682,10 @@ function openChart(key, label, unit, color) {
     + (hasCons || hasSocFc || hasBattFc || hasGridFc ? ' + predicted' : '');
   const hasBand = hasFc || hasCons || hasSocFc || hasBattFc || hasGridFc;
   document.getElementById('modal-fc-btn').style.display     = (key === 'active_power') ? '' : 'none';
+  const predBtn = document.getElementById('modal-pred-btn');
+  predBtn.style.display   = hasBand ? '' : 'none';
+  predBtn.textContent     = 'Predicted: ' + (_modalPredEnabled ? 'On' : 'Off');
+  predBtn.style.borderColor = _modalPredEnabled ? 'var(--accent)' : 'var(--border)';
   document.getElementById('modal-bands-btn').style.display   = hasBand ? '' : 'none';
   document.getElementById('modal-smooth-btn').style.display  = '';
   _hideSavingsNav();
@@ -1827,6 +1835,14 @@ function toggleBands() {
   const btn = document.getElementById('modal-bands-btn');
   btn.textContent = 'Bands: ' + (_bandsEnabled ? 'On' : 'Off');
   btn.style.borderColor = _bandsEnabled ? 'var(--accent)' : 'var(--border)';
+  if (_modalKey) openChart(_modalKey, _modalLabel, _modalUnit, _modalColor);
+}
+
+function toggleModalPred() {
+  _modalPredEnabled = !_modalPredEnabled;
+  const btn = document.getElementById('modal-pred-btn');
+  btn.textContent = 'Predicted: ' + (_modalPredEnabled ? 'On' : 'Off');
+  btn.style.borderColor = _modalPredEnabled ? 'var(--accent)' : 'var(--border)';
   if (_modalKey) openChart(_modalKey, _modalLabel, _modalUnit, _modalColor);
 }
 
@@ -2766,8 +2782,18 @@ function _planResample(points, grid, stepped, maxGapMs) {
   return out;
 }
 
-// Build a regular time grid (stepMs) spanning every series' data, capped for safety.
-function _planGridFrom(seriesList, stepMs) {
+// Build a regular time grid spanning every series' data. minStepMs is the
+// finest resolution allowed (used as-is while the observed span is short);
+// beyond _PLAN_MAX_GRID_POINTS worth of span, the step coarsens to fit rather
+// than the range being truncated. The previous version capped total points at
+// a FIXED 5-min step, which silently cut the grid off at lo + 4000*5min
+// (~13.9 days) — discarding everything from there to "now" the moment the
+// Plan chart's actuals started reaching back further than that (i.e. the
+// instant full history — rather than just the live ~24h window — is merged
+// in). Coarsening instead of truncating keeps "now" always in the grid.
+const _PLAN_MAX_GRID_POINTS = 4000;
+
+function _planGridFrom(seriesList, minStepMs) {
   let lo = Infinity, hi = -Infinity;
   for (const arr of seriesList) for (const p of arr) {
     if (!p || p.y == null) continue;
@@ -2775,9 +2801,11 @@ function _planGridFrom(seriesList, stepMs) {
     if (p.x > hi) hi = p.x;
   }
   if (!isFinite(lo) || hi <= lo) return [];
+  const span   = hi - lo;
+  const stepMs = Math.max(minStepMs, Math.ceil(span / _PLAN_MAX_GRID_POINTS / 60000) * 60000);
   lo = Math.floor(lo / stepMs) * stepMs;
   hi = Math.ceil(hi / stepMs) * stepMs;
-  const n = Math.min(Math.round((hi - lo) / stepMs) + 1, 4000);
+  const n = Math.round((hi - lo) / stepMs) + 1;
   const grid = new Array(n);
   for (let k = 0; k < n; k++) grid[k] = lo + k * stepMs;
   return grid;
@@ -2797,12 +2825,15 @@ function buildPlanDatasets() {
   const sfc = _planSolarBand();
   const solarPot = _planFutSolarKW(false);
 
-  // One shared 5-min grid for every line → aligned tooltips, no between-point holes.
-  const STEP      = 5 * 60 * 1000;
+  // One shared grid for every line → aligned tooltips, no between-point holes.
+  // 5 min while the visible history is short; coarsens automatically (see
+  // _planGridFrom) once full multi-week/month history is merged in, so the
+  // point count stays bounded without truncating the range.
+  const MIN_STEP  = 5 * 60 * 1000;
   const POWER_GAP = 75 * 60 * 1000;    // bridges 30-min forecast steps; breaks real outages
   const PRICE_GAP = 130 * 60 * 1000;   // bridges hourly price steps
   const grid = _planGridFrom(
-    [...Object.values(series), impPx, expPx, sfc.p10, sfc.p90], STEP);
+    [...Object.values(series), impPx, expPx, sfc.p10, sfc.p90], MIN_STEP);
 
   const R = {};
   for (const k in series) R[k] = _planResample(series[k], grid, false, POWER_GAP);
