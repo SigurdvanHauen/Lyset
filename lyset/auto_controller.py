@@ -356,7 +356,7 @@ class AutoController:
         self.last_action:     str             = '—'
         self.last_action_ts:  Optional[float] = None
         self.last_mode:       Optional[str]   = None  # last decision mode (e.g. 'export_limited')
-        self._on_command:     Optional[Callable[[str, str], None]] = None
+        self._on_command:     Optional[Callable[[str, str, bool], None]] = None
         self._grid_charging:  bool            = False  # grid-charge commitment state
         self._gc_floor_price: Optional[float] = None   # cheapest import banked this charge
                                                        # episode; blocks re-charging at a
@@ -376,7 +376,7 @@ class AutoController:
         self._ev_load_streak_off: int             = 0   # consecutive ticks load < release threshold
         self._ev_cloud_charging:  Optional[bool]  = None  # latest FusionSolar cross-check signal
 
-    def set_command_callback(self, cb: Callable[[str, str], None]):
+    def set_command_callback(self, cb: Callable[[str, str, bool], None]):
         self._on_command = cb
 
     def set_ev_charger_status(self, charging: Optional[bool]):
@@ -853,12 +853,21 @@ class AutoController:
                          'AutoCtrl OFF: export limit unlimited')
 
     def _record(self, cmd: _Cmd):
+        # Compare BEFORE overwriting last_mode below. `changed` tells the caller
+        # whether this is a real state transition — the command-history table/
+        # chart is a STEPPED series ("each command is the start of an interval",
+        # per openAutoChart()'s own framing), so re-persisting the same mode
+        # every 15 s tick forever was pure write amplification: 99%+ of rows in
+        # the live DB turned out to be a mode repeating its immediately-preceding
+        # value. The live dashboard numbers (last_action) still update every
+        # tick regardless — only the DB write / history-chart point is gated.
+        changed = cmd.mode != self.last_mode
         self.last_action    = cmd.detail
         self.last_mode      = cmd.mode
         self.last_action_ts = time.time()
         log.info('AutoCtrl: %s', cmd.detail)
         if self._on_command:
-            self._on_command(cmd.mode, cmd.detail)
+            self._on_command(cmd.mode, cmd.detail, changed)
 
     def _decide(self, worker, prices: list, data: dict) -> Optional[_Cmd]:
         now_ms = int(time.time() * 1000)

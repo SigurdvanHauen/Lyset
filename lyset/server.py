@@ -43,6 +43,7 @@ from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel
 from .solar_calibration import SolarCalibration
 from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
+from .nas_backup import NasBackupWorker, worker_from_env as nas_backup_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain,
     NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
@@ -91,6 +92,7 @@ _solar_cal: SolarCalibration = SolarCalibration()
 _SOLAR_CAL_PATH = Path(__file__).parent.parent / 'lyset_solar_cal.json'
 
 
+_nas_backup_worker: Optional[NasBackupWorker] = None
 _ev_charger_worker: Optional[EVChargerWorker] = None
 _last_ev_charger_data: dict = {}
 _ev_charger_status: str = 'Not configured'
@@ -1024,10 +1026,9 @@ def _on_ev_charger_status(msg: str, ok: bool):
     _push({'type': 'ev_charger_status', 'msg': msg, 'ok': ok})
 
 
-def _on_auto_command(mode: str, detail: str):
+def _on_auto_command(mode: str, detail: str, changed: bool = True):
     ts = time.time()
-    store.save_auto_command(ts, mode, detail)
-    _push({
+    payload = {
         'type': 'auto_mode',
         'enabled': _auto_controller.enabled,
         'last_action': detail,
@@ -1035,8 +1036,14 @@ def _on_auto_command(mode: str, detail: str):
         'last_mode': mode,
         'ev_locked': _auto_controller.ev_locked,
         'ev_lock_reason': _auto_controller.ev_lock_reason,
-        'cmd': {'ts': ts, 'mode': mode, 'detail': detail},
-    })
+    }
+    # Only persist / chart a genuine mode TRANSITION (see AutoController._record's
+    # comment) — the live dashboard numbers in 'last_action' still refresh every
+    # tick via the push below regardless of `changed`.
+    if changed:
+        store.save_auto_command(ts, mode, detail)
+        payload['cmd'] = {'ts': ts, 'mode': mode, 'detail': detail}
+    _push(payload)
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -1127,6 +1134,12 @@ async def lifespan(app: FastAPI):
     _ev_charger_worker = ev_charger_from_env(on_data=_on_ev_charger_data, on_status=_on_ev_charger_status)
     if _ev_charger_worker:
         _ev_charger_worker.start()
+
+    # Start the NAS backup worker if NAS credentials are configured
+    global _nas_backup_worker
+    _nas_backup_worker = nas_backup_from_env()
+    if _nas_backup_worker:
+        _nas_backup_worker.start()
 
     # Restore the last EV charger poll from DB so the tab has something immediately
     global _last_ev_charger_data
@@ -1329,6 +1342,17 @@ def _restart_solcast_worker():
     return _solcast_worker is not None
 
 
+def _restart_nas_backup_worker():
+    global _nas_backup_worker
+    if _nas_backup_worker and _nas_backup_worker.is_alive():
+        _nas_backup_worker.stop()
+        _nas_backup_worker.join(timeout=5)
+    _nas_backup_worker = nas_backup_from_env()
+    if _nas_backup_worker:
+        _nas_backup_worker.start()
+    return _nas_backup_worker is not None
+
+
 class SettingsRequest(BaseModel):
     values: dict[str, str]
 
@@ -1370,6 +1394,11 @@ async def api_settings_post(body: SettingsRequest):
                       'FUSIONSOLAR_SUBDOMAIN', 'FUSIONSOLAR_EV_POLL_INTERVAL'}:
         _restart_ev_charger_worker()
         restarted.append('ev_charger')
+
+    if written_set & {'NAS_HOST', 'NAS_SHARE', 'NAS_USERNAME', 'NAS_PASSWORD',
+                      'NAS_REMOTE_DIR', 'NAS_BACKUP_INTERVAL_S', 'NAS_RETENTION_DAYS'}:
+        _restart_nas_backup_worker()
+        restarted.append('nas_backup')
 
     # CONSUMPTION_HISTORY_PATH / AUTO_CONTROLLER_AUTOSTART only take effect at
     # startup; flag them so the UI can tell the user a restart is needed.

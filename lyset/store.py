@@ -76,6 +76,13 @@ def _get_con() -> sqlite3.Connection:
             'CREATE TABLE IF NOT EXISTS auto_commands '
             '(ts REAL, mode TEXT, detail TEXT)'
         )
+        # load_auto_commands() filters by ts on every WebSocket connect and every
+        # /api/automode GET — without this the table (one row per mode TRANSITION
+        # since AutoController._record() started deduping, but historically one row
+        # per 15s tick) gets scanned in full on every call as it grows.
+        _con.execute(
+            'CREATE INDEX IF NOT EXISTS idx_auto_commands_ts ON auto_commands (ts)'
+        )
         _con.execute(
             # EV charger cloud-poll history (EVChargerWorker). status is the raw
             # top-level FusionSolar device status code (meaning unconfirmed for
@@ -449,6 +456,59 @@ def load_ev_charge_power(from_ts: float, to_ts: float) -> list[dict]:
         out.append({'ts_ms': int(t1 * 1000), 'kw': round(kw, 3),
                     'dt_min': round((t1 - t0) / 60.0, 1)})
     return out
+
+
+def backup_to_file(dest_path: str):
+    """Write a consistent point-in-time snapshot of the whole database to
+    dest_path, using sqlite3's own Connection.backup() rather than copying the
+    raw file — the live connection is WAL-mode and under concurrent read/write
+    from the poll and auto-controller loops, so a raw file copy could be
+    caught mid-write. backup() is safe against that without pausing anything.
+    """
+    with _lock:
+        con = _get_con()
+        dst = sqlite3.connect(dest_path)
+        try:
+            con.backup(dst)
+        finally:
+            dst.close()
+
+
+def drop_table_if_exists(table: str):
+    """One-time cleanup for a table no longer part of the schema (e.g. a dead
+    artifact from earlier exploration). `table` must be a fixed internal
+    string, never user input — it's interpolated directly into the SQL."""
+    with _lock:
+        con = _get_con()
+        con.execute(f'DROP TABLE IF EXISTS "{table}"')
+        con.commit()
+
+
+def prune_old_history(cutoff_s: float) -> dict[str, int]:
+    """Delete rows older than cutoff_s (Unix seconds) from the tables that
+    dominate the DB's size, then VACUUM to actually reclaim the freed disk
+    space (SQLite doesn't shrink the file on DELETE alone — VACUUM rewrites
+    the whole file, so this briefly needs exclusive access).
+
+    Only meant to be called after that data has been safely archived
+    elsewhere (NasBackupWorker calls this only after a successful upload).
+    daily_solar is deliberately excluded — it's already a compact one-row-
+    per-day rollup, cheap to keep forever, and is exactly the kind of summary
+    that makes the raw data safe to discard.
+    """
+    cutoff_ms = cutoff_s * 1000.0
+    deleted: dict[str, int] = {}
+    with _lock:
+        con = _get_con()
+        for table in ('polls', 'auto_commands', 'ev_charger_polls'):
+            cur = con.execute(f'DELETE FROM {table} WHERE ts < ?', (cutoff_s,))
+            deleted[table] = cur.rowcount
+        for table in ('prices', 'solar_forecast', 'consumption_forecast', 'power_forecast'):
+            cur = con.execute(f'DELETE FROM {table} WHERE ts_ms < ?', (cutoff_ms,))
+            deleted[table] = cur.rowcount
+        con.commit()
+        con.execute('VACUUM')
+    return deleted
 
 
 def save_auto_command(ts: float, mode: str, detail: str):

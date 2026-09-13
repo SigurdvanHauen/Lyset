@@ -179,6 +179,36 @@ SCHEMA: list[dict] = [
              'household loads (oven, kettle, dryer).'},
         ],
     },
+    {
+        'group': 'NAS backup',
+        'note': 'Backs up the history database to a network share over SMB on a schedule, then prunes '
+        'old rows from the local database so it stays small. Disabled until all four connection fields '
+        'below are filled in. Applied immediately — the backup worker restarts on save.',
+        'fields': [
+            {'key': 'NAS_HOST', 'label': 'NAS address', 'type': 'text',
+             'default': '', 'placeholder': '192.168.1.77',
+             'help': 'IP address or hostname of the NAS.'},
+            {'key': 'NAS_SHARE', 'label': 'Share name', 'type': 'text',
+             'default': '', 'placeholder': 'sharedNAS',
+             'help': 'The SMB share name (not the full path) — e.g. "sharedNAS".'},
+            {'key': 'NAS_REMOTE_DIR', 'label': 'Folder within share', 'type': 'text',
+             'default': 'Lyset', 'help': 'Subfolder inside the share to store backups in. Created '
+             'automatically if it doesn\'t exist.'},
+            {'key': 'NAS_USERNAME', 'label': 'Username', 'type': 'text',
+             'default': '', 'help': 'SMB login username.'},
+            {'key': 'NAS_PASSWORD', 'label': 'Password', 'type': 'password',
+             'default': '', 'help': 'Stored in clear in .env like the other API keys on this page '
+             '(LAN-only dashboard, no auth).'},
+            {'key': 'NAS_BACKUP_INTERVAL_S', 'label': 'Backup interval (s)', 'type': 'number',
+             'default': '86400', 'help': 'Seconds between backups (default 24h, floor 1h). Each backup '
+             'uploads a full, dated snapshot — nothing is ever deleted from the NAS side by Lyset.'},
+            {'key': 'NAS_RETENTION_DAYS', 'label': 'Local retention (days)', 'type': 'number',
+             'default': '60', 'help': 'Rows older than this are deleted from the LOCAL database after '
+             'each successful backup upload (full history remains on the NAS). Note: the Plan tab\'s '
+             'lifetime payback estimate reads raw local history back to your install date, so pruning '
+             'reduces its accuracy for periods older than this window.'},
+        ],
+    },
 ]
 
 # Flat key → field def, for validation/round-trip.
