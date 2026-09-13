@@ -1755,6 +1755,35 @@ async def api_prices():
     return {'prices': data if data else _last_prices, 'status': _price_status}
 
 
+def _quantile(vals: list[float], q: float) -> Optional[float]:
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    # n=100 + linear interpolation between ranks — matches numpy's default
+    # ('linear') percentile method without adding a numpy import to this file.
+    return statistics.quantiles(vals, n=100, method='inclusive')[max(0, min(98, round(q * 100) - 1))]
+
+
+@app.get('/api/prices/percentiles')
+async def api_price_percentiles(days: int = 14):
+    """25th/75th percentile import & export price over the trailing `days` days
+    of REAL (settled, non-forecast) prices — reference bands for the price
+    chart's percentile-based colouring (0-25th green, 25-75th yellow, 75-100th
+    red), independent of whatever window the chart itself currently shows."""
+    now_ms  = int(time.time() * 1000)
+    from_ms = now_ms - days * 86_400_000
+    loop    = asyncio.get_running_loop()
+    prices  = await loop.run_in_executor(None, store.load_prices, from_ms, now_ms)
+    imp_vals = [p['import'] for p in prices if p['import'] is not None and not p['forecast']]
+    exp_vals = [p['export'] for p in prices if p['export'] is not None and not p['forecast']]
+    return {
+        'days':   days,
+        'import': {'p25': _quantile(imp_vals, 0.25), 'p75': _quantile(imp_vals, 0.75), 'n': len(imp_vals)},
+        'export': {'p25': _quantile(exp_vals, 0.25), 'p75': _quantile(exp_vals, 0.75), 'n': len(exp_vals)},
+    }
+
+
 # ── Savings (money saved vs. buying all household power from the grid) ─────────
 # "Saved" over an interval = what buying ALL house load from the grid at the
 # import price would cost, minus what we actually paid (import cost net of export

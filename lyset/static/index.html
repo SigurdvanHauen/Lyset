@@ -679,6 +679,8 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
         &middot; DK1 zone &middot; Import = spot + DSO tariff + elafgift + 25% VAT
         &middot; Export &asymp; spot price (excl. elafgift, no VAT)
         &middot; Solid bars = real data (15 min) &middot; Faded = hourly forecast
+        &middot; Colour = trailing 14-day percentile (<span style="color:#34D399">green</span> &le; 25th,
+        <span style="color:#FBD34D">yellow</span> 25&ndash;75th, <span style="color:#F87171">red</span> &gt; 75th)
       </div>
 
     </div>
@@ -3466,6 +3468,21 @@ function updateGridSub() {
 let _pricesData    = [];
 let _priceChart    = null;
 let _priceMode     = 'import';
+// 25th/75th percentile price over the trailing 14 real (non-forecast) days —
+// the reference bands for the chart's colouring. Fetched from the backend
+// (not derived from whatever _pricesData currently holds, which is a rolling
+// live window that may not reach back 2 weeks) each time the price modal
+// opens; {import: {p25,p75,n}, export: {p25,p75,n}} or null until loaded.
+let _priceThresholds = null;
+
+async function fetchPriceThresholds() {
+  try {
+    const r = await fetch('/api/prices/percentiles?days=14');
+    if (!r.ok) return;
+    _priceThresholds = await r.json();
+    renderPriceChart();   // re-colour once thresholds land, if the chart already drew without them
+  } catch (e) { /* keep any previous thresholds; chart falls back to neutral colour */ }
+}
 
 function onPrices(prices) {
   _pricesData = prices.slice().sort((a, b) => a.ts - b.ts);
@@ -3483,6 +3500,7 @@ function onPrices(prices) {
 function openPriceModal(mode) {
   document.getElementById('price-modal-overlay').classList.add('active');
   setPriceMode(mode || 'import');   // sets the toggle + renders both charts for that mode
+  fetchPriceThresholds();           // refresh the 14-day percentile bands each time the modal opens
 }
 function closePriceModal() {
   document.getElementById('price-modal-overlay').classList.remove('active');
@@ -3540,15 +3558,18 @@ function updatePriceCards() {
   el('pr-day-max-time').textContent = maxRec ? _fmtTime(maxRec.ts) : '';
 }
 
-// Color a bar based on its price position within the shown range.
+// Color a bar by where its price falls against the trailing-14-day 25th/75th
+// percentile (_priceThresholds, fetched from /api/prices/percentiles): at or
+// below p25 = cheap (green), above p75 = expensive (red), between = mid
+// (yellow). Falls back to a neutral grey before the first fetch resolves.
 // past=faded, current=full opacity+white border, forecast=hatched via alpha
-function _barColor(t, isPast, isCurrent, isForecast) {
-  // t = 0 (cheap) → 1 (expensive)
-  let rgb;
-  if      (t < 0.25) rgb = [52,  211, 153];   // green
-  else if (t < 0.5)  rgb = [251, 211, 77 ];   // yellow-green
-  else if (t < 0.75) rgb = [245, 158, 11 ];   // orange
-  else               rgb = [248, 113, 113];   // red
+function _barColor(price, thresholds, isPast, isCurrent, isForecast) {
+  let rgb = [136, 146, 170];   // neutral grey — no percentile data yet
+  if (thresholds && price != null && thresholds.p25 != null && thresholds.p75 != null) {
+    if      (price <= thresholds.p25) rgb = [52,  211, 153];   // green — bottom 25%
+    else if (price <= thresholds.p75) rgb = [251, 211, 77 ];   // yellow — middle 50%
+    else                               rgb = [248, 113, 113];   // red — top 25%
+  }
   const a = isForecast ? 0.45 : (isPast ? 0.35 : (isCurrent ? 1.0 : 0.75));
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
 }
@@ -3558,15 +3579,13 @@ function renderPriceChart() {
   const now  = Date.now();
   const mode = _priceMode;
   const vals = _pricesData.map(p => mode === 'import' ? p.import : p.export);
-  const min  = Math.min(...vals.filter(v => v != null));
-  const max  = Math.max(...vals.filter(v => v != null));
-  const rng  = max - min || 1;
+  const thresholds = _priceThresholds ? _priceThresholds[mode] : null;
 
   const bgColors = _pricesData.map((p, i) => {
     const isPast     = p.ts + (p.resolution === '15m' ? 900000 : 3600000) <= now;
     const isCurrent  = !isPast && p.ts <= now;
     const isForecast = !!p.forecast;
-    return _barColor((vals[i] - min) / rng, isPast, isCurrent, isForecast);
+    return _barColor(vals[i], thresholds, isPast, isCurrent, isForecast);
   });
   const borderColors = _pricesData.map(p => {
     const dur = p.resolution === '15m' ? 900000 : 3600000;

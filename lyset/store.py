@@ -458,22 +458,6 @@ def load_ev_charge_power(from_ts: float, to_ts: float) -> list[dict]:
     return out
 
 
-def backup_to_file(dest_path: str):
-    """Write a consistent point-in-time snapshot of the whole database to
-    dest_path, using sqlite3's own Connection.backup() rather than copying the
-    raw file — the live connection is WAL-mode and under concurrent read/write
-    from the poll and auto-controller loops, so a raw file copy could be
-    caught mid-write. backup() is safe against that without pausing anything.
-    """
-    with _lock:
-        con = _get_con()
-        dst = sqlite3.connect(dest_path)
-        try:
-            con.backup(dst)
-        finally:
-            dst.close()
-
-
 def drop_table_if_exists(table: str):
     """One-time cleanup for a table no longer part of the schema (e.g. a dead
     artifact from earlier exploration). `table` must be a fixed internal

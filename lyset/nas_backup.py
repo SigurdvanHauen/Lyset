@@ -133,7 +133,7 @@ class NasBackupWorker(threading.Thread):
 
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / remote_name
-            store.backup_to_file(str(snapshot_path))
+            store.backup_to(str(snapshot_path))
             size_mb = snapshot_path.stat().st_size / 1e6
             log.info('NasBackup: snapshot %.1f MB — uploading to \\\\%s\\%s\\%s\\%s',
                      size_mb, self._host, self._share, self._remote_dir, remote_name)
