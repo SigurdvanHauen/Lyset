@@ -38,7 +38,7 @@ SCHEMA: list[dict] = [
             {'key': 'INVERTER_SLAVE_ID', 'label': 'Slave / unit ID', 'type': 'number',
              'default': '1', 'help': 'Modbus unit ID (usually 1).'},
             {'key': 'INVERTER_POLL_INTERVAL', 'label': 'Poll interval (s)', 'type': 'number',
-             'default': '10', 'help': 'Seconds between inverter reads.'},
+             'default': '30', 'help': 'Seconds between inverter reads. The SDongle can crash if polled too often — keep ≥ 30.'},
         ],
     },
     {

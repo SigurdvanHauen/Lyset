@@ -80,7 +80,7 @@ class ModbusWorker(threading.Thread):
         host: str = '192.168.1.185',
         port: int = 502,
         slave_id: int = 1,
-        poll_interval: float = 5.0,
+        poll_interval: float = 30.0,
         on_data: Optional[Callable] = None,
         on_connection: Optional[Callable] = None,
         on_write_result: Optional[Callable] = None,

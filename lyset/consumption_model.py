@@ -89,7 +89,8 @@ _UPDATE_OUTLIER_MIN_COUNT = 5       # online clip engages only once a slot has s
 _SMOOTH_SIGMA_SLOTS = _env_float('CONSUMPTION_SMOOTH_SIGMA_SLOTS', 1.2)
 
 
-_SLOT_MIN_SAMPLES = 15   # fewer polls in a 15-min slot = partial slot (downtime/restart)
+_SLOT_MIN_SAMPLES = 10   # fewer polls in a 15-min slot = partial slot (downtime/restart);
+                         # ~19 expected at a 30 s interval + ~16 s read
 
 
 def _local_idx(dt_local: datetime) -> int:

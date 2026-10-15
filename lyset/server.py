@@ -1297,7 +1297,7 @@ class ConnectRequest(BaseModel):
                       or '192.168.1.185')
     port: int = Field(default_factory=lambda: _env_int('INVERTER_PORT', 502))
     slave_id: int = Field(default_factory=lambda: _env_int('INVERTER_SLAVE_ID', 1))
-    poll_interval: float = Field(default_factory=lambda: _env_float('INVERTER_POLL_INTERVAL', 10.0))
+    poll_interval: float = Field(default_factory=lambda: _env_float('INVERTER_POLL_INTERVAL', 30.0))
 
 
 app = FastAPI(title='Lyset — SUN2000 Monitor', lifespan=lifespan)

@@ -650,7 +650,7 @@ def load_power_avg_buckets(from_ts: float, to_ts: float,
 
 
 def load_pv_avg_by_period_end(from_ts: float, to_ts: float,
-                              min_samples: int = 30) -> dict[int, float]:
+                              min_samples: int = 20) -> dict[int, float]:
     """Average actual PV power (pv1_power + pv2_power, W) per 30-min period,
     keyed by period_end UTC ms to align with Solcast forecast records.
 
