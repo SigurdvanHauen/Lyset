@@ -1772,11 +1772,14 @@ async def api_ev_charger_summary():
 
 
 @app.get('/api/prices')
-async def api_prices():
+async def api_prices(history_days: float = 1.0):
+    """Prices from `history_days` back (default 1 — the live dashboard window;
+    the Plan chart asks for its full history) to 7 days ahead."""
     now_ms = int(time.time() * 1000)
+    back_ms = int(max(0.0, min(history_days, 3650.0)) * 86_400_000)
     loop   = asyncio.get_running_loop()
     data   = await loop.run_in_executor(
-        None, store.load_prices, now_ms - 86_400_000, now_ms + 7 * 86_400_000
+        None, store.load_prices, now_ms - back_ms, now_ms + 7 * 86_400_000
     )
     return {'prices': data if data else _last_prices, 'status': _price_status}
 

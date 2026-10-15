@@ -968,7 +968,13 @@ const AUTO_MODES = [
   { label: 'EV Locked',        color: '#FB923C' },  // 7: ev_locked
 ];
 const AUTO_MODE_IDX = { export_unlimited: 0, export_limited: 1, grid_charge: 2, hold_battery: 3, arbit_discharge: 4, sc_discharge: 5, battery_idle: 6, ev_locked: 7 };
-let _smoothEnabled = true;   // default: smoothing on
+// Smoothing is per metric and shared by that metric's zoom window and its small
+// "Last 24 hours" chart, remembered per browser. Default on.
+const _SMOOTH_STORE = 'lyset.smooth';
+let _smoothByKey = (() => {
+  try { return JSON.parse(localStorage.getItem(_SMOOTH_STORE)) || {}; } catch (e) { return {}; }
+})();
+function smoothOn(key) { return _smoothByKey[key] !== false; }
 let _bandsEnabled  = true;   // default: confidence bands on
 let _modalPredEnabled = true;   // default: predicted line + band on (matches prior always-shown behaviour)
 
@@ -989,8 +995,8 @@ function smoothPoints(pts, halfWin, round = true) {
   });
 }
 
-function applySmooth(pts) {
-  return _smoothEnabled ? smoothPoints(pts, 30) : pts;
+function applySmooth(pts, key) {
+  return smoothOn(key) ? smoothPoints(pts, 30) : pts;
 }
 
 // Build {x,y} pairs for Chart.js, inserting a null point in any gap > gapMs
@@ -1035,7 +1041,7 @@ function mergedSeries(key) {
 // Chart-ready data for the modal's primary series (full history + live, smoothed).
 function modalSeriesData(key) {
   const h = mergedSeries(key);
-  return applySmooth(makeChartPoints(h.ts, h.val, autoGap(h.ts)));
+  return applySmooth(makeChartPoints(h.ts, h.val, autoGap(h.ts)), key);
 }
 
 // Pull the full retained history for one metric and fold it into the open modal.
@@ -1734,7 +1740,7 @@ function refreshDashCharts() {
 function buildMetricDatasets(key, label, unit, color, solcastSrc, consSrc, powerSrc) {
   const hist  = mergedSeries(key);
   const pts   = hist.val.length;
-  const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)));
+  const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)), key);
   const hasFc     = key === 'active_power'        && solcastSrc.length > 0;
   const hasCons   = key === 'house_load'          && consSrc.some(r => r.w != null);
   const hasSocFc  = key === 'batt_soc'            && powerSrc.length > 1;
@@ -1856,7 +1862,7 @@ function openChart(key, label, unit, color) {
   const powerSrc   = (_modalFcKey === key && _modalFcPower) ? _modalFcPower : _powerForecast;
   const hist  = mergedSeries(key);
   const pts   = hist.val.length;
-  const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)));
+  const data  = applySmooth(makeChartPoints(hist.ts, hist.val, autoGap(hist.ts)), key);
   const hasFc     = key === 'active_power'        && solcastSrc.length > 0;
   const hasCons   = key === 'house_load'          && consSrc.some(r => r.w != null);
   const hasSocFc  = key === 'batt_soc'            && powerSrc.length > 1;
@@ -1874,7 +1880,7 @@ function openChart(key, label, unit, color) {
   predBtn.textContent     = 'Predicted: ' + (_modalPredEnabled ? 'On' : 'Off');
   predBtn.style.borderColor = _modalPredEnabled ? 'var(--accent)' : 'var(--border)';
   document.getElementById('modal-bands-btn').style.display   = hasBand ? '' : 'none';
-  document.getElementById('modal-smooth-btn').style.display  = '';
+  _renderSmoothBtn(key);
   _hideSavingsNav();
   _savingsOpen = false;
   document.getElementById('modal-overlay').classList.add('active');
@@ -2006,14 +2012,27 @@ function overlayClick(e) {
   if (e.target === document.getElementById('modal-overlay')) closeModal();
 }
 
-function toggleSmooth() {
-  _smoothEnabled = !_smoothEnabled;
+function _renderSmoothBtn(key) {
   const btn = document.getElementById('modal-smooth-btn');
-  btn.textContent = 'Smooth: ' + (_smoothEnabled ? 'On' : 'Off');
-  btn.style.borderColor = _smoothEnabled ? 'var(--accent)' : 'var(--border)';
-  if (_modalChart && _modalKey) {
-    _modalChart.data.datasets[0].data = modalSeriesData(_modalKey);
+  btn.style.display = '';
+  btn.textContent = 'Smooth: ' + (smoothOn(key) ? 'On' : 'Off');
+  btn.style.borderColor = smoothOn(key) ? 'var(--accent)' : 'var(--border)';
+}
+
+function toggleSmooth() {
+  const key = _modalKey;
+  if (!key) return;
+  _smoothByKey[key] = !smoothOn(key);
+  try { localStorage.setItem(_SMOOTH_STORE, JSON.stringify(_smoothByKey)); } catch (e) { /* private mode */ }
+  _renderSmoothBtn(key);
+  if (_modalChart) {
+    _modalChart.data.datasets[0].data = modalSeriesData(key);
     _modalChart.update('none');
+  }
+  const small = _dashCharts[key];   // the matching "Last 24 hours" chart follows the same setting
+  if (small) {
+    small.data.datasets[0].data = modalSeriesData(key);
+    small.update('none');
   }
 }
 
@@ -2740,7 +2759,20 @@ async function fetchPlanFullHistory() {
       _planFullHistory[key] = { ts: j.points.map(p => p[0]), val: j.points.map(p => p[1]) };
     } catch (e) { /* leave that key without full history on failure */ }
   }
+  try {
+    const r = await fetch('/api/prices?history_days=3650');
+    if (r.ok) _planPriceHistory = ((await r.json()).prices || []).sort((a, b) => a.ts - b.ts);
+  } catch (e) { /* plan falls back to the live price window */ }
   refreshPlanChart();
+}
+
+// Full stored price history (fetched once) up to where the live _pricesData window
+// begins, then the live window — so zooming the Plan chart out keeps its price lines.
+let _planPriceHistory = [];
+function _planPrices() {
+  if (!_planPriceHistory.length) return _pricesData;
+  const liveFirst = _pricesData.length ? _pricesData[0].ts : Infinity;
+  return _planPriceHistory.filter(p => p.ts < liveFirst).concat(_pricesData);
 }
 
 function _planMergedHistory(key) {
@@ -3006,8 +3038,9 @@ function buildPlanDatasets() {
   const nowMs = Date.now();
 
   // Price overlays (raw), optionally smoothed.
-  let impPx = _pricesData.map(p => ({ x: p.ts, y: p.import }));
-  let expPx = _pricesData.map(p => ({ x: p.ts, y: p.export }));
+  const planPrices = _planPrices();
+  let impPx = planPrices.map(p => ({ x: p.ts, y: p.import }));
+  let expPx = planPrices.map(p => ({ x: p.ts, y: p.export }));
   if (planSmoothOn('priceImp')) impPx = smoothPoints(impPx, 30, false);
   if (planSmoothOn('priceExp')) expPx = smoothPoints(expPx, 30, false);
 
@@ -3441,6 +3474,10 @@ function _histKwPoints(key) {
 // every grid step up to `stopAt` (null = whole day); flat across data gaps.
 function _cumSavings(grid, loadR, gridR, stopAt) {
   const points = [];
+  // Past days (savings modal day-stepping) need history, but _lookupHold scans
+  // linearly — trim to this grid (+2 h so the first step finds its covering price).
+  const lo = grid.length ? grid[0] - 7_200_000 : 0, hi = grid.length ? grid[grid.length - 1] : 0;
+  const prices = _planPrices().filter(p => p.ts >= lo && p.ts <= hi);
   let baseTot = 0, actTot = 0;
   for (let i = 0; i < grid.length; i++) {
     const t = grid[i];
@@ -3448,9 +3485,9 @@ function _cumSavings(grid, loadR, gridR, stopAt) {
     if (i > 0) {
       const a = loadR[i - 1], b = loadR[i], ga = gridR[i - 1], gb = gridR[i];
       if (a && b && ga && gb && a.y != null && b.y != null && ga.y != null && gb.y != null) {
-        const impPx = _lookupHold(_pricesData, 'ts', 'import', grid[i - 1]);
+        const impPx = _lookupHold(prices, 'ts', 'import', grid[i - 1]);
         if (impPx != null) {
-          const expPx  = _lookupHold(_pricesData, 'ts', 'export', grid[i - 1]);
+          const expPx  = _lookupHold(prices, 'ts', 'export', grid[i - 1]);
           const dtH    = (grid[i] - grid[i - 1]) / 3600000;
           const loadKw = (a.y + b.y) / 2;
           const gridKw = (ga.y + gb.y) / 2;

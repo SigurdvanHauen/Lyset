@@ -476,19 +476,18 @@ def prune_old_history(cutoff_s: float) -> dict[str, int]:
 
     Only meant to be called after that data has been safely archived
     elsewhere (NasBackupWorker calls this only after a successful upload).
-    daily_solar is deliberately excluded — it's already a compact one-row-
-    per-day rollup, cheap to keep forever, and is exactly the kind of summary
-    that makes the raw data safe to discard.
+
+    Only the raw per-poll tables are pruned (polls ≈ 150 MB/month). Everything
+    else is kept forever: prices, the solar/consumption/power forecasts, the
+    auto-command log and daily_solar are each a few MB per YEAR, and they are
+    what the Plan chart's zoomed-out view and offline .db analysis need —
+    forecast-vs-actual and price history are useless if they vanish after 60 days.
     """
-    cutoff_ms = cutoff_s * 1000.0
     deleted: dict[str, int] = {}
     with _lock:
         con = _get_con()
-        for table in ('polls', 'auto_commands', 'ev_charger_polls'):
+        for table in ('polls', 'ev_charger_polls'):
             cur = con.execute(f'DELETE FROM {table} WHERE ts < ?', (cutoff_s,))
-            deleted[table] = cur.rowcount
-        for table in ('prices', 'solar_forecast', 'consumption_forecast', 'power_forecast'):
-            cur = con.execute(f'DELETE FROM {table} WHERE ts_ms < ?', (cutoff_ms,))
             deleted[table] = cur.rowcount
         con.commit()
         con.execute('VACUUM')

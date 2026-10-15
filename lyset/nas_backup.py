@@ -12,25 +12,23 @@ of that cycle's snapshot. A NAS outage, wrong credentials, or a network blip
 just means the local DB keeps growing until the next successful cycle —
 never data loss.
 
-Each cycle uploads a FULL, dated snapshot (lyset_history_YYYY-MM-DD.db) rather
-than overwriting one fixed filename or incrementally archiving only the
-about-to-be-pruned rows. That's deliberately simple: since local pruning
-shrinks the live DB over time but Lyset never deletes anything on the NAS
-side, the very first snapshot (taken before any pruning has happened) already
-holds the complete history from before this feature was ever turned on, and
-every later snapshot holds everything since. Full history is preserved by
-construction, at the cost of some NAS storage — which is the whole point of
-moving it off the local disk. If the NAS fills up, that's managed on the NAS
-/ by the user, not by this worker.
+The NAS holds ONE file, lyset_history.db, replaced each cycle: the new snapshot
+is uploaded under a temporary name and only swapped in once fully written, so
+the NAS always has a complete copy. Older dated snapshots
+(lyset_history_YYYY-MM-DD.db, from earlier versions) are deleted. A full copy
+per day was too much data; the trade-off — chosen deliberately — is that raw
+polls older than the local retention are not kept anywhere. Prices, forecasts,
+daily_solar and the command log are never pruned locally (see
+store.prune_old_history), so they survive in the single copy.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,13 +39,21 @@ log = logging.getLogger(__name__)
 _MIN_INTERVAL_S = 3600.0    # floor — never back up more than once an hour
 _MIN_RETENTION_DAYS = 1.0   # floor — refuse to prune same-day data
 
+_REMOTE_NAME = 'lyset_history.db'
+_OLD_SNAPSHOT_RE = re.compile(r'^lyset_history_\d{4}-\d{2}-\d{2}\.db$')
+
 
 def _upload_smb(local_path: Path, host: str, share: str, remote_dir: str,
                 remote_name: str, username: str, password: str, port: int = 445):
-    """Upload local_path to \\\\host\\share\\remote_dir\\remote_name, creating
-    remote_dir (and any missing parent segments) if needed. Uses pysmb — a
-    pure-Python SMB2/3 client — rather than an OS-level mount, so this needs no
-    system changes on the host (cifs-utils, fstab, root) beyond `pip install`.
+    """Replace \\\\host\\share\\remote_dir\\remote_name with local_path, creating
+    remote_dir (and any missing parent segments) if needed, then delete old
+    dated snapshots. Uses pysmb — a pure-Python SMB2/3 client — rather than an
+    OS-level mount, so this needs no system changes on the host (cifs-utils,
+    fstab, root) beyond `pip install`.
+
+    Upload goes to '<name>.partial' first and is renamed over the old copy only
+    after it completed, so an interrupted upload never leaves the NAS without a
+    good backup.
 
     is_direct_tcp=True is required for port 445 (what virtually every modern
     NAS uses by default — 139 is the legacy NetBIOS-only port, often disabled).
@@ -69,9 +75,25 @@ def _upload_smb(local_path: Path, host: str, share: str, remote_dir: str,
                 conn.createDirectory(share, built)
             except Exception:
                 pass  # already exists — pysmb has no "if not exists" check
-        remote_path = f'{remote_dir}/{remote_name}' if remote_dir else remote_name
+        def _p(name: str) -> str:
+            return f'{remote_dir}/{name}' if remote_dir else name
+
+        partial = _p(remote_name + '.partial')
         with open(local_path, 'rb') as f:
-            conn.storeFile(share, remote_path, f)
+            conn.storeFile(share, partial, f)
+
+        existing = {e.filename for e in conn.listPath(share, remote_dir or '/')}
+        if remote_name in existing:
+            conn.deleteFiles(share, _p(remote_name))
+        conn.rename(share, partial, _p(remote_name))
+
+        for name in sorted(existing):
+            if _OLD_SNAPSHOT_RE.match(name):
+                try:
+                    conn.deleteFiles(share, _p(name))
+                    log.info('NasBackup: deleted old snapshot %s', name)
+                except Exception as exc:
+                    log.warning('NasBackup: could not delete old snapshot %s — %s', name, exc)
     finally:
         conn.close()
 
@@ -129,7 +151,7 @@ class NasBackupWorker(threading.Thread):
             time.sleep(1)
 
     def _cycle(self):
-        remote_name = f'lyset_history_{datetime.now().strftime("%Y-%m-%d")}.db'
+        remote_name = _REMOTE_NAME
 
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / remote_name
