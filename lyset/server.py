@@ -772,9 +772,9 @@ def _on_data(data: dict):
 
 
 try:
-    _CONS_SMOOTH_SIGMA = float(os.getenv('CONSUMPTION_SMOOTH_SIGMA_SLOTS', '1.2'))
+    _CONS_SMOOTH_SIGMA = float(os.getenv('CONSUMPTION_SMOOTH_SIGMA_SLOTS', '3'))
 except (TypeError, ValueError):
-    _CONS_SMOOTH_SIGMA = 1.2
+    _CONS_SMOOTH_SIGMA = 3.0
 
 
 def _smooth_w_timeseries(records: list[dict], sigma: float) -> list[dict]:
@@ -1626,7 +1626,6 @@ def _forecast_accuracy(days: int) -> dict:
         'consumption': consumption,
         'calibration': {
             'solar':            _solar_cal.state(),
-            'consumption_bias_w': round(_consumption_model.bias, 1) if _consumption_model else 0.0,
         },
     }
 

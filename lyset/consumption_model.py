@@ -1,18 +1,34 @@
 """
 Daily consumption profile model for predicting house load.
 
-Maintains a 96-slot (15 min each) time-of-day profile of average house load (W)
-and its variance, enabling p10/p90 confidence bands.
+Maintains a 96-slot (15 min each) time-of-day profile of house load (W) plus a
+short per-slot history for confidence bands.
 
 Time-of-day, not time-of-week: once EV charging is separated out this house shows
 no weekday pattern (2026-08/10: 16.5–17.5 kWh every weekday), and a weekly profile
-gets only one observation per slot per week — so it lagged and was noisier. A
-walk-forward backtest over 2026-08-15..10-15 gave baseline MAE 234 W (weekly) vs
-221 W (daily, alpha 0.15).
+gets only one observation per slot per week — so it lagged and was noisier.
 
-Seeded via seed_from_polls() from actual house_load DB history (exponential
-time-decay so recent data weighs more), then updated online via EWM as new
-Modbus readings arrive.
+THE FORECAST IS A ROBUST SHAPE SCALED TO THE TRUE DAILY ENERGY. A kettle or oven
+switched on at a random time is real energy but not a repeatable pattern: a plain
+mean bakes each such event into its quarter-hour, so the forecast came out spiky
+and the spikes rarely recurred. So:
+  • shape   — per-slot Huber EWM: each day's deviation from the shape is clipped to
+              ±1·(typical deviation), so a one-off spike barely moves it, while a
+              change that repeats day after day still pulls it over;
+  • profile — plain per-slot EWM mean, used for its daily ENERGY total only;
+  • forecast = smoothed shape × (Σ profile / Σ shape): the random-appliance energy
+              is spread over the day instead of dropped, so battery planning still
+              sees the right kWh.
+Walk-forward over 2026-08-29..10-14 vs the previous plain-mean forecast: curve
+spikiness (mean |Δ| between adjacent slots) 33 → 16 W, 15-min MAE 261 → 258 W,
+6-h energy MAE 1.015 → 0.987 kWh, daily energy bias unchanged (+0.28 kWh).
+
+Bands are the 5th–95th percentile of the slot's last 14 days, smoothed in time.
+Day-to-day drift means that range holds the actual load ~82 % of the time — i.e.
+it is an honest ~80 % band (the old ±1.28σ band held only ~70 %).
+
+Learning is a replay of the same update() over history (seed_from_polls), then
+continues online, so seeded and live state are always computed identically.
 
 Slot index: hour * 4 + minute // 15  (local Europe/Copenhagen time)
 """
@@ -20,7 +36,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -36,58 +51,37 @@ _SLOTS_PER_DAY = 96
 _SLOTS_TOTAL   = _SLOTS_PER_DAY
 
 _DEFAULT_ALPHA = 0.15   # EWM learning rate per daily observation (~1-week memory)
-_SEED_CAP      = 30     # max effective count after seeding
-_HALF_LIFE_DAYS = 14.0  # recency decay: data 14 days old gets half the weight
 
-# Global bias corrector: EWM of (actual − served forecast) across all slots,
-# added onto every prediction. The per-slot profile self-corrects too, but only
-# at ~1 observation per slot per week — a persistent whole-model bias (measured
-# −175 W on 2026-07-02, mostly stale D06 seed washing out) takes weeks to clear
-# slot-by-slot. This corrector clears it in days while the slots converge
-# underneath it, then decays to ~0. Clamped so one wild day can't distort it.
-_BIAS_ALPHA   = 0.05    # per 15-min slot → ~62% of a step change absorbed per day
-_BIAS_CLAMP_W = 500.0
 
-# The house always draws at least this (standby/always-on loads). Predictions are
-# floored to it so slots that still hold the stale D06 net-import seed (≈0 W
-# overnight, because the battery used to cover the standby) — or slots with no data
-# yet — don't forecast an unphysical ~0 W. Non-destructive: the floor is applied to
-# predictions only, so the learned profile keeps converging to the true value and
-# this just stops the forecast (and the SoC simulation) from dropping below standby.
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
 
+
+# The house always draws at least this (standby/always-on loads); predictions are
+# floored to it so a sparse slot can't forecast an unphysical ~0 W.
 _MIN_STANDBY_W = _env_float('CONSUMPTION_MIN_STANDBY_W', 300.0)
 
-# Robust outlier rejection for learning. house_load = active + grid − batt, and the
-# batt and meter channels are intentionally NOT sanitized upstream (see the read-layer
-# notes), so a momentary Modbus glitch on either surfaces as a multi-kW spike in one
-# 15-min slot. Left unguarded, a plain (weighted) mean bakes that spike into the slot's
-# profile — which is what left the daytime forecast jagged and inflated (adjacent slots
-# swinging ~1.8 kW) while the true expected curve is smooth. Both the seed and the
-# online update therefore winsorize a slot's inputs to centre + K·(robust σ), with an
-# absolute physical ceiling as a backstop. This rejects spikes WITHIN a slot; it never
-# blends across slots, so real time-of-day structure is preserved.
-_MAX_SLOT_W               = _env_float('CONSUMPTION_MAX_SLOT_W', 15000.0)  # W; above = glitch
-_OUTLIER_K                = 5.0     # clip values beyond centre + K·spread
-_OUTLIER_SPREAD_FLOOR_W   = 400.0   # min spread so genuinely tight slots aren't over-clipped
-_UPDATE_OUTLIER_MIN_COUNT = 5       # online clip engages only once a slot has some history
+# Slot averages above this are Modbus glitches (house_load carries unsanitised
+# batt/meter noise), not load — they never enter the model.
+_MAX_SLOT_W = _env_float('CONSUMPTION_MAX_SLOT_W', 15000.0)
 
-# Temporal-smoothness prior on the profile. Each 15-min-of-week slot's mean is
-# estimated from only a few dozen samples of a high-variance quantity (household
-# load), so the raw per-slot estimate is noisy: adjacent slots jump by hundreds of W
-# purely from which days happened to land in each bin (measured max jump ~3 kW). The
-# TRUE expected load is smooth in time, so the forecast borrows strength from
-# neighbouring slots — a Gaussian along the time-of-day axis. This regularises the
-# estimator itself (so the house-needs line, the SoC plan, the grid/export forecast,
-# and the auto-controller all consume a de-noised expected curve); it is NOT a cosmetic
-# smoothing of any output line. σ≈1.2 slots (~18 min) removes the quarter-hour noise
-# while preserving the real morning/evening structure. 0 disables it.
-_SMOOTH_SIGMA_SLOTS = _env_float('CONSUMPTION_SMOOTH_SIGMA_SLOTS', 1.2)
+# Huber shape: a day's deviation is clipped to ±_ROBUST_C × the slot's typical
+# absolute deviation (EWM, floored so quiet night slots aren't frozen).
+_ROBUST_C         = 1.0
+_SPREAD_INIT_W    = 300.0
+_SPREAD_FLOOR_W   = 150.0
 
+# Time smoothing of the forecast: σ = 3 slots (45 min). Household load is smooth in
+# expectation; 3 halved the curve's jitter vs 1.2 at identical accuracy.
+_SMOOTH_SIGMA_SLOTS = _env_float('CONSUMPTION_SMOOTH_SIGMA_SLOTS', 3.0)
+
+_BAND_DAYS     = 14
+_BAND_LO_PCT   = 5.0
+_BAND_HI_PCT   = 95.0
+_BAND_MIN_OBS  = 5
 
 _SLOT_MIN_SAMPLES = 10   # fewer polls in a 15-min slot = partial slot (downtime/restart);
                          # ~19 expected at a 30 s interval + ~16 s read
@@ -102,10 +96,8 @@ def slot_average(samples: list[float]) -> Optional[float]:
 
     10 %-trimmed mean: single-poll house_load glitches (0 W and ~5 kW in adjacent
     polls — non-simultaneous batched reads) fall in the trimmed tails, while
-    sustained real load (oven, charger) spans enough samples to survive. A median
-    would also suppress real short spikes and under-count energy; the trim doesn't.
-    Shared by the online path (server) and seed_from_polls so both learn from the
-    same per-slot values.
+    sustained real load (oven, charger) spans enough samples to survive. Shared by
+    the online path (server) and seed_from_polls so both learn from the same values.
     """
     if len(samples) < _SLOT_MIN_SAMPLES:
         return None
@@ -139,13 +131,11 @@ def _slot_records(records: list[tuple[float, float]]) -> list[tuple[float, float
 
 def _smooth_profile_circular(profile: np.ndarray, counts: np.ndarray,
                              sigma: float) -> np.ndarray:
-    """Gaussian-smooth the daily profile along the time-of-day axis.
+    """Gaussian-smooth a daily 96-slot array along the time-of-day axis.
 
-    The 96-slot array is treated as circular (23:45 wraps to 00:00 — adjacent
-    indices are temporally adjacent), so the smoothing has no seam. Slots that
-    were never observed are excluded via a normalised mask, so they neither contribute
-    to nor are dragged toward zero by their neighbours. Returns a smoothed COPY; the
-    stored raw profile (and its variance/bands) is left untouched.
+    Circular (23:45 wraps to 00:00), so there is no seam. Slots never observed are
+    excluded via a normalised mask, so they neither contribute to nor are dragged
+    toward zero by their neighbours. Returns a smoothed copy.
     """
     if sigma <= 0:
         return profile
@@ -158,149 +148,58 @@ def _smooth_profile_circular(profile: np.ndarray, counts: np.ndarray,
         return np.convolve(padded, kernel, mode='valid')
 
     mask = (counts > 0).astype(float)
-    num  = _circ_conv(profile * mask)
+    num  = _circ_conv(np.where(mask > 0, profile, 0.0))
     den  = _circ_conv(mask)
     return np.where(den > 0, num / den, profile)
 
 
 class ConsumptionModel:
     def __init__(self, alpha: float = _DEFAULT_ALPHA):
-        self.alpha    = alpha
-        self.profile  = np.zeros(_SLOTS_TOTAL, dtype=float)   # W per slot (EWM mean)
-        self.variance = np.zeros(_SLOTS_TOTAL, dtype=float)   # EWM variance (W²)
-        self.counts   = np.zeros(_SLOTS_TOTAL, dtype=float)   # effective observation count
-        self.bias     = 0.0                                   # W — EWM of (actual − forecast)
-        # Per-slot EWM of the EV-charging (or other big-appliance) contribution:
-        # max(0, actual − profile) on a slot whose load exceeded the EV threshold,
-        # 0 on every other slot that same time-of-week. Updated every slot (not
-        # just exceeding ones), so it converges to the PROBABILITY-WEIGHTED expected
-        # extra load — e.g. "charges most days at 900W avg extra" rather than the
-        # excluded-entirely treatment update()/seed_from_polls() give the baseline.
-        # See update_ev_addon() / predict(). Kept as a separate array rather than
-        # folded into `profile` so the baseline keeps meaning "load with no EV" —
-        # useful on its own (e.g. worst-case planning) — while predict() serves
-        # profile + ev_addon as the realistic expected total.
-        self.ev_addon  = np.zeros(_SLOTS_TOTAL, dtype=float)
-        self.ev_counts = np.zeros(_SLOTS_TOTAL, dtype=float)
+        self.alpha   = alpha
+        self.profile = np.zeros(_SLOTS_TOTAL)                 # W, plain EWM mean (energy level)
+        self.shape   = np.zeros(_SLOTS_TOTAL)                 # W, Huber EWM (robust daily shape)
+        self.spread  = np.full(_SLOTS_TOTAL, _SPREAD_INIT_W)  # W, EWM |actual − shape|
+        self.counts  = np.zeros(_SLOTS_TOTAL)                 # observations per slot
+        self.recent: list[list[float]] = [[] for _ in range(_SLOTS_TOTAL)]  # last 14 days
+        # Per-slot EWM of the EV-charging contribution: max(0, actual − profile) on a
+        # slot above the EV threshold, 0 on every other slot. Updated every slot, so it
+        # converges to the PROBABILITY-WEIGHTED expected extra load ("charges about
+        # half the days at this hour" → about half the session's excess). Kept apart
+        # from the baseline so battery planning can drop it under the EV lock.
+        self.ev_addon  = np.zeros(_SLOTS_TOTAL)
+        self.ev_counts = np.zeros(_SLOTS_TOTAL)
 
-    # ── seeding from DB history ───────────────────────────────────────────────
+    # ── learning ──────────────────────────────────────────────────────────────
 
-    def seed_from_polls(
-        self,
-        records: list[tuple[float, float]],
-        half_life_days: float = _HALF_LIFE_DAYS,
-        ev_threshold_w: Optional[float] = None,
-    ) -> int:
+    def seed_from_polls(self, records: list[tuple[float, float]],
+                        ev_threshold_w: Optional[float] = None) -> int:
         """
-        Build profile from actual house_load poll records: [(ts_utc, watts), ...].
-
-        Polls are first collapsed into 15-min slot averages with the same
-        slot_average() the online path uses, so seed and online learning see
-        identical values. When ev_threshold_w is given, slots above it are EV
-        charging and are kept out of the baseline exactly as update() does — the old
-        per-poll seed only winsorised them, which left the afternoon baseline
-        150–450 W high while ev_addon counted the same sessions again on top.
-
-        Uses exponential time-decay so recent observations count more than old ones.
-        Only overwrites slots that have ≥ 3 observations in the provided records;
-        sparse slots retain their current values so the model degrades gracefully
-        during the first days when the DB is thin.
-
-        Each slot's values are winsorised to a robust range (median + K·MAD-σ, and an
-        absolute ceiling) BEFORE the weighted mean, so glitch spikes carried in by the
-        unsanitised batt/meter channels can't inflate that slot's profile.
-
-        When ev_threshold_w is given, also (re)seeds ev_addon in bulk from the same
-        records — see _seed_ev_addon() — so a restart doesn't reset the EV-addon to 0
-        and wait weeks for update_ev_addon() to reconverge it from scratch.
-
-        Returns the number of BASELINE slots updated (ev_addon seeding, when it runs,
-        is reported only via its own log line — see server.py).
+        Rebuild the model from house_load poll history [(ts_utc, W), ...] by
+        replaying update()/update_ev_addon() over its 15-min slot averages in time
+        order — exactly what the online path would have learned. Slots above
+        ev_threshold_w are EV charging: they feed only the EV addon, never the
+        baseline. Returns the number of slots replayed into the baseline.
         """
-        records = _slot_records(records)
-        if not records:
+        slots = _slot_records(records)
+        if not slots:
             return 0
-
-        now_ts = max(ts for ts, _ in records)
-        decay  = math.log(2) / (half_life_days * 86400)
-
-        # Bucket each slot's (weight, value) so we can compute a robust per-slot cap
-        # before averaging — a single weighted-mean pass can't reject outliers.
-        slot_w: dict[int, list[float]] = {}
-        slot_x: dict[int, list[float]] = {}
-        for ts, w in records:
+        self.__init__(self.alpha)
+        n = 0
+        for ts, w in slots:
             if w > _MAX_SLOT_W:
                 continue
-            if ev_threshold_w is not None and w > ev_threshold_w:
-                continue
-            idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
-            slot_w.setdefault(idx, []).append(math.exp(-decay * (now_ts - ts)))
-            slot_x.setdefault(idx, []).append(float(w))
-
-        updated = 0
-        for idx, xs in slot_x.items():
-            if len(xs) < 3:
-                continue
-            x_arr = np.asarray(xs, dtype=float)
-            w_arr = np.asarray(slot_w[idx], dtype=float)
-            med   = float(np.median(x_arr))
-            # 1.4826·MAD ≈ σ for normal data; floor the spread so a genuinely tight
-            # slot isn't clipped to a hair, and cap at the absolute physical ceiling.
-            mad    = float(np.median(np.abs(x_arr - med)))
-            spread = max(1.4826 * mad, _OUTLIER_SPREAD_FLOOR_W)
-            cap    = min(_MAX_SLOT_W, med + _OUTLIER_K * spread)
-            x_clip = np.minimum(x_arr, cap)
-            ws     = float(w_arr.sum())
-            mean   = float((w_arr * x_clip).sum() / ws)
-            var    = max(0.0, float((w_arr * x_clip * x_clip).sum() / ws - mean * mean))
-            self.profile[idx]  = max(0.0, mean)
-            self.variance[idx] = var
-            self.counts[idx]   = min(float(len(xs)), float(_SEED_CAP))
-            updated += 1
-
-        if ev_threshold_w is not None:
-            self._seed_ev_addon(records, ev_threshold_w, now_ts, decay)
-
-        return updated
-
-    def _seed_ev_addon(self, records: list[tuple[float, float]], threshold_w: float,
-                       now_ts: float, decay: float):
-        """
-        Bulk version of update_ev_addon()'s logic: for each time-of-week slot,
-        weighted-average max(0, w − profile[idx]) on records that exceeded
-        threshold_w, and 0 on records that didn't — the same "probability-weighted
-        expected extra load" the online path converges to, computed in one pass
-        over history. Requires self.profile to already reflect this seed pass (the
-        baseline loop above must run first) since that's what "excess" is measured
-        against. Same recency half-life as the baseline seed.
-        """
-        slot_w: dict[int, list[float]] = {}
-        slot_x: dict[int, list[float]] = {}
-        for ts, w in records:
-            if w > _MAX_SLOT_W:
-                continue
-            idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
-            contrib = max(0.0, w - float(self.profile[idx])) if w > threshold_w else 0.0
-            slot_w.setdefault(idx, []).append(math.exp(-decay * (now_ts - ts)))
-            slot_x.setdefault(idx, []).append(contrib)
-
-        for idx, xs in slot_x.items():
-            if len(xs) < 3:
-                continue
-            w_arr = np.asarray(slot_w[idx], dtype=float)
-            x_arr = np.asarray(xs, dtype=float)
-            ws = float(w_arr.sum())
-            if ws <= 0:
-                continue
-            self.ev_addon[idx]  = float((w_arr * x_arr).sum() / ws)
-            self.ev_counts[idx] = min(float(len(xs)), float(_SEED_CAP))
-
-    # ── legacy Excel seed (kept for back-compat) ──────────────────────────────
+            if ev_threshold_w is None or w <= ev_threshold_w:
+                self.update(ts, w)
+                n += 1
+            if ev_threshold_w is not None:
+                self.update_ev_addon(ts, w, ev_threshold_w)
+        return n
 
     def seed_from_excel(self, excel_path: str) -> int:
         """
-        Seed the profile from a MeterData.xlsx file (D06 column = net grid import).
-        NOTE: D06 is net import, not house load — prefer seed_from_polls() instead.
+        Seed from a MeterData.xlsx file (D06 column = net grid import), replayed
+        through update() in time order. NOTE: D06 is net import, not house load —
+        seed_from_polls() replaces it as soon as poll history exists.
         """
         import pandas as pd
 
@@ -310,93 +209,44 @@ class ConsumptionModel:
         if d06.empty:
             log.warning('ConsumptionModel: no D06 rows found in Excel')
             return 0
-
         d06['From_date'] = pd.to_datetime(d06['From_date'])
         try:
             d06['local'] = d06['From_date'].dt.tz_localize(
-                _TZ, ambiguous='infer', nonexistent='shift_forward'
-            )
+                _TZ, ambiguous='infer', nonexistent='shift_forward')
         except Exception:
             d06['local'] = d06['From_date'].dt.tz_localize('UTC')
-
-        d06['idx'] = (d06['local'].dt.hour * 4
-                      + d06['local'].dt.minute // 15)
-        d06['w']   = d06['Volume'] * 4000.0  # kWh/15min → W
-
-        profile_mean = d06.groupby('idx')['w'].mean()
-        profile_std  = d06.groupby('idx')['w'].std().fillna(0)
-        profile_cnt  = d06.groupby('idx')['w'].count()
-
-        self.profile[profile_mean.index.values]   = profile_mean.values
-        self.variance[profile_std.index.values]   = profile_std.values ** 2
-        self.counts[profile_cnt.index.values]     = np.minimum(
-            profile_cnt.values.astype(float), float(_SEED_CAP)
-        )
-
-        n = int(d06['idx'].count())
-        log.info('ConsumptionModel: seeded %d D06 rows, %d unique slots', n, len(profile_mean))
-        return n
-
-    # ── online update ─────────────────────────────────────────────────────────
+        d06 = d06.sort_values('local')
+        for ts, kwh in zip(d06['local'], d06['Volume']):
+            self.update(ts.timestamp(), float(kwh) * 4000.0)   # kWh/15min → W
+        log.info('ConsumptionModel: seeded %d D06 rows', len(d06))
+        return len(d06)
 
     def update(self, ts_utc: float, watts: float):
-        """
-        Update profile with one completed 15-min slot average.
-        Call once per slot, not on every Modbus sample.
-        Uses EWM for both mean and variance so the model adapts to changing patterns.
-        """
-        dt_local = datetime.fromtimestamp(ts_utc, tz=_TZ)
-        idx = _local_idx(dt_local)
-        x   = max(0.0, watts)
-        # Reject glitch spikes before they enter the EWM (and the bias): house_load
-        # carries unsanitised batt/meter noise, so a single multi-kW blip must not
-        # yank this slot's mean. Absolute ceiling always; once the slot has some
-        # history, also clip to profile + K·σ (same winsorising as the seed).
-        x = min(x, _MAX_SLOT_W)
-        if self.counts[idx] >= _UPDATE_OUTLIER_MIN_COUNT:
-            std = math.sqrt(max(0.0, float(self.variance[idx])))
-            x   = min(x, float(self.profile[idx]) + _OUTLIER_K * max(std, _OUTLIER_SPREAD_FLOOR_W))
-        # Bias update against the UNCORRECTED forecast for this slot (profile
-        # mean with the standby floor, before the profile absorbs x). Measuring
-        # against the raw model — not the bias-adjusted output — makes the EWM
-        # converge directly to the model's mean residual instead of integrating.
-        served = max(float(self.profile[idx]), _MIN_STANDBY_W) if self.counts[idx] >= 1 \
-            else _MIN_STANDBY_W
-        err = x - served
-        self.bias = (1 - _BIAS_ALPHA) * self.bias + _BIAS_ALPHA * err
-        self.bias = max(-_BIAS_CLAMP_W, min(_BIAS_CLAMP_W, self.bias))
+        """Learn one completed 15-min slot average (call once per slot)."""
+        idx = _local_idx(datetime.fromtimestamp(ts_utc, tz=_TZ))
+        x   = min(max(0.0, watts), _MAX_SLOT_W)
         if self.counts[idx] < 1:
-            self.profile[idx]  = x
-            self.variance[idx] = 0.0
+            self.profile[idx] = x
+            self.shape[idx]   = x
         else:
-            old_mean           = self.profile[idx]
-            self.profile[idx]  = (1 - self.alpha) * old_mean + self.alpha * x
-            # EWM variance — tracks spread around the running mean
-            self.variance[idx] = (1 - self.alpha) * (
-                self.variance[idx] + self.alpha * (x - old_mean) ** 2
-            )
-        self.counts[idx] = min(self.counts[idx] + 1, 1000)
+            a = self.alpha
+            self.profile[idx] = (1 - a) * self.profile[idx] + a * x
+            lim = _ROBUST_C * self.spread[idx]
+            self.shape[idx]  += a * min(max(x - self.shape[idx], -lim), lim)
+            self.spread[idx]  = max(_SPREAD_FLOOR_W,
+                                    (1 - a) * self.spread[idx] + a * abs(x - self.shape[idx]))
+        hist = self.recent[idx]
+        hist.append(x)
+        del hist[:-_BAND_DAYS]
+        self.counts[idx] += 1
 
     def update_ev_addon(self, ts_utc: float, watts: float, threshold_w: float):
         """
-        Update the per-slot EV-addon EWM with one completed 15-min slot average.
-
-        Call this for EVERY slot — including ones at/below threshold_w — right
-        alongside (but regardless of) update(). A slot whose average exceeded
-        threshold_w contributes its excess over the current baseline profile
-        (max(0, watts − profile[idx])); every other slot contributes 0. EWM-ing
-        that mix (not just the exceeding slots) is what makes ev_addon converge to
-        the EXPECTED extra load for this time-of-week — e.g. an EV that charges on
-        roughly half the days nets out to about half its per-session excess — matching
-        how forward planning (grid-charge sizing, arbitrage reserve) should treat an
-        uncertain future session: as a probability-weighted addition, not as either
-        fully present or fully absent.
-
-        Uses the SAME outlier ceiling as update() (_MAX_SLOT_W) so a genuine glitch
-        can't be mistaken for an oversized EV session.
+        Update the per-slot EV addon with one completed slot average. Call for EVERY
+        slot, alongside update(): a slot above threshold_w contributes its excess over
+        the baseline, every other slot contributes 0, so the EWM is the expected extra.
         """
-        dt_local = datetime.fromtimestamp(ts_utc, tz=_TZ)
-        idx = _local_idx(dt_local)
+        idx = _local_idx(datetime.fromtimestamp(ts_utc, tz=_TZ))
         x = min(max(0.0, watts), _MAX_SLOT_W)
         baseline = float(self.profile[idx]) if self.counts[idx] >= 1 else _MIN_STANDBY_W
         contrib = max(0.0, x - baseline) if x > threshold_w else 0.0
@@ -404,66 +254,57 @@ class ConsumptionModel:
             self.ev_addon[idx] = contrib
         else:
             self.ev_addon[idx] = (1 - self.alpha) * self.ev_addon[idx] + self.alpha * contrib
-        self.ev_counts[idx] = min(self.ev_counts[idx] + 1, 1000)
+        self.ev_counts[idx] += 1
 
     # ── prediction ───────────────────────────────────────────────────────────
 
+    def _baseline(self) -> np.ndarray:
+        """Smoothed robust shape scaled to the plain mean's daily energy."""
+        seen = self.counts > 0
+        shape = _smooth_profile_circular(self.shape, self.counts, _SMOOTH_SIGMA_SLOTS)
+        if seen.any() and self.shape[seen].sum() > 0:
+            shape = shape * (self.profile[seen].sum() / self.shape[seen].sum())
+        return np.maximum(shape, _MIN_STANDBY_W)
+
+    def _bands(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Smoothed 5th/95th percentiles of each slot's last 14 days + validity mask."""
+        lo = np.full(_SLOTS_TOTAL, np.nan)
+        hi = np.full(_SLOTS_TOTAL, np.nan)
+        n  = np.array([len(h) for h in self.recent], dtype=float)
+        for i, h in enumerate(self.recent):
+            if len(h) >= _BAND_MIN_OBS:
+                lo[i] = np.percentile(h, _BAND_LO_PCT)
+                hi[i] = np.percentile(h, _BAND_HI_PCT)
+        ok = n >= _BAND_MIN_OBS
+        lo = _smooth_profile_circular(np.nan_to_num(lo), ok.astype(float), _SMOOTH_SIGMA_SLOTS)
+        hi = _smooth_profile_circular(np.nan_to_num(hi), ok.astype(float), _SMOOTH_SIGMA_SLOTS)
+        return lo, hi, ok
+
     def predict(self, from_ts_utc: float, n_slots: int = 96) -> list[dict]:
         """
-        Generate n_slots × 15-min predictions starting from from_ts_utc.
-
-        Returns list of {'ts_ms', 'w', 'ev_w', 'p10_w', 'p90_w'}. 'ev_w' is the part of
-        'w' that is expected EV charging (ev_addon) — battery planning subtracts it
-        when the EV lock makes the grid, not the battery, serve the charger.
-        Every slot returns at least the standby floor (_MIN_STANDBY_W) for 'w', even
-        with no observations — the house always draws standby, so a None/0 W forecast
-        is never physical.  p10/p90 use ±1.28σ (normal approximation) and are omitted
-        when count < 5.
+        n_slots × 15-min predictions from from_ts_utc:
+        [{'ts_ms', 'w', 'ev_w', 'p10_w', 'p90_w'}]. 'w' = baseline + expected EV
+        load; 'ev_w' is that EV part (battery planning drops it under the EV lock).
+        'p10_w'/'p90_w' bound a calibrated ~80 % range (see module docstring); None
+        while a slot has fewer than 5 days of history.
         """
-        slot_sec = 900  # 15 min
-        t   = int(from_ts_utc / slot_sec) * slot_sec
+        base = self._baseline()
+        ev   = _smooth_profile_circular(self.ev_addon, self.ev_counts, _SMOOTH_SIGMA_SLOTS)
+        lo, hi, ok = self._bands()
+        t = int(from_ts_utc // 900) * 900
         out = []
-        # Forecast off the temporally-smoothed profile so the expected curve reflects
-        # the smooth underlying load rather than per-slot sampling noise. Variance/bands
-        # stay on the raw per-slot spread (they describe real dispersion, not estimator
-        # noise), so p10/p90 still bracket the smoothed mean sensibly.
-        sm_profile = _smooth_profile_circular(self.profile, self.counts, _SMOOTH_SIGMA_SLOTS)
-        # Same smoothing for the EV addon — a lone slot with a couple of observed
-        # sessions shouldn't spike against a flat neighbourhood, and it lets a new
-        # session gradually "bleed" into adjacent quarter-hours the way the baseline
-        # profile already does.
-        sm_ev_addon = _smooth_profile_circular(self.ev_addon, self.ev_counts, _SMOOTH_SIGMA_SLOTS)
         for i in range(n_slots):
-            ts_utc_i = t + i * slot_sec
-            dt_local = datetime.fromtimestamp(ts_utc_i, tz=_TZ)
-            idx      = _local_idx(dt_local)
-            if self.counts[idx] > 0:
-                # Global bias corrector shifts the whole forecast; the floor
-                # still applies afterwards (the house never draws less than
-                # standby, whatever the corrector says). ev_addon is the expected
-                # (probability-weighted) extra load from a recurring big session
-                # (EV charging) at this time-of-week — see update_ev_addon().
-                ev = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
-                base = max(float(sm_profile[idx]) + self.bias, _MIN_STANDBY_W)
-                mean = float(sm_profile[idx]) + self.bias + ev
-                w    = round(max(mean, _MIN_STANDBY_W), 1)
-                if self.counts[idx] >= 5 and self.variance[idx] > 0:
-                    std  = math.sqrt(float(self.variance[idx]))
-                    p10  = round(max(_MIN_STANDBY_W, mean - 1.28 * std), 1)
-                    p90  = round(max(w, mean + 1.28 * std), 1)
-                else:
-                    p10 = p90 = None
+            ts  = t + i * 900
+            idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
+            ev_w = float(ev[idx]) if self.ev_counts[idx] > 0 else 0.0
+            b    = float(base[idx])
+            w    = b + ev_w
+            if ok[idx]:
+                p10 = round(max(_MIN_STANDBY_W, min(float(lo[idx]), b)), 1)
+                p90 = round(max(w, float(hi[idx]) + ev_w), 1)
             else:
-                # No baseline data for this slot yet — standby baseline plus bias
-                # (plus ev_addon, on the rare chance it has data the baseline doesn't:
-                # every historical slot at this time-of-week happened to be excluded
-                # from the baseline as EV-sized).
-                ev   = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
-                base = max(_MIN_STANDBY_W + self.bias, _MIN_STANDBY_W)
-                w    = round(max(_MIN_STANDBY_W + self.bias + ev, _MIN_STANDBY_W), 1)
                 p10 = p90 = None
-            ev_w = round(max(0.0, w - base), 1)
-            out.append({'ts_ms': ts_utc_i * 1000, 'w': w, 'ev_w': ev_w,
+            out.append({'ts_ms': ts * 1000, 'w': round(w, 1), 'ev_w': round(ev_w, 1),
                         'p10_w': p10, 'p90_w': p90})
         return out
 
@@ -478,9 +319,10 @@ class ConsumptionModel:
         path.write_text(json.dumps({
             'alpha':     self.alpha,
             'profile':   self.profile.tolist(),
-            'variance':  self.variance.tolist(),
+            'shape':     self.shape.tolist(),
+            'spread':    self.spread.tolist(),
             'counts':    self.counts.tolist(),
-            'bias':      self.bias,
+            'recent':    self.recent,
             'ev_addon':  self.ev_addon.tolist(),
             'ev_counts': self.ev_counts.tolist(),
         }))
@@ -488,17 +330,15 @@ class ConsumptionModel:
     @classmethod
     def load(cls, path: Path) -> ConsumptionModel:
         d = json.loads(path.read_text())
-        if len(d['profile']) != _SLOTS_TOTAL:
-            # Pre-2026-10 weekly (672-slot) file — the caller starts fresh and
-            # re-seeds from poll history, which rebuilds the daily profile fully.
-            raise ValueError(f'profile has {len(d["profile"])} slots, expected {_SLOTS_TOTAL}')
-        m = cls()
-        m.profile    = np.array(d['profile'],  dtype=float)
-        m.variance   = np.array(d.get('variance', [0.0] * _SLOTS_TOTAL), dtype=float)
-        m.counts     = np.array(d['counts'],   dtype=float)
-        m.bias       = max(-_BIAS_CLAMP_W, min(_BIAS_CLAMP_W, float(d.get('bias', 0.0))))
-        # Absent on a model file saved before the EV-addon was added — starts at 0
-        # (no addon yet) and converges from live updates same as a fresh install.
-        m.ev_addon   = np.array(d.get('ev_addon',  [0.0] * _SLOTS_TOTAL), dtype=float)
-        m.ev_counts  = np.array(d.get('ev_counts', [0.0] * _SLOTS_TOTAL), dtype=float)
+        if 'shape' not in d or len(d['profile']) != _SLOTS_TOTAL:
+            # Older format — the caller starts fresh and re-seeds from poll history.
+            raise ValueError('model file predates the robust-shape format')
+        m = cls(alpha=d.get('alpha', _DEFAULT_ALPHA))
+        m.profile   = np.array(d['profile'],   dtype=float)
+        m.shape     = np.array(d['shape'],     dtype=float)
+        m.spread    = np.array(d['spread'],    dtype=float)
+        m.counts    = np.array(d['counts'],    dtype=float)
+        m.recent    = [list(map(float, h)) for h in d['recent']]
+        m.ev_addon  = np.array(d['ev_addon'],  dtype=float)
+        m.ev_counts = np.array(d['ev_counts'], dtype=float)
         return m

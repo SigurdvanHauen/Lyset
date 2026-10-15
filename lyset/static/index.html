@@ -3785,8 +3785,7 @@ async function updateAccuracyCard() {
                     `(mean ${c.actual_mean_w} W)`);
   const cal = j.calibration || {};
   const nCal = cal.solar ? cal.solar.counts.reduce((a, b) => a + (b > 0 ? 1 : 0), 0) : 0;
-  lines.push(`Corrections: ${nCal}/24 solar hours calibrated, ` +
-             `load bias ${cal.consumption_bias_w > 0 ? '+' : ''}${cal.consumption_bias_w || 0} W`);
+  lines.push(`Corrections: ${nCal}/24 solar hours calibrated`);
   subEl.innerHTML = lines.join('<br>');
 }
 
