@@ -21,6 +21,15 @@ from .sanitize import DataSanitizer
 
 log = logging.getLogger(__name__)
 
+# The SDongle is fragile under write traffic: a controller re-sending the same
+# setting every tick (e.g. a read-back the inverter never confirms) can knock its
+# whole network stack over, FusionSolar included. Automatic (AutoCtrl) writes of
+# the SAME value to the SAME register are therefore sent at most once per window,
+# whatever the caller asks for. A changed value always goes through, as do manual
+# writes from the dashboard.
+_AUTO_REPEAT_MIN_S = 300.0
+_AUTO_PREFIX = 'AutoCtrl'
+
 
 @dataclass
 class _WriteRequest:
@@ -89,6 +98,8 @@ class ModbusWorker(threading.Thread):
         self._running = False
         self._client: Optional[ModbusTcpClient] = None
         self._write_queue: queue.Queue = queue.Queue()
+        self._last_auto_write: dict[int, tuple[tuple, float]] = {}  # addr → (values, ts)
+        self._suppressed = 0
         # Cleans every poll at the source (ranges, enums, spike confirmation,
         # hold-last-good) so all consumers — controller, dashboard, DB, model —
         # see the same validated data. Only touched from the worker thread.
@@ -147,6 +158,22 @@ class ModbusWorker(threading.Thread):
     def _process_writes(self):
         while not self._write_queue.empty():
             req: _WriteRequest = self._write_queue.get_nowait()
+            if req.description.startswith(_AUTO_PREFIX):
+                vals, now = tuple(req.values), time.time()
+                last = self._last_auto_write.get(req.address)
+                if last and last[0] == vals and now - last[1] < _AUTO_REPEAT_MIN_S:
+                    self._suppressed += 1
+                    if self._suppressed % 20 == 1:
+                        log.warning('Write guard: suppressed repeat of %s (%d repeats '
+                                    'suppressed so far) — inverter may not be accepting it',
+                                    req.description, self._suppressed)
+                    continue
+                if req.address in (47086, 47100) and (not last or last[0] != vals):
+                    # Leaving/entering forced mode resets the inverter's forcible
+                    # charge/discharge power, so the next one is a real re-send.
+                    self._last_auto_write.pop(47247, None)
+                    self._last_auto_write.pop(47249, None)
+                self._last_auto_write[req.address] = (vals, now)
             try:
                 result = self._client.write_registers(
                     req.address, req.values, device_id=self.slave_id
