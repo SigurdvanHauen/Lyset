@@ -1,14 +1,20 @@
 """
-Weekly consumption profile model for predicting house load.
+Daily consumption profile model for predicting house load.
 
-Maintains a 7-day × 96-slot (15 min each) profile of average house load (W)
+Maintains a 96-slot (15 min each) time-of-day profile of average house load (W)
 and its variance, enabling p10/p90 confidence bands.
+
+Time-of-day, not time-of-week: once EV charging is separated out this house shows
+no weekday pattern (2026-08/10: 16.5–17.5 kWh every weekday), and a weekly profile
+gets only one observation per slot per week — so it lagged and was noisier. A
+walk-forward backtest over 2026-08-15..10-15 gave baseline MAE 234 W (weekly) vs
+221 W (daily, alpha 0.15).
 
 Seeded via seed_from_polls() from actual house_load DB history (exponential
 time-decay so recent data weighs more), then updated online via EWM as new
 Modbus readings arrive.
 
-Slot index: weekday * 96 + hour * 4 + minute // 15  (local Europe/Copenhagen time)
+Slot index: hour * 4 + minute // 15  (local Europe/Copenhagen time)
 """
 from __future__ import annotations
 
@@ -27,9 +33,9 @@ log = logging.getLogger(__name__)
 
 _TZ            = ZoneInfo('Europe/Copenhagen')
 _SLOTS_PER_DAY = 96
-_SLOTS_TOTAL   = 7 * _SLOTS_PER_DAY   # 672
+_SLOTS_TOTAL   = _SLOTS_PER_DAY
 
-_DEFAULT_ALPHA = 0.10   # EWM learning rate — faster adaptation than old 0.05
+_DEFAULT_ALPHA = 0.15   # EWM learning rate per daily observation (~1-week memory)
 _SEED_CAP      = 30     # max effective count after seeding
 _HALF_LIFE_DAYS = 14.0  # recency decay: data 14 days old gets half the weight
 
@@ -83,16 +89,59 @@ _UPDATE_OUTLIER_MIN_COUNT = 5       # online clip engages only once a slot has s
 _SMOOTH_SIGMA_SLOTS = _env_float('CONSUMPTION_SMOOTH_SIGMA_SLOTS', 1.2)
 
 
+_SLOT_MIN_SAMPLES = 15   # fewer polls in a 15-min slot = partial slot (downtime/restart)
+
+
 def _local_idx(dt_local: datetime) -> int:
-    return dt_local.weekday() * _SLOTS_PER_DAY + dt_local.hour * 4 + dt_local.minute // 15
+    return dt_local.hour * 4 + dt_local.minute // 15
+
+
+def slot_average(samples: list[float]) -> Optional[float]:
+    """Average of one 15-min slot's house_load polls, or None for a partial slot.
+
+    10 %-trimmed mean: single-poll house_load glitches (0 W and ~5 kW in adjacent
+    polls — non-simultaneous batched reads) fall in the trimmed tails, while
+    sustained real load (oven, charger) spans enough samples to survive. A median
+    would also suppress real short spikes and under-count energy; the trim doesn't.
+    Shared by the online path (server) and seed_from_polls so both learn from the
+    same per-slot values.
+    """
+    if len(samples) < _SLOT_MIN_SAMPLES:
+        return None
+    srt  = sorted(samples)
+    trim = len(srt) // 10
+    kept = srt[trim:len(srt) - trim] if trim else srt
+    return sum(kept) / len(kept)
+
+
+def _slot_records(records: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Collapse per-poll (ts, W) records into per-15-min-slot (slot_start_ts, avg W)."""
+    out: list[tuple[float, float]] = []
+    key, buf = None, []
+    for ts, w in records:
+        if w is None:
+            continue
+        k = int(ts // 900)
+        if k != key:
+            if key is not None:
+                avg = slot_average(buf)
+                if avg is not None:
+                    out.append((key * 900.0, avg))
+            key, buf = k, []
+        buf.append(max(0.0, float(w)))
+    if key is not None:
+        avg = slot_average(buf)
+        if avg is not None:
+            out.append((key * 900.0, avg))
+    return out
 
 
 def _smooth_profile_circular(profile: np.ndarray, counts: np.ndarray,
                              sigma: float) -> np.ndarray:
-    """Gaussian-smooth the weekly profile along the time-of-day axis.
+    """Gaussian-smooth the daily profile along the time-of-day axis.
 
-    The 672-slot array is treated as circular (Sunday 23:45 wraps to Monday 00:00 —
-    adjacent indices are temporally adjacent), so the smoothing has no seam. Slots that
+    The 96-slot array is treated as circular (23:45 wraps to 00:00 — adjacent
+    indices are temporally adjacent), so the smoothing has no seam. Slots that
     were never observed are excluded via a normalised mask, so they neither contribute
     to nor are dragged toward zero by their neighbours. Returns a smoothed COPY; the
     stored raw profile (and its variance/bands) is left untouched.
@@ -144,6 +193,13 @@ class ConsumptionModel:
         """
         Build profile from actual house_load poll records: [(ts_utc, watts), ...].
 
+        Polls are first collapsed into 15-min slot averages with the same
+        slot_average() the online path uses, so seed and online learning see
+        identical values. When ev_threshold_w is given, slots above it are EV
+        charging and are kept out of the baseline exactly as update() does — the old
+        per-poll seed only winsorised them, which left the afternoon baseline
+        150–450 W high while ev_addon counted the same sessions again on top.
+
         Uses exponential time-decay so recent observations count more than old ones.
         Only overwrites slots that have ≥ 3 observations in the provided records;
         sparse slots retain their current values so the model degrades gracefully
@@ -160,6 +216,7 @@ class ConsumptionModel:
         Returns the number of BASELINE slots updated (ev_addon seeding, when it runs,
         is reported only via its own log line — see server.py).
         """
+        records = _slot_records(records)
         if not records:
             return 0
 
@@ -171,7 +228,9 @@ class ConsumptionModel:
         slot_w: dict[int, list[float]] = {}
         slot_x: dict[int, list[float]] = {}
         for ts, w in records:
-            if w is None or w < 0 or w > _MAX_SLOT_W:
+            if w > _MAX_SLOT_W:
+                continue
+            if ev_threshold_w is not None and w > ev_threshold_w:
                 continue
             idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
             slot_w.setdefault(idx, []).append(math.exp(-decay * (now_ts - ts)))
@@ -217,7 +276,7 @@ class ConsumptionModel:
         slot_w: dict[int, list[float]] = {}
         slot_x: dict[int, list[float]] = {}
         for ts, w in records:
-            if w is None or w < 0 or w > _MAX_SLOT_W:
+            if w > _MAX_SLOT_W:
                 continue
             idx = _local_idx(datetime.fromtimestamp(ts, tz=_TZ))
             contrib = max(0.0, w - float(self.profile[idx])) if w > threshold_w else 0.0
@@ -259,8 +318,7 @@ class ConsumptionModel:
         except Exception:
             d06['local'] = d06['From_date'].dt.tz_localize('UTC')
 
-        d06['idx'] = (d06['local'].dt.weekday * _SLOTS_PER_DAY
-                      + d06['local'].dt.hour * 4
+        d06['idx'] = (d06['local'].dt.hour * 4
                       + d06['local'].dt.minute // 15)
         d06['w']   = d06['Volume'] * 4000.0  # kWh/15min → W
 
@@ -353,7 +411,9 @@ class ConsumptionModel:
         """
         Generate n_slots × 15-min predictions starting from from_ts_utc.
 
-        Returns list of {'ts_ms': int, 'w': float|None, 'p10_w': float|None, 'p90_w': float|None}.
+        Returns list of {'ts_ms', 'w', 'ev_w', 'p10_w', 'p90_w'}. 'ev_w' is the part of
+        'w' that is expected EV charging (ev_addon) — battery planning subtracts it
+        when the EV lock makes the grid, not the battery, serve the charger.
         Every slot returns at least the standby floor (_MIN_STANDBY_W) for 'w', even
         with no observations — the house always draws standby, so a None/0 W forecast
         is never physical.  p10/p90 use ±1.28σ (normal approximation) and are omitted
@@ -383,6 +443,7 @@ class ConsumptionModel:
                 # (probability-weighted) extra load from a recurring big session
                 # (EV charging) at this time-of-week — see update_ev_addon().
                 ev = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
+                base = max(float(sm_profile[idx]) + self.bias, _MIN_STANDBY_W)
                 mean = float(sm_profile[idx]) + self.bias + ev
                 w    = round(max(mean, _MIN_STANDBY_W), 1)
                 if self.counts[idx] >= 5 and self.variance[idx] > 0:
@@ -396,10 +457,13 @@ class ConsumptionModel:
                 # (plus ev_addon, on the rare chance it has data the baseline doesn't:
                 # every historical slot at this time-of-week happened to be excluded
                 # from the baseline as EV-sized).
-                ev  = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
-                w   = round(max(_MIN_STANDBY_W + self.bias + ev, _MIN_STANDBY_W), 1)
+                ev   = float(sm_ev_addon[idx]) if self.ev_counts[idx] > 0 else 0.0
+                base = max(_MIN_STANDBY_W + self.bias, _MIN_STANDBY_W)
+                w    = round(max(_MIN_STANDBY_W + self.bias + ev, _MIN_STANDBY_W), 1)
                 p10 = p90 = None
-            out.append({'ts_ms': ts_utc_i * 1000, 'w': w, 'p10_w': p10, 'p90_w': p90})
+            ev_w = round(max(0.0, w - base), 1)
+            out.append({'ts_ms': ts_utc_i * 1000, 'w': w, 'ev_w': ev_w,
+                        'p10_w': p10, 'p90_w': p90})
         return out
 
     @property
@@ -423,7 +487,11 @@ class ConsumptionModel:
     @classmethod
     def load(cls, path: Path) -> ConsumptionModel:
         d = json.loads(path.read_text())
-        m = cls(alpha=d.get('alpha', _DEFAULT_ALPHA))
+        if len(d['profile']) != _SLOTS_TOTAL:
+            # Pre-2026-10 weekly (672-slot) file — the caller starts fresh and
+            # re-seeds from poll history, which rebuilds the daily profile fully.
+            raise ValueError(f'profile has {len(d["profile"])} slots, expected {_SLOTS_TOTAL}')
+        m = cls()
         m.profile    = np.array(d['profile'],  dtype=float)
         m.variance   = np.array(d.get('variance', [0.0] * _SLOTS_TOTAL), dtype=float)
         m.counts     = np.array(d['counts'],   dtype=float)

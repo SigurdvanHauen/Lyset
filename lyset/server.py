@@ -40,14 +40,14 @@ from . import config
 from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
-from .consumption_model import ConsumptionModel
+from .consumption_model import ConsumptionModel, slot_average
 from .solar_calibration import SolarCalibration
 from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .nas_backup import NasBackupWorker, worker_from_env as nas_backup_from_env
 from .auto_controller import (
-    AutoController, arbitrage_enabled, arbitrage_min_gain,
+    AutoController, arbitrage_enabled, arbitrage_min_gain, battery_load_w,
     NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
-    GRID_CHARGE_W,
+    GRID_CHARGE_W, GRID_CHARGE_TARGET_MAX, GRID_CHARGE_RESTART_GAP,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
     CHARGE_MARGIN_DKK, CHARGE_HORIZON_H,
     CHARGE_EFF, DISCHARGE_EFF, PLAN_MIN_SOC, GRID_CHARGE_MIN_KWH,
@@ -244,7 +244,11 @@ def _simulate_soc(
 
     # Index solar by period-end ts; night periods (omitted by Solcast) default to 0 W
     solar_by_ts  = {r['ts_ms']: r.get('pv_w') or 0.0 for r in solar_fc}
-    load_by_ts   = {r['ts_ms']: r['w'] for r in load_fc if r.get('w') is not None}
+    # load_by_ts is what the BATTERY must cover (battery_load_w drops the EV part
+    # under the EV lock); ev_by_ts is the rest, served straight from the grid.
+    load_by_ts   = {r['ts_ms']: battery_load_w(r) for r in load_fc if r.get('w') is not None}
+    ev_by_ts     = {r['ts_ms']: r['w'] - load_by_ts[r['ts_ms']]
+                    for r in load_fc if r.get('w') is not None}
     max_power_kw = capacity_kwh * 0.5  # C/2 — LUNA2000 rated charge rate heuristic
 
     # Price lookup: sorted ascending so we can walk a pointer forward
@@ -322,8 +326,9 @@ def _simulate_soc(
                     gc_slots, soc, capacity_kwh, min_soc, import_dkk, CHARGE_MARGIN_DKK,
                     charge_eff, discharge_eff,
                 )
-                if shortfall_kwh > GRID_CHARGE_MIN_KWH and soc < 100.0:
-                    gc_target = min(100.0, soc + shortfall_kwh / capacity_kwh * 100.0)
+                if shortfall_kwh > GRID_CHARGE_MIN_KWH and soc < GRID_CHARGE_TARGET_MAX:
+                    gc_target = min(GRID_CHARGE_TARGET_MAX,
+                                    soc + shortfall_kwh / capacity_kwh * 100.0)
                     pre = [s['import'] for s in gc_slots if s['import'] is not None
                            and (first_dear_ts is None or s['ts'] < first_dear_ts)]
                     price_ok = (not pre) or import_dkk <= min(pre) + CHARGE_MARGIN_DKK
@@ -333,7 +338,8 @@ def _simulate_soc(
                     # (gc_floor + margin). The floor stops the pack sawtoothing against the
                     # evening discharge when the overnight deficit exceeds pack capacity.
                     not_dearer = gc_floor is None or import_dkk <= gc_floor + CHARGE_MARGIN_DKK
-                    do_gc = soc < gc_target and (gc_active or (price_ok and not_dearer))
+                    room = soc < GRID_CHARGE_TARGET_MAX - GRID_CHARGE_RESTART_GAP
+                    do_gc = soc < gc_target and (gc_active or (price_ok and not_dearer and room))
                     if do_gc:
                         gc_floor = import_dkk if gc_floor is None else min(gc_floor, import_dkk)
 
@@ -400,7 +406,11 @@ def _simulate_soc(
 
             elif do_gc:
                 gc_active = True
-                batt_kw   = min(GRID_CHARGE_W / 1000.0, max_power_kw)
+                # The live controller re-checks every 15 s and stops at the target;
+                # a whole 15-min step at full rate would overshoot it.
+                to_target_kw = ((gc_target - soc) / 100.0 * capacity_kwh
+                                / (SLOT_H * charge_eff))
+                batt_kw   = min(GRID_CHARGE_W / 1000.0, max_power_kw, to_target_kw)
 
             elif do_hold:
                 gc_active = False
@@ -437,7 +447,7 @@ def _simulate_soc(
             batt_kw = max(batt_kw, -max_dis_kw)
 
         energy_kwh = batt_kw * SLOT_H * (charge_eff if batt_kw >= 0 else 1.0 / discharge_eff)
-        grid_kw    = batt_kw - net_kw
+        grid_kw    = batt_kw - net_kw + ev_by_ts.get(ts_ms, 0.0) / 1000.0
         if curtail_export:
             grid_kw = max(0.0, grid_kw)   # negative export: curtail surplus, never sell
 
@@ -672,18 +682,8 @@ def _on_data(data: dict):
         grid_import_w = max(0.0, meter_w)
         key = int(ts / 900)
         if key != _slot_key:
-            # ≥ 15 of the ~90 expected samples (10-s polls / 15 min), else the
-            # slot is a partial from downtime/restart and would train on noise.
-            if len(_slot_samples) >= 15 and _slot_key >= 0:
-                # 10 %-trimmed mean: single-poll house_load glitches (0 W and
-                # ~5 kW in adjacent polls — non-simultaneous batched reads) fall
-                # in the trimmed tails, while sustained real load (oven, charger)
-                # spans enough samples to survive. A median would also suppress
-                # real short spikes and under-count energy; the trim doesn't.
-                srt  = sorted(_slot_samples)
-                trim = len(srt) // 10
-                kept = srt[trim:len(srt) - trim] if trim else srt
-                avg_w = sum(kept) / len(kept)
+            avg_w = slot_average(_slot_samples) if _slot_key >= 0 else None
+            if avg_w is not None:
                 slot_ts = _slot_key * 900.0
                 threshold = _ev_slot_threshold_w()
                 # EV-charging slots are excluded from the baseline HOUSE profile:
@@ -754,10 +754,13 @@ def _on_data(data: dict):
             # discharge track predicted house needs. Overlay it onto a 48h predict() so
             # the tail beyond the persisted ~24h horizon still fills the plan window.
             load_48h = _consumption_model.predict(time.time(), n_slots=192)
-            served = {r['ts_ms']: r['w'] for r in _last_consumption_forecast
+            served = {r['ts_ms']: r for r in _last_consumption_forecast
                       if r.get('w') is not None}
             if served:
-                load_48h = [{**r, 'w': served.get(r['ts_ms'], r['w'])} for r in load_48h]
+                load_48h = [{**r, 'w': served[r['ts_ms']]['w'],
+                             'ev_w': served[r['ts_ms']].get('ev_w', r['ev_w'])}
+                            if r['ts_ms'] in served else r
+                            for r in load_48h]
             fc = _simulate_soc_with_bands(
                 soc_val, cap_val, _last_solar_forecast, load_48h,
                 prices=_last_prices if _auto_controller.enabled else None,
@@ -821,18 +824,21 @@ def _cons_band_predict() -> list[dict]:
 
 
 def _cons_band_index(band_src: list[dict]) -> dict:
-    """Index a band-source predict by hour-of-week → (halfwidth_lo, halfwidth_hi).
+    """Index a band-source predict by hour-of-week → (halfwidth_lo, halfwidth_hi, ev_w).
 
     Half-widths (mean−p10, p90−mean) are σ-based and bias-independent, so keying on the
-    local (weekday, hour, quarter-hour) lets a one-week source band ANY timestamp."""
+    local (weekday, hour, quarter-hour) lets a one-week source band ANY timestamp.
+    Half-widths are None where the model has too few observations for a band; ev_w
+    (expected EV part) is always present."""
     idx: dict = {}
     for pr in band_src:
         p10, p90, w = pr.get('p10_w'), pr.get('p90_w'), pr.get('w')
-        if p10 is None or p90 is None or w is None:
+        if w is None:
             continue
         dt  = datetime.fromtimestamp(pr['ts_ms'] / 1000, tz=_TZ_LOCAL)
         key = (dt.weekday(), dt.hour, dt.minute // 15)
-        idx.setdefault(key, (w - p10, p90 - w))
+        hw  = (w - p10, p90 - w) if p10 is not None and p90 is not None else (None, None)
+        idx.setdefault(key, (*hw, pr.get('ev_w') or 0.0))
     return idx
 
 
@@ -861,12 +867,15 @@ def _merge_cons_bands(records: list[dict], band_src: list[dict]) -> list[dict]:
         dt  = (datetime.fromtimestamp(r['ts_ms'] / 1000, tz=_TZ_LOCAL)
                if r.get('ts_ms') is not None else None)
         hw  = band_idx.get((dt.weekday(), dt.hour, dt.minute // 15)) if dt else None
-        if w is not None and hw is not None:
-            out.append({**r,
+        # The DB keeps only 'w', so the EV share is transplanted from the current
+        # model the same way the band is (see battery_load_w for why it matters).
+        ev  = hw[2] if hw else 0.0
+        if w is not None and hw is not None and hw[0] is not None:
+            out.append({**r, 'ev_w': ev,
                         'p10_w': round(max(0.0, w - hw[0]), 1),
                         'p90_w': round(w + hw[1], 1)})
         else:
-            out.append({**r, 'p10_w': None, 'p90_w': None})
+            out.append({**r, 'ev_w': ev, 'p10_w': None, 'p90_w': None})
     return out
 
 
@@ -1188,7 +1197,7 @@ async def lifespan(app: FastAPI):
         try:
             _consumption_model = ConsumptionModel.load(_MODEL_PATH)
             log.info('ConsumptionModel: loaded from %s (%d/%d slots filled)',
-                     _MODEL_PATH.name, _consumption_model.coverage, 672)
+                     _MODEL_PATH.name, _consumption_model.coverage, 96)
         except Exception as exc:
             log.warning('ConsumptionModel: load failed (%s) — starting fresh', exc)
             _consumption_model = ConsumptionModel()
@@ -1220,7 +1229,7 @@ async def lifespan(app: FastAPI):
             log.warning('ConsumptionModel: save after DB seed failed — %s', exc)
         ev_slots = int((_consumption_model.ev_counts > 0).sum())
         log.info('ConsumptionModel: re-seeded from %d poll records, %d baseline slots '
-                 'updated, %d EV-addon slots seeded, coverage %d/672',
+                 'updated, %d EV-addon slots seeded, coverage %d/96',
                  len(poll_records), n_updated, ev_slots, _consumption_model.coverage)
 
     if _consumption_model and _consumption_model.coverage > 0:

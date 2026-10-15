@@ -611,12 +611,18 @@ def clean_forecast_soc() -> int:
 
 
 def load_house_load_history(from_ts: float = 0.0) -> list[tuple[float, float]]:
-    """Return (ts_utc, house_load_w) tuples for all poll rows that have house_load."""
+    """Return (ts_utc, house_load_w) tuples for all poll rows that have house_load.
+    Polls from before the sleep-mode fix (battery asleep → no batt_power → no
+    house_load) are rebuilt as active_power + meter, since a sleeping battery is idle."""
     with _lock:
         rows = _get_con().execute(
-            'SELECT ts, json_extract(data, "$.house_load") FROM polls '
-            'WHERE json_extract(data, "$.house_load") IS NOT NULL '
-            'AND ts >= ? ORDER BY ts',
+            'SELECT ts, w FROM ('
+            '  SELECT ts, COALESCE(json_extract(data, "$.house_load"),'
+            '    CASE WHEN json_extract(data, "$.batt_status") = 4'
+            '      THEN json_extract(data, "$.active_power")'
+            '         + json_extract(data, "$.meter_active_power") END) AS w'
+            '  FROM polls WHERE ts >= ?'
+            ') WHERE w IS NOT NULL ORDER BY ts',
             (from_ts,),
         ).fetchall()
     return [(ts, w) for ts, w in rows]
@@ -651,21 +657,27 @@ def load_pv_avg_by_period_end(from_ts: float, to_ts: float,
 
     Used by the solar-forecast calibration. Buckets with fewer than min_samples
     polls (downtime, restarts) are dropped — a half-empty bucket biases the
-    actual/forecast ratio.
+    actual/forecast ratio. So are buckets where PV was likely CLIPPED: mostly in
+    zero-export mode (47415 = 5) with the battery full, the inverter throttles PV
+    to the house load whatever the price. Price-based skipping alone missed ~25 %
+    of these (2026-08/10), biasing the factors down.
     """
     with _lock:
         rows = _get_con().execute(
             'SELECT CAST(ts / 1800 AS INTEGER) AS b, '
             '       AVG(COALESCE(json_extract(data, "$.pv1_power"), 0) '
             '         + COALESCE(json_extract(data, "$.pv2_power"), 0)), '
-            '       COUNT(*) '
+            '       COUNT(*), '
+            '       AVG(json_extract(data, "$.active_power_mode") = 5 '
+            '           AND json_extract(data, "$.batt_soc") >= 97) '
             'FROM polls WHERE ts >= ? AND ts < ? '
             '  AND (json_extract(data, "$.pv1_power") IS NOT NULL '
             '    OR json_extract(data, "$.pv2_power") IS NOT NULL) '
             'GROUP BY b',
             (from_ts, to_ts),
         ).fetchall()
-    return {(int(b) + 1) * 1800 * 1000: pv for b, pv, n in rows if n >= min_samples}
+    return {(int(b) + 1) * 1800 * 1000: pv for b, pv, n, clipped in rows
+            if n >= min_samples and not (clipped or 0) > 0.5}
 
 
 def poll_ts_range() -> tuple[float, float] | None:

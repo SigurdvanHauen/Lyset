@@ -255,6 +255,12 @@ class ModbusWorker(threading.Thread):
             if 'meter_active_power' in data:
                 data['meter_active_power'] = -data['meter_active_power']
 
+            # In sleep mode (37000 = 4, battery at its SoC floor) the battery stops
+            # answering 37001 entirely. It is genuinely idle, so 0 W is the true value
+            # — leaving it absent blanked house_load and froze the controller overnight.
+            if 'batt_power' not in data and data.get('batt_status') == 4:
+                data['batt_power'] = 0.0
+
             # house_load = solar_out + grid_import - battery_charge. All three
             # components must be present: assuming a missing batt_power is 0 (the
             # old behaviour) shifts the load by up to ±2500 W whenever the battery

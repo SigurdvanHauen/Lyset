@@ -38,7 +38,12 @@ log = logging.getLogger(__name__)
 
 _TZ = ZoneInfo('Europe/Copenhagen')
 
-ALPHA        = 0.15    # EWM rate per 30-min observation (~2 obs/hour-bucket/day)
+ALPHA        = 0.05    # EWM rate per 30-min observation (~2 obs/hour-bucket/day).
+                       # Slow on purpose: day-to-day weather error is far larger than
+                       # the roof bias, and 0.15 chased it — walk-forward over
+                       # 2026-08-15..10-15, raw Solcast MAE 408 W, alpha 0.15 436 W,
+                       # 0.05 416 W; with a synthetic persistent 15 % bias 0.03 still
+                       # beat 0.15 (365 vs 374 W).
 MIN_LEARN_W  = 150.0   # skip slots with a smaller stored forecast (ratio = noise)
 FACTOR_MIN   = 0.25    # hard clamp on the learned factor
 FACTOR_MAX   = 2.0

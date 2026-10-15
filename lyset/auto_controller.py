@@ -132,6 +132,18 @@ def ev_lock_enabled() -> bool:
     return os.getenv('EV_LOCK_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def battery_load_w(rec: dict) -> Optional[float]:
+    """House load (W) the BATTERY is expected to cover for one consumption-forecast
+    record. With the EV lock on, the grid serves EV charging (battery discharge is
+    blocked), so the expected EV part ('ev_w') is not battery drain — counting it
+    inflated the grid-charge shortfall (e.g. 9.5–14 kWh planned vs 0 kWh real on
+    2026-10-04). Charts and grid forecasts keep using the full 'w'."""
+    w = rec.get('w')
+    if w is None or not ev_lock_enabled():
+        return w
+    return max(0.0, w - (rec.get('ev_w') or 0.0))
+
+
 def ev_lock_load_threshold_w() -> float:
     """House-load level (W) above which a sustained draw is treated as 'the EV
     is probably charging' by the fast load-spike heuristic in _update_ev_lock().
@@ -174,8 +186,12 @@ EXPORT_RESUME_DKK     = 0.03    # ASYMMETRIC hysteresis (not a symmetric dead-ba
                                 # hovers around 0 (the picket-fence export plan).
 MIN_PV_W              = 300     # below this, don't bother writing a PV limit
 CHEAP_IMPORT_DKK      = 0.50    # legacy constant — kept for _simulate_soc in server.py
-GRID_CHARGE_SOC_START = 75.0    # only begin grid charging below this (hysteresis low)
-GRID_CHARGE_SOC_MAX   = 80.0    # stop grid charging above this (hysteresis high)
+GRID_CHARGE_TARGET_MAX = 98.0   # grid-charge target ceiling. The pack tops out at 99–100%
+                                # unreliably, so a 100% target was never "reached" and the
+                                # block stayed committed at full SoC — 301 flaps and ~22 kWh
+                                # of import with a full pack over 2026-08/09.
+GRID_CHARGE_RESTART_GAP = 5.0   # after a block, only start another once SoC is this far
+                                # below the target — stops a 97↔98% restart chatter
 GRID_CHARGE_W         = 2500    # W — grid charge rate
 FORCE_CHARGE_SOC_MAX  = 95.0    # above this, force-idle instead of force-charge
 NATIVE_SC_SOC_MAX     = 90.0    # below this SoC, charge a PV surplus with Huawei's native
@@ -253,9 +269,9 @@ _EV_LOCK_RELEASE_FACTOR = 0.6   # release threshold = load threshold × this (hy
 _NEGATIVE_EXPORT_DKK  = NEGATIVE_EXPORT_DKK
 _EXPORT_RESUME_DKK    = EXPORT_RESUME_DKK
 _MIN_PV_W             = MIN_PV_W
-_GRID_CHARGE_SOC_START = GRID_CHARGE_SOC_START
-_GRID_CHARGE_SOC_MAX  = GRID_CHARGE_SOC_MAX
 _GRID_CHARGE_W        = GRID_CHARGE_W
+_GRID_CHARGE_TARGET_MAX  = GRID_CHARGE_TARGET_MAX
+_GRID_CHARGE_RESTART_GAP = GRID_CHARGE_RESTART_GAP
 _FORCE_CHARGE_SOC_MAX = FORCE_CHARGE_SOC_MAX
 _NATIVE_SC_SOC_MAX    = NATIVE_SC_SOC_MAX
 _MAX_FORCE_CHARGE_W   = MAX_FORCE_CHARGE_W
@@ -460,10 +476,10 @@ class AutoController:
         self._solar_fc = fc or []
 
     def set_consumption_forecast(self, fc: list[dict]):
-        """Latest house-consumption forecast ([{ts_ms, w}, ...], 15-min slots).
-        Used by the arbitrage branch to size how much stored energy is reserved
-        for upcoming self-consumption vs. free to export now."""
-        self._load_fc = fc or []
+        """Latest house-consumption forecast ([{ts_ms, w, ev_w}, ...], 15-min slots).
+        Used by the grid-charge plan and the arbitrage reserve — both battery-energy
+        decisions — so each record's 'w' is replaced by battery_load_w() here."""
+        self._load_fc = [{**r, 'w': battery_load_w(r)} for r in (fc or [])]
 
     @staticmethod
     def _price_at(prices: list, ts_ms: int) -> Optional[float]:
@@ -1032,7 +1048,7 @@ class AutoController:
         # self-consumption can't discharge it back out before the peak.
         charge_window = _window(_CHARGE_HORIZON_H)
         cap_kwh = data.get('batt_rated_capacity') or 5.0
-        if charge_window and batt_soc < 100.0 and cap_kwh > 0:
+        if charge_window and batt_soc < _GRID_CHARGE_TARGET_MAX and cap_kwh > 0:
             step   = 15 * 60 * 1000
             end_ms = now_ms + _CHARGE_HORIZON_H * 3_600_000
             gc_slots = [
@@ -1044,7 +1060,7 @@ class AutoController:
                 gc_slots, batt_soc, cap_kwh, _PLAN_MIN_SOC, import_dkk, _CHARGE_MARGIN_DKK,
                 _CHARGE_EFF, _DISCHARGE_EFF,
             )
-            target_soc = min(100.0, batt_soc + shortfall_kwh / cap_kwh * 100.0)
+            target_soc = min(_GRID_CHARGE_TARGET_MAX, batt_soc + shortfall_kwh / cap_kwh * 100.0)
             # Charge at the cheapest slot BEFORE the energy is needed: only fire when now
             # is within margin of the cheapest import up to the first uncovered slot, so a
             # cheaper pre-peak slot later isn't pre-empted by importing now.
@@ -1063,7 +1079,8 @@ class AutoController:
             want = shortfall_kwh > _GRID_CHARGE_MIN_KWH and batt_soc < target_soc
             not_dearer = self._gc_floor_price is None or \
                 import_dkk <= self._gc_floor_price + _CHARGE_MARGIN_DKK
-            if want and (self._grid_charging or (price_ok and not_dearer)):
+            room = batt_soc < _GRID_CHARGE_TARGET_MAX - _GRID_CHARGE_RESTART_GAP
+            if want and (self._grid_charging or (price_ok and not_dearer and room)):
                 self._grid_charging = True
                 self._gc_floor_price = (import_dkk if self._gc_floor_price is None
                                         else min(self._gc_floor_price, import_dkk))
