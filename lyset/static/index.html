@@ -192,9 +192,6 @@ button:disabled     { opacity: 0.35; cursor: not-allowed; pointer-events: none; 
 .card-sub  { font-size: 10px; color: var(--muted); margin-top: 4px; min-height: 13px; }
 .unit      { font-size: 12px; color: var(--muted); margin-left: 2px; }
 
-/* Side-by-side section columns (Energy Today | EV) */
-.split-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; align-items: start; margin-top: 18px; }
-.split-cols .sec { margin-top: 0; }
 
 /* ── Dashboard inline charts ── */
 #dash-charts {
@@ -376,8 +373,192 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 #toast.terr { background: var(--danger);  color: #fff; }
 #toast.twarn{ background: var(--warning); color: #1a0f00; }
 
+/* ── Dashboard layout ── */
+.dash { max-width: 1400px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.box, .fold {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.box.clickable { cursor: pointer; transition: border-color 0.12s; }
+.box.clickable:hover { border-color: var(--accent); }
+.box-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.box h2, .fold h2 { font-size: 14px; font-weight: 700; color: var(--text); }
+.box-hint { font-size: 11px; color: var(--muted); font-weight: 400; }
+.muted { color: var(--muted); }
+.good  { color: var(--success); }
+.bad   { color: var(--danger); }
+
+.pill {
+  font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
+  background: var(--surf2); color: var(--muted); border: 1px solid var(--border);
+}
+.pill.cheap { color: var(--success); border-color: var(--success); background: #0d2e1a; }
+.pill.mid   { color: #FBD34D;       border-color: #FBD34D;       background: #2e2a0d; }
+.pill.dear  { color: var(--danger);  border-color: var(--danger);  background: #2e1416; }
+
+/* Status strip */
+.status-strip {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 16px; cursor: pointer;
+}
+.status-strip:hover { border-color: var(--accent); }
+.status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+.status-dot.on { background: var(--success); box-shadow: 0 0 0 4px #34d39926; }
+.status-text { flex: 1; min-width: 200px; }
+.status-title { font-size: 15px; font-weight: 700; }
+.status-detail { font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Hero: power flow + price/today */
+.hero { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px; }
+.hero-side { display: flex; flex-direction: column; gap: 14px; }
+
+.flow {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) 56px minmax(0,1fr) 56px minmax(0,1fr);
+  grid-template-rows: auto 36px auto 36px auto;
+  grid-template-areas:
+    ".    .     pv    .   ."
+    ".    .     lpv   .   ."
+    "grid lgrid house lev ev"
+    ".    .     lbatt .   ."
+    ".    .     batt  .   .";
+  align-items: center;
+  justify-items: stretch;
+  padding: 4px 0 6px;
+}
+.node-pv    { grid-area: pv;    --c: var(--pv); }
+.node-grid  { grid-area: grid;  --c: var(--gridc); }
+.node-house { grid-area: house; --c: var(--load); }
+.node-ev    { grid-area: ev;    --c: #A78BFA; }
+.node-batt  { grid-area: batt;  --c: var(--batt); }
+.flow-node {
+  background: var(--surf2);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--c);
+  border-radius: 12px;
+  padding: 10px 12px;
+  text-align: center;
+  min-width: 0;
+}
+.flow-node.clickable { cursor: pointer; transition: transform 0.12s, box-shadow 0.12s; }
+.flow-node.clickable:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+.node-icon { width: 22px; height: 22px; fill: none; stroke: var(--c); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.node-lbl { font-size: 11px; color: var(--muted); font-weight: 600; margin-top: 2px; }
+.node-val { font-size: 22px; font-weight: 700; line-height: 1.15; margin-top: 2px; white-space: nowrap; }
+.node-sub { font-size: 11px; color: var(--muted); min-height: 14px; margin-top: 2px; }
+.node-house .node-val { font-size: 26px; }
+
+.flow-line { position: relative; align-self: stretch; justify-self: stretch; }
+.flow-line i { position: absolute; border-radius: 3px; background: var(--border); }
+.flow-line.h i { left: 0; right: 0; top: calc(50% - 2px); height: 4px; }
+.flow-line.v i { top: 0; bottom: 0; left: calc(50% - 2px); width: 4px; }
+.flow-line.on i { background-color: transparent; }
+.flow-line.on.h i {
+  background-image: repeating-linear-gradient(90deg, var(--c) 0 8px, transparent 8px 16px);
+  background-size: 16px 4px; animation: flow-h var(--dur, 1.2s) linear infinite;
+}
+.flow-line.on.v i {
+  background-image: repeating-linear-gradient(180deg, var(--c) 0 8px, transparent 8px 16px);
+  background-size: 4px 16px; animation: flow-v var(--dur, 1.2s) linear infinite;
+}
+.flow-line.on.rev i { animation-direction: reverse; }
+@keyframes flow-h { from { background-position: 0 0; } to { background-position: 16px 0; } }
+@keyframes flow-v { from { background-position: 0 0; } to { background-position: 0 16px; } }
+#fl-pv   { --c: var(--pv); }
+#fl-grid { --c: var(--gridc); }
+#fl-ev   { --c: #A78BFA; }
+#fl-batt { --c: var(--batt); }
+
+.soc { display: flex; align-items: center; gap: 8px; margin-top: 8px; cursor: pointer; }
+.soc-track, .yield-track { flex: 1; height: 8px; border-radius: 4px; background: var(--bg); overflow: hidden; }
+.soc-fill   { height: 100%; width: 0; background: var(--batt); border-radius: 4px; transition: width 0.6s; }
+.soc-fill.low { background: var(--danger); }
+.soc-val { font-size: 14px; font-weight: 700; white-space: nowrap; }
+
+/* Price box */
+.big-val { font-size: 30px; font-weight: 800; line-height: 1.1; }
+.big-val .unit { font-size: 13px; }
+.rows { margin-top: 12px; display: flex; flex-direction: column; }
+.row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  padding: 7px 0; border-top: 1px solid var(--border); font-size: 12px;
+}
+.row.clickable { cursor: pointer; }
+.row.clickable:hover { color: var(--accent); }
+.row-val { font-weight: 700; white-space: nowrap; }
+.row-val .unit { font-size: 10px; }
+.trend { font-size: 11px; font-weight: 600; margin-left: 4px; }
+
+/* Today box */
+.today { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.today-item, .tile { background: var(--surf2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.today-item.clickable, .tile.clickable { cursor: pointer; }
+.today-item.clickable:hover, .tile.clickable:hover { border-color: var(--accent); }
+.t-lbl { font-size: 11px; color: var(--muted); font-weight: 600; }
+.t-val { font-size: 20px; font-weight: 700; margin-top: 4px; white-space: nowrap; }
+.t-sub { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+.t-sub .unit { font-size: 10px; }
+.yield-track { margin-top: 6px; flex: none; height: 6px; }
+.yield-fill { height: 100%; width: 0; background: var(--pv); border-radius: 3px; transition: width 0.6s; }
+
+/* Plan */
+#plan-header { margin-bottom: 8px; }
+#plan-legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 11px; }
+#plan-chart-wrap { position: relative; height: 460px; }
+#plan-footer-text { font-size: 10px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+.opts { position: relative; flex-shrink: 0; }
+.opts summary {
+  list-style: none; cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px;
+}
+.opts summary::-webkit-details-marker { display: none; }
+.opts summary:hover, .opts[open] summary { color: var(--accent); border-color: var(--accent); }
+.opts #plan-buttons {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.opts #plan-buttons button { font-size: 12px; padding: 6px 12px; text-align: left; }
+
+/* Collapsible sections */
+.fold { padding: 0; }
+.fold > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 12px;
+  padding: 14px 16px; user-select: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before {
+  content: '\25B8'; color: var(--muted); font-size: 12px; transition: transform 0.15s; display: inline-block;
+}
+.fold[open] > summary::before { transform: rotate(90deg); }
+.fold > summary:hover h2 { color: var(--accent); }
+.fold > :not(summary) { margin: 0 16px 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+
+@media (max-width: 1000px) {
+  .hero { grid-template-columns: 1fr; }
+}
+
 /* ── Mobile responsive ── */
 @media (max-width: 640px) {
+  .dash { gap: 10px; }
+  .box { padding: 12px; }
+  .flow { grid-template-columns: minmax(0,1fr) 18px minmax(0,1fr) 18px minmax(0,1fr); grid-template-rows: auto 22px auto 22px auto; }
+  .flow-node { padding: 8px 6px; }
+  .node-val { font-size: 16px; }
+  .node-house .node-val { font-size: 18px; }
+  .node-sub { font-size: 10px; }
+  .big-val { font-size: 24px; }
+  .today { grid-template-columns: 1fr 1fr; }
+  .t-val { font-size: 17px; }
+  .tiles { grid-template-columns: 1fr 1fr; }
+  .status-pills { width: 100%; }
+
   body { font-size: 12px; }
 
   /* Topbar: compact, hide timestamp */
@@ -394,24 +575,13 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   /* Dashboard chart grid: single column on narrow screens */
   #dash-charts { grid-template-columns: 1fr; }
 
-  /* Section columns stack on narrow screens */
-  .split-cols { grid-template-columns: 1fr; }
-  .split-cols > div + div .sec { margin-top: 18px; }
   .card  { padding: 10px 12px; }
   .card-val { font-size: 19px; }
 
   /* Plan panel card: tighter padding */
-  #plan-card { padding: 10px 8px !important; }
+  #plan-card { padding: 10px 8px; }
 
-  /* Plan header: stack legend above button row */
-  #plan-header { flex-direction: column !important; gap: 8px !important; }
-
-  /* Plan buttons: 2-column grid so they don't overflow */
-  #plan-buttons { display: grid !important; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
-  #plan-buttons button { font-size: 10px !important; padding: 5px 4px !important; }
-
-  /* Plan chart: fill available viewport height (badge removed, so ~240px overhead) */
-  #plan-chart-wrap { height: calc(100dvh - 245px) !important; }
+  #plan-chart-wrap { height: 380px; }
 
   /* Plan footer text: hide to save space */
   #plan-footer-text { display: none !important; }
@@ -446,190 +616,203 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 
   <!-- Dashboard -->
   <div id="panel-dashboard" class="panel active">
-    <div id="auto-status-bar" class="clickable" onclick="openAutoChart()" title="Auto mode — click for command history chart"
-         style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:12px;cursor:pointer">
-      <span style="font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap">Auto Mode</span>
-      <span id="d-auto-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border)">OFF</span>
-      <span id="d-export-badge" title="Reflects the auto-controller's decision: Disabled only when it is deliberately restricting feed-in (negative-export curtailment). Deficit self-consumption writes zero-export at a good price but reads Allowed — surplus would export the instant it appears." style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Export&nbsp;&#8212;</span>
-      <span id="d-ev-lock-badge" title="Battery lock: blocks discharge while Lyset detects the EV charger drawing power (Settings → Auto controller). Charging from PV surplus is unaffected." style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surf2);color:var(--muted);border:1px solid var(--border);white-space:nowrap">Batt&nbsp;&#8212;</span>
-      <div id="d-auto-action" style="font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No commands yet</div>
+    <div class="dash">
+
+    <!-- What Lyset is doing right now, in plain words -->
+    <div id="auto-status-bar" class="status-strip clickable" onclick="openAutoChart()" title="Click for the auto-mode command history">
+      <span id="d-status-dot" class="status-dot"></span>
+      <div class="status-text">
+        <div id="d-status-title" class="status-title">Waiting for data&hellip;</div>
+        <div id="d-auto-action" class="status-detail">No commands yet</div>
+      </div>
+      <div class="status-pills">
+        <span id="d-auto-badge" class="pill">Auto OFF</span>
+        <span id="d-export-badge" class="pill" title="Reflects the auto-controller's decision: Disabled only when it is deliberately restricting feed-in (negative-export curtailment). Deficit self-consumption writes zero-export at a good price but reads Allowed — surplus would export the instant it appears.">Export&nbsp;&#8212;</span>
+        <span id="d-ev-lock-badge" class="pill" title="Battery lock: blocks discharge while Lyset detects the EV charger drawing power (Settings → Auto controller). Charging from PV surplus is unaffected.">Batt&nbsp;&#8212;</span>
+      </div>
     </div>
 
-    <div class="sec">Plan — Actuals &amp; AI Forecast</div>
-    <div id="plan-card" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px">
-      <div id="plan-header" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="display:flex;flex-wrap:wrap;gap:12px 18px;font-size:11px" id="plan-legend"></div>
-        <div id="plan-buttons" style="display:flex;gap:8px;flex-shrink:0">
-          <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Predicted: Off</button>
-          <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="font-size:11px;padding:4px 10px;border-color:var(--border)">Bands: Off</button>
-          <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="font-size:11px;padding:4px 10px;border-color:var(--accent)">Smooth: On</button>
-          <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed" style="font-size:11px;padding:4px 10px">&#9881; Smoothing&hellip;</button>
+    <div class="hero">
+
+      <!-- Live power flow -->
+      <section class="box flow-box">
+        <div class="box-head">
+          <h2>Right now</h2>
+          <span class="box-hint">Tap a value for its history</span>
         </div>
+        <div class="flow">
+          <div class="flow-node node-pv clickable" onclick="openChart('active_power','PV Power','W','#F59E0B')">
+            <svg class="node-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            <div class="node-lbl">Solar</div>
+            <div class="node-val" id="d-pv">&#8212;<span class="unit">W</span></div>
+          </div>
+          <div class="flow-line v" id="fl-pv" style="grid-area:lpv"><i></i></div>
+
+          <div class="flow-node node-grid clickable" onclick="openChart('meter_active_power','Grid Power','W','#4F8EF7')">
+            <svg class="node-icon" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+            <div class="node-lbl">Grid</div>
+            <div class="node-val" id="d-grid">&#8212;<span class="unit">W</span></div>
+            <div class="node-sub" id="d-grid-sub"></div>
+          </div>
+          <div class="flow-line h" id="fl-grid" style="grid-area:lgrid"><i></i></div>
+
+          <div class="flow-node node-house clickable" onclick="openChart('house_load','House Load','W','#F87171')">
+            <svg class="node-icon" viewBox="0 0 24 24"><path d="M3 11 12 4l9 7"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
+            <div class="node-lbl">House</div>
+            <div class="node-val" id="d-load">&#8212;<span class="unit">W</span></div>
+          </div>
+
+          <div class="flow-line h" id="fl-ev" style="grid-area:lev"><i></i></div>
+          <div class="flow-node node-ev clickable" onclick="openEvPowerModal()">
+            <svg class="node-icon" viewBox="0 0 24 24"><path d="M5 17h14v-5l-2-5H7l-2 5z"/><path d="M5 12h14"/><circle cx="8" cy="17" r="1.6"/><circle cx="16" cy="17" r="1.6"/></svg>
+            <div class="node-lbl">EV</div>
+            <div class="node-val" id="d-ev-power">&#8212;<span class="unit">kW</span></div>
+          </div>
+
+          <div class="flow-line v" id="fl-batt" style="grid-area:lbatt"><i></i></div>
+          <div class="flow-node node-batt clickable" onclick="openChart('batt_power','Battery Power','W','#34D399')">
+            <svg class="node-icon" viewBox="0 0 24 24"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4"/></svg>
+            <div class="node-lbl">Battery</div>
+            <div class="node-val" id="d-batt">&#8212;<span class="unit">W</span></div>
+            <div class="node-sub" id="d-batt-sub"></div>
+            <div class="soc clickable" onclick="event.stopPropagation();openChart('batt_soc','Battery SOC','%','#34D399')" title="Battery charge level — click for history">
+              <div class="soc-track"><div class="soc-fill" id="d-soc-fill"></div></div>
+              <div class="soc-val" id="d-soc">&#8212;<span class="unit">%</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="hero-side">
+        <!-- Price -->
+        <section class="box clickable" onclick="openPriceModal('import')" title="Click for the price forecast chart">
+          <div class="box-head">
+            <h2>Electricity price</h2>
+            <span id="pr-level" class="pill">&#8212;</span>
+          </div>
+          <div class="big-val" id="pr-cur-import">&#8212;<span class="unit">DKK/kWh</span></div>
+          <div class="box-hint" id="pr-cur-import-sub"></div>
+          <div class="rows">
+            <div class="row"><span>Next hour <span class="trend" id="pr-next-trend"></span></span><span class="row-val" id="pr-next-import">&#8212;<span class="unit">DKK/kWh</span></span></div>
+            <div class="row"><span>Cheapest today <span class="muted" id="pr-day-min-time"></span></span><span class="row-val good" id="pr-day-min">&#8212;<span class="unit">DKK/kWh</span></span></div>
+            <div class="row"><span>Priciest today <span class="muted" id="pr-day-max-time"></span></span><span class="row-val bad" id="pr-day-max">&#8212;<span class="unit">DKK/kWh</span></span></div>
+            <div class="row clickable" onclick="event.stopPropagation();openPriceModal('export')" title="Click for the export price chart">
+              <span>Selling price <span class="muted" id="pr-cur-export-sub">Net metering ~spot price</span></span>
+              <span class="row-val" id="pr-cur-export">&#8212;<span class="unit">DKK/kWh</span></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Today -->
+        <section class="box">
+          <div class="box-head"><h2>Today</h2></div>
+          <div class="today">
+            <div class="today-item clickable" onclick="openDailyYieldModal()" title="Click for the last 30 days">
+              <div class="t-lbl">Solar produced</div>
+              <div class="t-val"><span id="d-daily-yield">&#8212;<span class="unit">kWh</span></span></div>
+              <div class="yield-track"><div class="yield-fill" id="d-yield-fill"></div></div>
+              <div class="t-sub">of <span id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></span> expected</div>
+            </div>
+            <div class="today-item clickable" onclick="openSavingsChart()" title="Click for the savings chart">
+              <div class="t-lbl">Saved so far</div>
+              <div class="t-val good"><span id="plan-saved">&#8212;<span class="unit">DKK</span></span></div>
+              <div class="t-sub">heading for <span id="plan-saved-fc">&#8212;<span class="unit">DKK</span></span></div>
+            </div>
+            <div class="today-item clickable" onclick="openEvPowerModal()" title="Click for EV charging history">
+              <div class="t-lbl">EV charged</div>
+              <div class="t-val"><span id="d-ev-day">&#8212;<span class="unit">kWh</span></span></div>
+            </div>
+          </div>
+        </section>
       </div>
-      <div id="plan-chart-wrap" style="position:relative;height:560px">
+    </div>
+
+    <!-- Plan -->
+    <section class="box" id="plan-card">
+      <div class="box-head">
+        <div>
+          <h2>Plan &mdash; measured &amp; forecast</h2>
+          <div class="box-hint">Solid = measured &middot; dashed = Lyset's plan &middot; vertical line = now &middot; battery % on the right axis</div>
+        </div>
+        <details class="opts">
+          <summary>Chart options</summary>
+          <div id="plan-buttons">
+            <button id="plan-pred-btn" onclick="togglePlanPred()" title="Overlay the past forecast (dashed) against actuals to gauge plan accuracy" style="border-color:var(--border)">Predicted: Off</button>
+            <button id="plan-bands-btn" onclick="togglePlanBands()" title="Show/hide the solar P10/P90 confidence band" style="border-color:var(--border)">Bands: Off</button>
+            <button id="plan-smooth-btn" onclick="togglePlanSmooth()" style="border-color:var(--accent)">Smooth: On</button>
+            <button onclick="openPlanSmoothSettings()" title="Choose which lines are smoothed">&#9881; Smoothing&hellip;</button>
+          </div>
+        </details>
+      </div>
+      <div id="plan-header"><div id="plan-legend"></div></div>
+      <div id="plan-chart-wrap">
         <canvas id="plan-chart"></canvas>
         <div id="plan-tip" style="position:absolute;pointer-events:none;z-index:5;opacity:0;transition:opacity .08s;background:rgba(28,32,50,0.92);border:1px solid #2D3555;border-radius:8px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,0.4)"></div>
       </div>
-      <div id="plan-footer-text" style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
-        Solid line = measured (past) &middot; dashed = AI plan (forecast) &middot; vertical line = now.
-        Plan combines Solcast solar, the learned consumption model, electricity prices and the
-        auto-mode controller's decision logic. Battery SOC is on the right axis.
-        Click any legend item to show/hide that line.
+      <div id="plan-footer-text">
+        The plan combines the Solcast solar forecast, the learned consumption model, electricity prices
+        and the auto-mode decision logic. Click a legend item to show/hide that line.
       </div>
-    </div>
+    </section>
 
-    <div class="sec">Trends (24 h)</div>
-    <div id="dash-charts"></div>
+    <!-- Collapsible detail sections (open/closed state is remembered) -->
+    <details class="fold" data-fold="trends" open>
+      <summary><h2>Last 24 hours</h2><span class="box-hint">Click a chart to zoom</span></summary>
+      <div id="dash-charts"></div>
+    </details>
 
-    <div class="sec">Power Flow</div>
-    <div class="cards">
-      <div class="card pv clickable"   onclick="openChart('active_power','PV Power','W','#F59E0B')">
-        <div class="card-top"><div class="card-lbl">PV Power</div><div class="card-times" id="t-d-pv"></div></div>
-        <div class="card-val" id="d-pv">&#8212;<span class="unit">W</span></div>
-      </div>
-      <div class="card grid clickable" onclick="openChart('meter_active_power','Grid Power','W','#4F8EF7')">
-        <div class="card-top"><div class="card-lbl">Grid Power</div><div class="card-times" id="t-d-grid"></div></div>
-        <div class="card-val" id="d-grid">&#8212;<span class="unit">W</span></div>
-        <div class="card-sub" id="d-grid-sub"></div>
-      </div>
-      <div class="card batt clickable" onclick="openChart('batt_power','Battery Power','W','#34D399')">
-        <div class="card-top"><div class="card-lbl">Battery Power</div><div class="card-times" id="t-d-batt"></div></div>
-        <div class="card-val" id="d-batt">&#8212;<span class="unit">W</span></div>
-        <div class="card-sub" id="d-batt-sub"></div>
-      </div>
-      <div class="card batt clickable" onclick="openChart('batt_soc','Battery SOC','%','#34D399')">
-        <div class="card-top"><div class="card-lbl">Battery SOC</div><div class="card-times" id="t-d-soc"></div></div>
-        <div class="card-val" id="d-soc">&#8212;<span class="unit">%</span></div>
-      </div>
-      <div class="card load clickable" onclick="openChart('house_load','House Load','W','#F87171')">
-        <div class="card-top"><div class="card-lbl">House Load</div><div class="card-times" id="t-d-load"></div></div>
-        <div class="card-val" id="d-load">&#8212;<span class="unit">W</span></div>
-      </div>
-      <div class="card acc clickable" onclick="openEvPowerModal()">
-        <div class="card-top"><div class="card-lbl">EV Power</div></div>
-        <div class="card-val" id="d-ev-power">&#8212;<span class="unit">kW</span></div>
-      </div>
-    </div>
-
-    <div class="split-cols">
-      <div>
-        <div class="sec">Energy Today</div>
-        <div class="cards">
-          <div class="card pv clickable" onclick="openDailyYieldModal()">
-            <div class="card-top"><div class="card-lbl">Produced</div></div>
-            <div class="card-val" id="d-daily-yield">&#8212;<span class="unit">kWh</span></div>
-          </div>
-          <div class="card pv clickable" onclick="openDailyYieldModal()">
-            <div class="card-top"><div class="card-lbl">Expected (Solcast)</div></div>
-            <div class="card-val" id="d-solar-fc-kwh">&#8212;<span class="unit">kWh</span></div>
-          </div>
+    <details class="fold" data-fold="savings" open>
+      <summary><h2>Savings</h2><span class="box-hint">vs. buying all power from the grid</span></summary>
+      <div class="tiles">
+        <div class="tile clickable" onclick="openSavingsBars('week', 'Savings this week — per day')">
+          <div class="t-lbl">This week</div>
+          <div class="t-val good" id="plan-week-saved">&#8212;<span class="unit">DKK</span></div>
+          <div class="t-sub">click for daily bars</div>
+        </div>
+        <div class="tile clickable" onclick="openSavingsBars('month', 'Savings this month — per week')">
+          <div class="t-lbl">This month</div>
+          <div class="t-val good" id="plan-month-saved">&#8212;<span class="unit">DKK</span></div>
+          <div class="t-sub">click for weekly bars</div>
+        </div>
+        <div class="tile clickable" onclick="openSavingsBars('year', 'Savings this year — per month')">
+          <div class="t-lbl">This year</div>
+          <div class="t-val good" id="plan-year-saved">&#8212;<span class="unit">DKK</span></div>
+          <div class="t-sub">click for monthly bars</div>
+        </div>
+        <div class="tile">
+          <div class="t-lbl">Would've paid today</div>
+          <div class="t-val" id="plan-would-pay">&#8212;<span class="unit">DKK</span></div>
+          <div class="t-sub">all house load at import price</div>
+        </div>
+        <div class="tile">
+          <div class="t-lbl">Actually paid today</div>
+          <div class="t-val" id="plan-did-pay">&#8212;<span class="unit">DKK</span></div>
+          <div class="t-sub">import cost &minus; export earnings</div>
+        </div>
+        <div class="tile">
+          <div class="t-lbl">PV system payback</div>
+          <div class="t-val" id="plan-roi-main" style="font-size:18px">&#8212;</div>
+          <div class="t-sub" id="plan-roi-sub">Set system cost &amp; installation date in Settings.</div>
+        </div>
+        <div class="tile">
+          <div class="t-lbl">Forecast accuracy (7 days)</div>
+          <div class="t-val" id="plan-acc-main" style="font-size:18px">&#8212;</div>
+          <div class="t-sub" id="plan-acc-sub">Solar &amp; load forecasts vs measured — learning over time.</div>
         </div>
       </div>
-      <div>
-        <div class="sec">EV</div>
-        <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">
-          <div class="card acc">
-            <div class="card-top"><div class="card-lbl">Charged Today</div></div>
-            <div class="card-val" id="d-ev-day">&#8212;<span class="unit">kWh</span></div>
-          </div>
-          <div class="card acc">
-            <div class="card-top"><div class="card-lbl">This Week</div></div>
-            <div class="card-val" id="d-ev-week">&#8212;<span class="unit">kWh</span></div>
-          </div>
-          <div class="card acc">
-            <div class="card-top"><div class="card-lbl">This Month</div></div>
-            <div class="card-val" id="d-ev-month">&#8212;<span class="unit">kWh</span></div>
-          </div>
-          <div class="card acc">
-            <div class="card-top"><div class="card-lbl">This Year</div></div>
-            <div class="card-val" id="d-ev-year">&#8212;<span class="unit">kWh</span></div>
-          </div>
-          <div class="card acc">
-            <div class="card-top"><div class="card-lbl">Lifetime</div></div>
-            <div class="card-val" id="d-ev-life">&#8212;<span class="unit">kWh</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
+    </details>
 
-    <div class="sec">Prices — Current Hour</div>
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">
-      <div class="card acc clickable" onclick="openPriceModal('import')" title="Click for the price forecast chart">
-        <div class="card-top"><div class="card-lbl">Import Price</div></div>
-        <div class="card-val" id="pr-cur-import">&#8212;<span class="unit">DKK/kWh</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-cur-import-sub"></div>
+    <details class="fold" data-fold="ev">
+      <summary><h2>EV charging</h2><span class="box-hint">Energy delivered to the car</span></summary>
+      <div class="tiles">
+        <div class="tile"><div class="t-lbl">This week</div><div class="t-val" id="d-ev-week">&#8212;<span class="unit">kWh</span></div></div>
+        <div class="tile"><div class="t-lbl">This month</div><div class="t-val" id="d-ev-month">&#8212;<span class="unit">kWh</span></div></div>
+        <div class="tile"><div class="t-lbl">This year</div><div class="t-val" id="d-ev-year">&#8212;<span class="unit">kWh</span></div></div>
+        <div class="tile"><div class="t-lbl">Lifetime</div><div class="t-val" id="d-ev-life">&#8212;<span class="unit">kWh</span></div></div>
       </div>
-      <div class="card acc clickable" onclick="openPriceModal('export')" title="Click for the price forecast chart">
-        <div class="card-top"><div class="card-lbl">Export (spot est.)</div></div>
-        <div class="card-val" id="pr-cur-export">&#8212;<span class="unit">DKK/kWh</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-cur-export-sub">Net metering ~spot price</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Next Hour Import</div></div>
-        <div class="card-val" id="pr-next-import">&#8212;<span class="unit">DKK/kWh</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-next-trend"></div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Today's Cheapest</div></div>
-        <div class="card-val" id="pr-day-min">&#8212;<span class="unit">DKK/kWh</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-day-min-time"></div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Today's Most Expensive</div></div>
-        <div class="card-val" id="pr-day-max">&#8212;<span class="unit">DKK/kWh</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px" id="pr-day-max-time"></div>
-      </div>
-    </div>
+    </details>
 
-    <div class="sec">Economics</div>
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))">
-      <div class="card acc clickable" onclick="openSavingsChart()">
-        <div class="card-top"><div class="card-lbl">Saved So Far</div></div>
-        <div class="card-val" id="plan-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">vs. buying all power from grid &middot; click for chart</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Forecast Today</div></div>
-        <div class="card-val" id="plan-saved-fc">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">predicted end-of-day total</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Would've Paid</div></div>
-        <div class="card-val" id="plan-would-pay">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">all household load at import price</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Net Grid Cost</div></div>
-        <div class="card-val" id="plan-did-pay">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">import cost &minus; export earnings</div>
-      </div>
-      <div class="card acc clickable" onclick="openSavingsBars('week', 'Savings this week — per day')">
-        <div class="card-top"><div class="card-lbl">This Week</div></div>
-        <div class="card-val" id="plan-week-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar week so far &middot; click: daily bars</div>
-      </div>
-      <div class="card acc clickable" onclick="openSavingsBars('month', 'Savings this month — per week')">
-        <div class="card-top"><div class="card-lbl">This Month</div></div>
-        <div class="card-val" id="plan-month-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar month so far &middot; click: weekly bars</div>
-      </div>
-      <div class="card acc clickable" onclick="openSavingsBars('year', 'Savings this year — per month')">
-        <div class="card-top"><div class="card-lbl">This Year</div></div>
-        <div class="card-val" id="plan-year-saved">&#8212;<span class="unit">DKK</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">calendar year so far &middot; click: monthly bars</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">PV System Payback</div></div>
-        <div class="card-val" id="plan-roi-main" style="font-size:20px">&#8212;</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-roi-sub">Set system cost &amp; installation date in Settings.</div>
-      </div>
-      <div class="card acc">
-        <div class="card-top"><div class="card-lbl">Forecast Accuracy (7d)</div></div>
-        <div class="card-val" id="plan-acc-main" style="font-size:20px">&#8212;</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7" id="plan-acc-sub">Solar &amp; load forecasts vs measured — learning over time.</div>
-      </div>
-    </div>
-
+    </div><!-- .dash -->
   </div>
 
   <!-- Log -->
@@ -1133,7 +1316,9 @@ async function loadEvChargerPower() {
   const win  = _dashWindow();
 
   // Power Flow "EV Power" card = the most recent derived interval (0 kW when idle).
-  setCard('d-ev-power', pts.length ? pts[pts.length - 1].y : null, 2);
+  _evKw = pts.length ? pts[pts.length - 1].y : null;
+  setCard('d-ev-power', _evKw, 1);
+  renderFlow();
 
   if (_evPowerChart) {
     _evPowerChart.data.datasets[0].data = pts;
@@ -1359,19 +1544,21 @@ function onData(d) {
     _modalChart.update('none');
   }
 
-  setCard('d-pv',          d.active_power,       0);
   setCard('d-grid',        d.meter_active_power, 0);
   setCard('d-batt',        d.batt_power,         0);
   setCard('d-load',        d.house_load,         0);
-  setCard('d-daily-yield', d.daily_yield,         2);
+  setCard('d-daily-yield', d.daily_yield,         1);
 
   _lastMeterPower = d.meter_active_power;
   updateGridSub();
   setText('d-batt-sub', d.batt_power == null ? '' :
     d.batt_power > 0 ? 'Charging' : d.batt_power < 0 ? 'Discharging' : '');
 
-  setCard('d-soc',   d.batt_soc,         1);
+  setCard('d-soc',   d.batt_soc,         0);
   setCard('plan-soc', d.batt_soc,        1);
+  renderFlow(d);
+  updateYieldBar();
+  renderStatus();
 
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
@@ -1981,9 +2168,11 @@ function updateSolarFcKwh() {
   const el = document.getElementById('d-solar-fc-kwh');
   if (el) {
     const unit = el.querySelector('.unit');
-    el.textContent = kwh.toFixed(2);
+    el.textContent = kwh.toFixed(1);
     if (unit) el.appendChild(unit);
   }
+  _solarFcTodayKwh = kwh;
+  updateYieldBar();
 }
 
 async function openDailyYieldModal() {
@@ -2237,12 +2426,12 @@ function onAutoMode(msg) {
   renderEvLockBadge();
 
   if (msg.enabled) {
-    badge.textContent = 'ON';
+    badge.textContent = 'Auto ON';
     badge.style.color = 'var(--success)';
     badge.style.borderColor = 'var(--success)';
     badge.style.background = '#0d2e1a';
   } else {
-    badge.textContent = 'OFF';
+    badge.textContent = 'Auto OFF';
     badge.style.color = 'var(--muted)';
     badge.style.borderColor = 'var(--border)';
     badge.style.background = 'var(--surf2)';
@@ -2250,9 +2439,10 @@ function onAutoMode(msg) {
 
   if (msg.last_action && msg.last_action !== '—') {
     action.textContent = msg.last_action;
-    action.style.color = 'var(--text)';
+    action.title = msg.last_action;
     setText('plan-action', msg.last_action);
   }
+  renderStatus();
 
   // Append new command to local history if this message carries one
   if (msg.cmd) {
@@ -3603,6 +3793,107 @@ function onPowerForecast(data) {
   renderDashCharts();
 }
 
+// ── Power-flow diagram, plain-language status, price level ───────────────────
+let _flowData = null;
+let _evKw = null;               // latest derived EV charge power (kW), from loadEvChargerPower
+let _solarFcTodayKwh = null;    // Solcast expected kWh for today, from updateSolarFcKwh
+
+// Animate one connector: `towardsPos` = flow runs left→right / top→bottom.
+function _setFlow(id, watts, towardsPos) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const on = watts != null && Math.abs(watts) >= 30;
+  el.classList.toggle('on', on);
+  el.classList.toggle('rev', on && !towardsPos);
+  if (on) el.style.setProperty('--dur', Math.max(0.35, 1.6 - Math.abs(watts) / 3000).toFixed(2) + 's');
+}
+
+function renderFlow(d) {
+  if (d) _flowData = d;
+  const f = _flowData || {};
+  // Solar = DC panel output. active_power is the inverter's AC output, which also
+  // carries battery discharge — at night it would show "solar" with no sun.
+  const pv = (f.pv1_power != null || f.pv2_power != null)
+    ? (f.pv1_power || 0) + (f.pv2_power || 0) : f.active_power;
+  setCard('d-pv', pv, 0);
+  _setFlow('fl-pv', pv, true);                                   // sun → house
+  const g = f.meter_active_power;
+  _setFlow('fl-grid', g, g == null || g >= 0);                   // import: grid → house
+  const b = f.batt_power;
+  _setFlow('fl-batt', b, b == null || b >= 0);                   // charging: house → battery
+  _setFlow('fl-ev', _evKw == null ? null : _evKw * 1000, true);  // house → car
+
+  const soc = f.batt_soc;
+  const fill = document.getElementById('d-soc-fill');
+  if (fill && soc != null) {
+    fill.style.width = Math.max(0, Math.min(100, soc)) + '%';
+    fill.classList.toggle('low', soc <= 15);
+  }
+}
+
+function updateYieldBar() {
+  const fill = document.getElementById('d-yield-fill');
+  const made = _flowData ? _flowData.daily_yield : null;
+  if (!fill || made == null || !_solarFcTodayKwh) return;
+  fill.style.width = Math.min(100, made / _solarFcTodayKwh * 100) + '%';
+}
+
+const _MODE_TEXT = {
+  grid_charge:      'Charging the battery from the grid while power is cheap',
+  sc_discharge:     'Battery is powering the house',
+  export_unlimited: 'Running on solar — surplus is sold to the grid',
+  export_limited:   'Export paused (price below zero) — solar goes to the battery',
+  hold_battery:     'Saving the battery for a pricier hour — house runs on the grid',
+  arbit_discharge:  'Selling stored energy while the price is high',
+  ev_locked:        'EV is charging — the grid feeds the car, battery is protected',
+};
+
+function renderStatus() {
+  const title = document.getElementById('d-status-title');
+  const dot   = document.getElementById('d-status-dot');
+  if (!title) return;
+  if (!_autoEnabled) {
+    const b = _flowData ? _flowData.batt_power : null;
+    title.textContent = 'Auto mode is off — ' +
+      (b == null ? 'the inverter runs on its own settings'
+       : b > 30 ? 'battery is charging' : b < -30 ? 'battery is powering the house' : 'battery is idle');
+  } else {
+    title.textContent = _MODE_TEXT[_lastAutoMode] || 'Auto mode is on';
+  }
+  if (dot) dot.classList.toggle('on', _autoEnabled);
+  // The last command is stale once auto is off — don't present it as current.
+  const detail = document.getElementById('d-auto-action');
+  if (detail) detail.style.display = _autoEnabled ? '' : 'none';
+}
+
+// Cheap / normal / expensive vs the trailing 14-day 25th/75th import percentiles.
+function renderPriceLevel(cur) {
+  const pill = document.getElementById('pr-level');
+  if (!pill) return;
+  const th = _priceThresholds && _priceThresholds.import;
+  pill.className = 'pill';
+  if (!cur || !th || th.p25 == null || th.p75 == null) { pill.textContent = '—'; return; }
+  const [cls, txt] = cur.import <= th.p25 ? ['cheap', 'Cheap']
+                   : cur.import >  th.p75 ? ['dear',  'Expensive'] : ['mid', 'Normal'];
+  pill.classList.add(cls);
+  pill.textContent = txt;
+  pill.title = `vs. the last 14 days: cheapest quarter ≤ ${th.p25.toFixed(2)}, priciest quarter > ${th.p75.toFixed(2)} DKK/kWh`;
+}
+
+// Collapsible sections remember open/closed per browser.
+function initFolds() {
+  document.querySelectorAll('details.fold[data-fold]').forEach(d => {
+    const key = 'lyset.fold.' + d.dataset.fold;
+    const saved = localStorage.getItem(key);
+    if (saved != null) d.open = saved === '1';
+    d.addEventListener('toggle', () => localStorage.setItem(key, d.open ? '1' : '0'));
+  });
+  // Chart options popover closes on outside click.
+  document.addEventListener('click', e => {
+    document.querySelectorAll('details.opts[open]').forEach(o => { if (!o.contains(e.target)) o.open = false; });
+  });
+}
+
 // ── Grid sub-label (direction + current price) ────────────────────────────────
 let _lastMeterPower = null;
 
@@ -3642,7 +3933,9 @@ async function fetchPriceThresholds() {
     const r = await fetch('/api/prices/percentiles?days=14');
     if (!r.ok) return;
     _priceThresholds = await r.json();
-    renderPriceChart();   // re-colour once thresholds land, if the chart already drew without them
+    // Re-colour once thresholds land, if the chart already drew without them.
+    if (document.getElementById('price-modal-overlay').classList.contains('active')) renderPriceChart();
+    renderPriceLevel(_curSlot());
   } catch (e) { /* keep any previous thresholds; chart falls back to neutral colour */ }
 }
 
@@ -3718,6 +4011,7 @@ function updatePriceCards() {
   el('pr-day-min-time').textContent = minRec ? _fmtTime(minRec.ts) : '';
   el('pr-day-max').innerHTML = maxRec ? `${fmt(maxP)}<span class="unit">DKK/kWh</span>` : '&#8212;<span class="unit">DKK/kWh</span>';
   el('pr-day-max-time').textContent = maxRec ? _fmtTime(maxRec.ts) : '';
+  renderPriceLevel(cur);
 }
 
 // Color a bar by where its price falls against the trailing-14-day 25th/75th
@@ -4028,8 +4322,11 @@ document.addEventListener('keydown', e => {
     else closeModal();
   }
 });
+initFolds();
 connectWS();
 loadEvSummary();
+fetchPriceThresholds();                          // Cheap/Normal/Expensive label on the price box
+setInterval(fetchPriceThresholds, 3_600_000);
 renderPlanChart();   // plan chart now lives on the dashboard, so draw it on load
 renderDashCharts();  // build the 3×2 trend grid (incl. the EV cell) immediately
 fetchPlanFullHistory();  // background-load full history for the Plan chart's pan/zoom
