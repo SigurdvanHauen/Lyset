@@ -93,6 +93,17 @@ except Exception:  # pragma: no cover — fallback if tz database is unavailable
 log = logging.getLogger(__name__)
 
 
+def grid_charge_enabled() -> bool:
+    """Whether the planner may charge the battery from the grid (branch 2). Default
+    OFF: a replay of the decision logic over 2026-08-17..10-13 (actual load, PV and
+    prices, perfect foresight, 90 % round trip) cost 691 DKK with it vs 662 DKK
+    without, in every month, and ~7 vs ~1.5 mode switches a day — each switch a burst
+    of writes to the fragile SDongle. A schedule optimised with hindsight would have
+    cost ~525 DKK, so grid charging CAN pay; this rule just doesn't capture it.
+    Toggled from Settings → Auto controller; read live."""
+    return os.getenv('GRID_CHARGE_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def arbitrage_enabled() -> bool:
     """Whether the planner may use export/discharge arbitrage (sell stored energy
     high, rebuy cheaper). Toggled from Settings → Auto controller; default ON.
@@ -1048,7 +1059,9 @@ class AutoController:
         # self-consumption can't discharge it back out before the peak.
         charge_window = _window(_CHARGE_HORIZON_H)
         cap_kwh = data.get('batt_rated_capacity') or 5.0
-        if charge_window and batt_soc < _GRID_CHARGE_TARGET_MAX and cap_kwh > 0:
+        if not grid_charge_enabled():
+            self._grid_charging = False
+        elif charge_window and batt_soc < _GRID_CHARGE_TARGET_MAX and cap_kwh > 0:
             step   = 15 * 60 * 1000
             end_ms = now_ms + _CHARGE_HORIZON_H * 3_600_000
             gc_slots = [

@@ -45,7 +45,7 @@ from .solar_calibration import SolarCalibration
 from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .nas_backup import NasBackupWorker, worker_from_env as nas_backup_from_env
 from .auto_controller import (
-    AutoController, arbitrage_enabled, arbitrage_min_gain, battery_load_w,
+    AutoController, arbitrage_enabled, arbitrage_min_gain, battery_load_w, grid_charge_enabled,
     NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_W, GRID_CHARGE_TARGET_MAX, GRID_CHARGE_RESTART_GAP,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
@@ -255,6 +255,7 @@ def _simulate_soc(
     prices_sorted = sorted(prices, key=lambda p: p['ts']) if prices else []
     price_ptr     = 0
     arb_enabled   = arbitrage_enabled()  # Settings toggle; mirrors _decide's gate
+    gc_enabled    = grid_charge_enabled()
     arb_min_gain  = arbitrage_min_gain()  # required % gain vs opportunity cost
 
     end_ms        = max(r['ts_ms'] for r in solar_fc)
@@ -326,7 +327,8 @@ def _simulate_soc(
                     gc_slots, soc, capacity_kwh, min_soc, import_dkk, CHARGE_MARGIN_DKK,
                     charge_eff, discharge_eff,
                 )
-                if shortfall_kwh > GRID_CHARGE_MIN_KWH and soc < GRID_CHARGE_TARGET_MAX:
+                if (gc_enabled and shortfall_kwh > GRID_CHARGE_MIN_KWH
+                        and soc < GRID_CHARGE_TARGET_MAX):
                     gc_target = min(GRID_CHARGE_TARGET_MAX,
                                     soc + shortfall_kwh / capacity_kwh * 100.0)
                     pre = [s['import'] for s in gc_slots if s['import'] is not None

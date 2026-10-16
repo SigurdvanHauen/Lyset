@@ -163,6 +163,12 @@ SCHEMA: list[dict] = [
         'fields': [
             {'key': 'AUTO_CONTROLLER_AUTOSTART', 'label': 'Auto-start controller', 'type': 'bool',
              'default': '1', 'help': 'Start the battery auto-controller when the server launches.'},
+            {'key': 'GRID_CHARGE_ENABLED', 'label': 'Allow grid charging', 'type': 'bool',
+             'default': '0', 'help': 'Let the planner charge the battery from the grid when power is '
+             'cheap, to cover a later expensive period. OFF by default: replaying the logic over '
+             'Aug–Oct 2026 it cost about 29 DKK more per 55 days than leaving it off (in every month), '
+             'and made ~5× more mode changes — each one a burst of commands to the SDongle. '
+             'Takes effect immediately.'},
             {'key': 'ARBITRAGE_ENABLED', 'label': 'Allow discharge arbitrage', 'type': 'bool',
              'default': '1', 'help': 'Let the planner force-discharge the battery to the grid when '
              'the export price beats the cheapest upcoming import. Turn off to keep stored energy '
