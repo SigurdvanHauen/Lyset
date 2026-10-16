@@ -144,6 +144,20 @@ SCHEMA: list[dict] = [
         ],
     },
     {
+        'group': 'Dashboard',
+        'note': 'Applies as soon as you save.',
+        'fields': [
+            {'key': 'CONN_HISTORY_ENABLED', 'label': 'Show connection history', 'type': 'bool',
+             'default': '1', 'help': 'Bar at the top of the dashboard showing when Lyset was and '
+             'wasn\'t receiving data from the inverter. Built from the stored poll history, so it '
+             'reaches back as far as that history goes.'},
+            {'key': 'CONN_HISTORY_HOURS', 'label': 'Connection history span (hours)', 'type': 'number',
+             'default': '12', 'min': 1, 'max': 48, 'step': 1,
+             'help': 'Time span the bar shows when the dashboard opens — whole hours, 1 to 48. '
+             'Drag the bar or use ‹ › to scroll back in time.'},
+        ],
+    },
+    {
         'group': 'Auto controller',
         'note': 'Auto-start applies on next server restart; arbitrage applies immediately.',
         'fields': [
@@ -265,6 +279,20 @@ def _format_value(val: str) -> str:
     return '"' + val.replace('"', '\\"') + '"'
 
 
+def _bounded(key: str, val: str) -> str:
+    """Clamp a number field that declares min/max (and round it when step is 1);
+    an unparsable value falls back to the field's default."""
+    f = _FIELDS[key]
+    if f.get('type') != 'number' or ('min' not in f and 'max' not in f):
+        return val
+    try:
+        x = float(val)
+    except ValueError:
+        return f.get('default', '')
+    x = max(f.get('min', x), min(f.get('max', x), x))
+    return str(int(round(x))) if f.get('step') == 1 else str(x)
+
+
 def write_settings(updates: dict[str, str]) -> list[str]:
     """
     Merge ``updates`` into ``.env``, preserving comments, blank lines, ordering,
@@ -272,7 +300,7 @@ def write_settings(updates: dict[str, str]) -> list[str]:
 
     Only keys present in the schema are accepted; unknown keys are ignored.
     """
-    updates = {k: ('' if v is None else str(v)) for k, v in updates.items() if k in _FIELDS}
+    updates = {k: _bounded(k, '' if v is None else str(v)) for k, v in updates.items() if k in _FIELDS}
     if not updates:
         return []
 

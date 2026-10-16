@@ -540,6 +540,28 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
 .fold > :not(summary) { margin: 0 16px 16px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
 
+/* Connection history bar */
+.conn-box { padding: 12px 16px; position: relative; }
+.conn-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.conn-nav { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.conn-nav button { font-size: 12px; padding: 2px 10px; }
+.conn-track {
+  position: relative; height: 22px; border-radius: 5px; overflow: hidden;
+  background: var(--surf2); cursor: grab; touch-action: pan-y; user-select: none;
+}
+.conn-track.dragging { cursor: grabbing; }
+.conn-seg { position: absolute; top: 0; bottom: 0; }
+.conn-seg.up      { background: var(--success); }
+.conn-seg.down    { background: var(--danger); }
+.conn-seg.unknown { background: var(--surf2); }
+.conn-axis { position: relative; height: 16px; margin-top: 3px; font-size: 10px; color: var(--muted); }
+.conn-axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.conn-tip {
+  position: absolute; z-index: 30; pointer-events: none; display: none;
+  background: rgba(28,32,50,0.95); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 9px; font-size: 11px; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+}
+
 @media (max-width: 1000px) {
   .hero { grid-template-columns: 1fr; }
 }
@@ -617,6 +639,23 @@ input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color:
   <!-- Dashboard -->
   <div id="panel-dashboard" class="panel active">
     <div class="dash">
+
+    <!-- Inverter connection history (Settings → Dashboard) -->
+    <section class="box conn-box" id="conn-history" style="display:none">
+      <div class="conn-head">
+        <h2>Inverter connection</h2>
+        <span class="box-hint" id="conn-summary"></span>
+        <div class="conn-nav">
+          <button onclick="connHistoryStep(-1)" title="Earlier">&#8249;</button>
+          <span id="conn-range"></span>
+          <button onclick="connHistoryStep(1)" title="Later" id="conn-next">&#8250;</button>
+          <button onclick="connHistoryNow()" id="conn-now" title="Back to now">Now</button>
+        </div>
+      </div>
+      <div class="conn-track" id="conn-track" title=""></div>
+      <div class="conn-axis" id="conn-axis"></div>
+      <div class="conn-tip" id="conn-tip"></div>
+    </section>
 
     <!-- What Lyset is doing right now, in plain words -->
     <div id="auto-status-bar" class="status-strip clickable" onclick="openAutoChart()" title="Click for the auto-mode command history">
@@ -1480,6 +1519,7 @@ function onConn(ok, msg) {
   badge.textContent = ok ? 'Connected' : (msg.length < 50 ? msg : 'Disconnected');
   badge.className   = ok ? 'connected' : (msg.toLowerCase().includes('fail') ? 'err' : '');
   addLog(ok ? 'info' : 'warn', '[connection] ' + msg);
+  if (_conn.end == null) connHistoryLoad();   // reflect a state change on the bar right away
 }
 
 // ── History (server-persisted data loaded on connect) ─────────────────────────
@@ -3930,6 +3970,179 @@ function initFolds() {
   });
 }
 
+// ── Inverter connection history bar ──────────────────────────────────────────
+// Periods come from /api/connection/history (derived from stored polls). `end` is
+// the right edge of the view in ms, or null = live (follows now).
+const _conn = { enabled: false, spanH: 12, end: null, segs: [], oldest: null, seq: 0, drag: null };
+const _CONN_LABEL = { up: 'Connected', down: 'Not connected', unknown: 'No data' };
+
+function connHistoryConfigure(enabled, hours) {
+  if (hours !== _conn.spanH) _conn.end = null;
+  _conn.enabled = enabled;
+  _conn.spanH = hours;
+  document.getElementById('conn-history').style.display = enabled ? '' : 'none';
+  if (enabled) connHistoryLoad();
+}
+
+function _connWindow() {
+  const end = _conn.end == null ? Date.now() : _conn.end;
+  return [end - _conn.spanH * 3_600_000, end];
+}
+
+// Clamp a proposed right edge: at/after now → live; never scroll past the oldest data.
+function _connSetEnd(end) {
+  const span = _conn.spanH * 3_600_000;
+  if (_conn.oldest) end = Math.max(end, _conn.oldest * 1000 + span / 2);
+  _conn.end = end >= Date.now() - 30_000 ? null : end;
+}
+
+function connHistoryStep(dir) {
+  const [a, b] = _connWindow();
+  _connSetEnd(b + dir * (b - a) / 2);
+  connHistoryRender();
+  connHistoryLoad();
+}
+
+function connHistoryNow() { _conn.end = null; connHistoryLoad(); }
+
+async function connHistoryLoad() {
+  if (!_conn.enabled) return;
+  const [a, b] = _connWindow();
+  const seq = ++_conn.seq;
+  try {
+    const r = await fetch(`/api/connection/history?from_ts=${a / 1000}&to_ts=${b / 1000}`);
+    if (!r.ok || seq !== _conn.seq) return;
+    const j = await r.json();
+    _conn.segs = j.segments || [];
+    _conn.oldest = j.oldest_ts;
+    connHistoryRender();
+  } catch (e) { /* keep the last drawing */ }
+}
+
+function _fmtDur(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+function _fmtConnT(ms, withDay) {
+  const d = new Date(ms);
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return withDay ? d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }) + ' ' + hm : hm;
+}
+
+function connHistoryRender() {
+  const track = document.getElementById('conn-track');
+  const axis  = document.getElementById('conn-axis');
+  if (!track || !_conn.enabled) return;
+  const [a, b] = _connWindow();
+  const span = b - a;
+  const pct = t => (t - a) / span * 100;
+
+  track.innerHTML = '';
+  let upMs = 0, knownMs = 0, outages = 0, downMs = 0;
+  for (const s of _conn.segs) {
+    const x0 = Math.max(a, s.from * 1000), x1 = Math.min(b, s.to * 1000);
+    if (x1 <= x0) continue;
+    const d = document.createElement('div');
+    d.className = 'conn-seg ' + s.state;
+    d.style.left  = pct(x0) + '%';
+    d.style.width = Math.max(0.2, pct(x1) - pct(x0)) + '%';
+    track.appendChild(d);
+    if (s.state !== 'unknown') knownMs += x1 - x0;
+    if (s.state === 'up') upMs += x1 - x0;
+    if (s.state === 'down') { outages++; downMs += x1 - x0; }
+  }
+
+  // Hour ticks aligned to local time; spacing grows with the span.
+  const H = 3_600_000;
+  const stepH = span <= 3 * H ? 0.5 : span <= 8 * H ? 1 : span <= 16 * H ? 2 : span <= 30 * H ? 4 : 6;
+  const step = stepH * H;
+  const off = new Date(a).getTimezoneOffset() * 60_000;
+  axis.innerHTML = '';
+  for (let t = Math.ceil((a - off) / step) * step + off; t < b; t += step) {
+    const p = pct(t);
+    if (p < 3 || p > 97) continue;
+    const d = new Date(t);
+    const lbl = document.createElement('span');
+    lbl.style.left = p + '%';
+    lbl.textContent = (d.getHours() === 0 && d.getMinutes() === 0)
+      ? d.toLocaleDateString([], { weekday: 'short', day: 'numeric' })
+      : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    axis.appendChild(lbl);
+  }
+
+  const live = _conn.end == null;
+  document.getElementById('conn-range').textContent = live
+    ? `last ${_conn.spanH} h`
+    : `${_fmtConnT(a, true)} – ${_fmtConnT(b, new Date(a).toDateString() !== new Date(b).toDateString())}`;
+  document.getElementById('conn-next').disabled = live;
+  document.getElementById('conn-now').style.display = live ? 'none' : '';
+  document.getElementById('conn-summary').textContent = knownMs
+    ? `${(upMs / knownMs * 100).toFixed(upMs === knownMs ? 0 : 1)}% connected` +
+      (outages ? ` · ${outages} outage${outages > 1 ? 's' : ''}, ${_fmtDur(downMs)} in total` : ' · no outages')
+    : 'no data for this period';
+}
+
+function connHistoryInit() {
+  const track = document.getElementById('conn-track');
+  const tip   = document.getElementById('conn-tip');
+  const box   = document.getElementById('conn-history');
+
+  track.addEventListener('pointerdown', e => {
+    _conn.drag = { x: e.clientX, end: _connWindow()[1], moved: false };
+    track.setPointerCapture(e.pointerId);
+    track.classList.add('dragging');
+  });
+  track.addEventListener('pointermove', e => {
+    const rect = track.getBoundingClientRect();
+    const [a, b] = _connWindow();
+    if (_conn.drag) {
+      const dx = e.clientX - _conn.drag.x;
+      if (Math.abs(dx) > 3) _conn.drag.moved = true;
+      _connSetEnd(_conn.drag.end - dx / rect.width * (b - a));
+      tip.style.display = 'none';
+      connHistoryRender();
+      return;
+    }
+    const t = a + (e.clientX - rect.left) / rect.width * (b - a);
+    const s = _conn.segs.find(g => g.from * 1000 <= t && t < g.to * 1000);
+    if (!s) { tip.style.display = 'none'; return; }
+    const sameDay = new Date(s.from * 1000).toDateString() === new Date(s.to * 1000).toDateString();
+    const open = _conn.end == null && s.to * 1000 >= Date.now() - 60_000;
+    tip.innerHTML = `<b>${_CONN_LABEL[s.state]}</b><br>${_fmtConnT(s.from * 1000, true)} → ` +
+      (open ? 'now' : _fmtConnT(s.to * 1000, !sameDay)) +
+      ` <span style="color:var(--muted)">(${_fmtDur(s.to * 1000 - s.from * 1000)})</span>`;
+    tip.style.display = 'block';
+    const boxRect = box.getBoundingClientRect();
+    const x = e.clientX - boxRect.left;
+    tip.style.left = Math.min(x + 12, boxRect.width - tip.offsetWidth - 8) + 'px';
+    tip.style.top  = (rect.bottom - boxRect.top + 6) + 'px';
+  });
+  const endDrag = () => {
+    if (!_conn.drag) return;
+    const moved = _conn.drag.moved;
+    _conn.drag = null;
+    track.classList.remove('dragging');
+    if (moved) connHistoryLoad();
+  };
+  track.addEventListener('pointerup', endDrag);
+  track.addEventListener('pointercancel', endDrag);
+  track.addEventListener('pointerleave', () => { if (!_conn.drag) tip.style.display = 'none'; });
+  // Horizontal trackpad swipe (or Shift+wheel) scrolls through time.
+  track.addEventListener('wheel', e => {
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+    if (!d) return;
+    e.preventDefault();
+    const [a, b] = _connWindow();
+    _connSetEnd(b + d / track.clientWidth * (b - a));
+    connHistoryRender();
+    clearTimeout(_conn.wheelTimer);
+    _conn.wheelTimer = setTimeout(connHistoryLoad, 200);
+  }, { passive: false });
+
+  // Live view: redraw every minute so the right edge keeps up with now.
+  setInterval(() => { if (_conn.enabled && _conn.end == null) connHistoryLoad(); }, 60_000);
+}
+
 // ── Grid sub-label (direction + current price) ────────────────────────────────
 let _lastMeterPower = null;
 
@@ -4264,7 +4477,11 @@ function renderSettingsForm(groups) {
         input.dataset.key = f.key;
         input.type = f.type === 'password' ? 'password'
                    : f.type === 'number' ? 'number' : 'text';
-        if (f.type === 'number') { input.step = 'any'; }
+        if (f.type === 'number') {
+          input.step = f.step != null ? f.step : 'any';
+          if (f.min != null) input.min = f.min;
+          if (f.max != null) input.max = f.max;
+        }
         input.value = f.value != null ? f.value : '';
         if (f.placeholder) input.placeholder = f.placeholder;
         iwrap.appendChild(input);
@@ -4327,7 +4544,12 @@ async function saveSettings() {
   }
 }
 
-function syncTopbarFromValues(_values) { /* topbar inputs removed */ }
+// Apply the dashboard's own settings (Settings → Dashboard) to the page.
+function syncTopbarFromValues(values) {
+  const on = !['0', 'false', 'no', 'off', ''].includes(String(values.CONN_HISTORY_ENABLED ?? '1').trim().toLowerCase());
+  const hrs = Math.round(Math.min(48, Math.max(1, Number(values.CONN_HISTORY_HOURS) || 12)));
+  connHistoryConfigure(on, hrs);
+}
 
 function closeSettings() {
   document.getElementById('settings-overlay').classList.remove('active');
@@ -4337,8 +4559,7 @@ function settingsOverlayClick(e) {
   if (e.target.id === 'settings-overlay') closeSettings();
 }
 
-// Populate the topbar connect inputs from the persisted .env so they reflect
-// the real configured inverter, not the hardcoded HTML defaults.
+// Load the persisted settings at boot and apply the dashboard ones.
 async function loadTopbarFromSettings() {
   try {
     const r = await fetch('/api/settings');
@@ -4359,6 +4580,8 @@ document.addEventListener('keydown', e => {
   }
 });
 initFolds();
+connHistoryInit();
+loadTopbarFromSettings();
 connectWS();
 loadEvSummary();
 fetchPriceThresholds();                          // Cheap/Normal/Expensive label on the price box

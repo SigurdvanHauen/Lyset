@@ -679,6 +679,15 @@ def load_pv_avg_by_period_end(from_ts: float, to_ts: float,
             if n >= min_samples and not (clipped or 0) > 0.5}
 
 
+def load_poll_timestamps(from_ts: float, to_ts: float) -> list[float]:
+    """Unix-second timestamps of the stored polls in [from_ts, to_ts], ascending."""
+    with _lock:
+        rows = _get_con().execute(
+            'SELECT ts FROM polls WHERE ts >= ? AND ts <= ? ORDER BY ts', (from_ts, to_ts),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
 def poll_ts_range() -> tuple[float, float] | None:
     """Return (earliest_ts, latest_ts) Unix seconds of stored polls, or None."""
     with _lock:

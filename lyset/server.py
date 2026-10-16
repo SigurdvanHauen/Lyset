@@ -524,12 +524,16 @@ def _simulate_soc_with_bands(
         for f in ('soc', 'batt_w', 'grid_w'):
             ov = o.get(f) if o else None
             pv = p.get(f) if p else None
-            if ov is None or pv is None:
+            mv = r.get(f)
+            if ov is None or pv is None or mv is None:
                 r[f + '_p10'] = r[f + '_p90'] = None
             else:
+                # The envelope runs can take different decisions than the mean run
+                # (one grid-charges, the other doesn't), so both can sit on the same
+                # side of the mean — the band must still contain the plotted line.
                 nd = 1 if f == 'soc' else 0
-                r[f + '_p10'] = round(min(ov, pv), nd)
-                r[f + '_p90'] = round(max(ov, pv), nd)
+                r[f + '_p10'] = round(min(ov, pv, mv), nd)
+                r[f + '_p90'] = round(max(ov, pv, mv), nd)
     return base
 
 
@@ -1674,6 +1678,67 @@ async def api_automode_set(body: AutoModeRequest):
         'ev_lock_reason': _auto_controller.ev_lock_reason,
     })
     return {'ok': True, 'enabled': _auto_controller.enabled}
+
+
+def _connection_segments(from_ts: float, to_ts: float) -> dict:
+    """Connected / not-connected periods over [from_ts, to_ts], derived from the stored
+    polls: every saved poll means the inverter answered, and a gap longer than a few
+    poll cycles means it didn't. Uses poll history rather than live events so the bar
+    covers the past too. 'unknown' = before the oldest stored poll."""
+    interval = _worker.poll_interval if _worker else _env_float('INVERTER_POLL_INTERVAL', 30.0)
+    max_gap  = max(180.0, 4 * interval)
+    now      = time.time()
+    end      = min(to_ts, now)
+    span     = store.poll_ts_range()
+    if not span or end <= from_ts:
+        return {'segments': [], 'oldest_ts': None, 'max_gap_s': max_gap}
+    oldest = span[0]
+    ts = store.load_poll_timestamps(from_ts - max_gap, end)
+
+    segs: list[list] = []
+    def add(a: float, b: float, state: str):
+        a, b = max(a, from_ts), min(b, end)
+        if b <= a:
+            return
+        if segs and segs[-1][2] == state:
+            segs[-1][1] = b
+        else:
+            segs.append([a, b, state])
+
+    cursor = from_ts
+    if oldest > from_ts:
+        add(from_ts, oldest, 'unknown')
+        cursor = oldest
+    prev = None
+    for t in ts:
+        if prev is None:
+            if t - cursor > max_gap:
+                add(cursor, t, 'down')
+        elif t - prev > max_gap:
+            add(cursor, prev, 'up')
+            add(prev, t, 'down')
+        else:
+            prev = t
+            continue
+        cursor = t
+        prev = t
+    if prev is None:
+        add(cursor, end, 'down')
+    else:
+        add(cursor, prev, 'up')
+        if end - prev > max_gap:
+            add(prev, end, 'down')
+        else:
+            add(prev, end, 'up')
+    return {'segments': [{'from': a, 'to': b, 'state': s} for a, b, s in segs],
+            'oldest_ts': oldest, 'max_gap_s': max_gap}
+
+
+@app.get('/api/connection/history')
+async def api_connection_history(from_ts: float, to_ts: float):
+    to_ts = min(to_ts, from_ts + 7 * 86400)   # bound the scan
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _connection_segments, from_ts, to_ts)
 
 
 @app.get('/api/history/series')
