@@ -173,8 +173,8 @@ def ev_lock_enabled() -> bool:
     it detects the EV charger drawing power (charging from PV surplus still
     works — only discharge is blocked). On by default. Independent of
     ev_green_charging() — that flag only affects the export-limit register
-    (47415) via _set_export_limit; the lock's discharge-blocking (47077 cap,
-    forced-idle override, skipping arbitrage) never reads it, and the lock's
+    (47415) via _set_export_limit; the lock's discharge-blocking (forced-idle
+    override, skipping arbitrage) never reads it, and the lock's
     own branches always pass their own export decision explicitly. Toggled
     from Settings → Auto controller; read live so a Settings save applies
     without a restart."""
@@ -921,7 +921,7 @@ class AutoController:
         if wm is not None and int(round(wm)) != 2:
             worker.write_u16(47086, 2, 'AutoCtrl: mode=max self-consumption')
 
-    def _ensure_power_limits(self, worker, data: dict, max_discharge_w: Optional[float] = None):
+    def _ensure_power_limits(self, worker, data: dict):
         """
         Keep the battery's max charge / max discharge power (47075 / 47077) at the
         full rate. These are GLOBAL limits that cap the battery in every mode — a low
@@ -930,21 +930,13 @@ class AutoController:
         branches used to set them only when forcing; asserting them here makes them
         right in self-consumption too.
 
-        `max_discharge_w`, when given, overrides the normal full-rate discharge
-        target — the EV lock passes 0 here as a hardware-level belt-and-braces
-        measure (on top of _decide() skipping the arbitrage branch and forcing idle
-        instead of self-consumption-with-discharge while locked), in case a forced
-        discharge command elsewhere doesn't respect this cap the way self-consumption
-        does.
-
         Read-back driven where the SDongle exposes the registers (re-issue only when
         the polled value is wrong); optimistic fallback (state-gated _apply) when they
         don't read back, so they're still set at least once per resync.
         """
-        discharge_target = _BATT_MAX_DISCHARGE_W if max_discharge_w is None else max_discharge_w
         for addr, key, target in (
             (47075, 'max_charge_power',    _BATT_MAX_CHARGE_W),
-            (47077, 'max_discharge_power', discharge_target),
+            (47077, 'max_discharge_power', _BATT_MAX_DISCHARGE_W),
         ):
             cur = data.get(key)
             if cur is None:
@@ -1119,9 +1111,11 @@ class AutoController:
             self._applied.clear()
 
         # Keep the battery's max charge/discharge power at the full rate in every mode
-        # (a low max-discharge-power pins native self-consumption to a trickle) — unless
-        # the EV lock is active, in which case cap discharge at 0 W (charging unaffected).
-        self._ensure_power_limits(worker, data, max_discharge_w=0 if ev_lock_active else None)
+        # (a low max-discharge-power pins native self-consumption to a trickle). The EV
+        # lock no longer caps discharge at 0 W here: its forced idle already stops
+        # discharging, and on 2026-10-16 a lost "restore to 2500 W" write left the
+        # battery unable to discharge for hours after the lock released.
+        self._ensure_power_limits(worker, data)
 
         # Grid export limitation (47415) is decided PER BRANCH below, each calling
         # _set_export_limit exactly once before returning — so at most one export

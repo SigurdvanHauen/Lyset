@@ -28,6 +28,14 @@ log = logging.getLogger(__name__)
 # whatever the caller asks for. A changed value always goes through, as do manual
 # writes from the dashboard.
 _AUTO_REPEAT_MIN_S = 300.0
+
+# Since the dongle moved to Wi-Fi (2026-10-16) replies regularly take longer than
+# the old 5 s. A reply that arrives after we gave up stays in the socket and is
+# read as the answer to the NEXT request, so one timeout cascaded into a run of
+# "No response received" errors — including the write that should have lifted a
+# 0 W discharge cap, leaving the battery blocked for hours. So: wait longer, and
+# after any I/O error open a fresh connection before retrying once.
+_TIMEOUT_S = 10.0
 _AUTO_PREFIX = 'AutoCtrl'
 
 
@@ -129,7 +137,7 @@ class ModbusWorker(threading.Thread):
         client = self._client
         own = False
         if client is None:
-            client = ModbusTcpClient(host=self.host, port=self.port, timeout=5, retries=0)
+            client = ModbusTcpClient(host=self.host, port=self.port, timeout=_TIMEOUT_S, retries=0)
             if not client.connect():
                 return None
             own = True
@@ -174,22 +182,29 @@ class ModbusWorker(threading.Thread):
                     self._last_auto_write.pop(47247, None)
                     self._last_auto_write.pop(47249, None)
                 self._last_auto_write[req.address] = (vals, now)
-            try:
-                result = self._client.write_registers(
-                    req.address, req.values, device_id=self.slave_id
-                )
-                if result.isError():
-                    msg = f'{req.description}: Modbus error {result}'
-                    log.warning(msg)
+            for attempt in range(2):
+                try:
+                    result = self._client.write_registers(
+                        req.address, req.values, device_id=self.slave_id
+                    )
+                    if result.isError():
+                        msg = f'{req.description}: Modbus error {result}'
+                        log.warning(msg)
+                        self._on_write_result(False, msg)
+                    else:
+                        msg = f'{req.description}: OK'
+                        log.info(msg)
+                        self._on_write_result(True, msg)
+                    break
+                except Exception as exc:
+                    if attempt == 0:
+                        log.debug('Retrying write %s on a fresh connection after: %s',
+                                  req.description, exc)
+                        self._open_tcp()
+                        continue
+                    msg = f'{req.description}: {exc}'
+                    log.error(msg)
                     self._on_write_result(False, msg)
-                else:
-                    msg = f'{req.description}: OK'
-                    log.info(msg)
-                    self._on_write_result(True, msg)
-            except Exception as exc:
-                msg = f'{req.description}: {exc}'
-                log.error(msg)
-                self._on_write_result(False, msg)
 
     def _open_tcp(self) -> bool:
         """Open a fresh TCP connection. No callbacks — state management is in _run_loop."""
@@ -200,7 +215,7 @@ class ModbusWorker(threading.Thread):
                 pass
             self._client = None
         try:
-            self._client = ModbusTcpClient(host=self.host, port=self.port, timeout=5, retries=0)
+            self._client = ModbusTcpClient(host=self.host, port=self.port, timeout=_TIMEOUT_S, retries=0)
             return self._client.connect()
         except Exception as exc:
             log.debug('TCP connect error: %s', exc)
@@ -244,7 +259,9 @@ class ModbusWorker(threading.Thread):
                     break  # success
                 except Exception as exc:
                     if attempt == 0:
-                        log.debug('Retrying batch %d+%d after error: %s', start, length, exc)
+                        log.debug('Retrying batch %d+%d on a fresh connection after: %s',
+                                  start, length, exc)
+                        self._open_tcp()
                     else:
                         # TCP failures will surface on the next cycle when _open_tcp() fails.
                         log.warning('Batch error at %d+%d: %s', start, length, exc)
