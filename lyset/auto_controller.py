@@ -311,6 +311,11 @@ _EV_LOCK_SUSTAIN_TICKS  = 3     # ticks (45 s @ _EVAL_INTERVAL_S) the house-load
                                 # heuristic must hold before engaging/releasing the EV
                                 # lock — filters out short spikes (kettle, toaster) and
                                 # read glitches.
+_FORCED_PERIOD_MIN      = 30    # duration sent with every forced charge/discharge (47083, with
+                                # 47246=0 'duration' mode). Firmware after Huawei's 2026-10-16
+                                # update had 47083=0, so each 'force CHARGE' was accepted and ended
+                                # at once. Renewed every 15-min slot while forcing; if Lyset stops,
+                                # the inverter falls back by itself within 30 min.
 _EV_LOCK_MIN_HOLD_S     = 300.0 # a lock state change sticks this long (= the cloud poll interval).
                                 # Without it the cloud signal (counter rose in the last ~5 min,
                                 # so it lags the car stopping) and the load check (low load →
@@ -461,6 +466,7 @@ class AutoController:
         self._ev_lock_changed_ts: float           = 0.0  # time.time() of the last lock state change
         self._readback: dict                      = {}   # this tick's poll, for _apply's read-back check
         self._applied_ts: dict[int, float]        = {}   # addr → time.time() it was last written
+        self._forced_slot: Optional[int]          = None # 15-min slot the forced period was last renewed
         self._ev_cloud_charging:  Optional[bool]  = None  # latest FusionSolar cross-check signal
 
     def set_command_callback(self, cb: Callable[[str, str, bool], None]):
@@ -670,6 +676,19 @@ class AutoController:
 
     # ── State-gated register writes ───────────────────────────────────────────
 
+    def _forced(self, cmd: int, label: str) -> list[tuple]:
+        """_apply() registers that start a forced charge (1) or discharge (2): duration
+        mode, a _FORCED_PERIOD_MIN period, then the command. Re-sent once per 15-min
+        slot so the period never runs out while the plan keeps forcing."""
+        slot = int(time.time() // 900)
+        if slot != self._forced_slot:
+            self._forced_slot = slot
+            self._applied.pop(47083, None)
+            self._applied.pop(47100, None)
+        return [(16, 47246, 0, 'AutoCtrl: forced setting mode=duration'),
+                (16, 47083, _FORCED_PERIOD_MIN, f'AutoCtrl: forced period {_FORCED_PERIOD_MIN} min'),
+                (16, 47100, cmd, label)]
+
     def _apply(self, worker, regs: list[tuple]):
         """
         Write only the registers whose value changed since the last applied state.
@@ -695,8 +714,9 @@ class AutoController:
             if rb is not None and fresh and int(round(rb)) != val:
                 self._applied.pop(addr, None)
                 if addr in (47086, 47100):
-                    self._applied.pop(47247, None)   # forcible charge/discharge power resets
-                    self._applied.pop(47249, None)   # with the mode — re-send it too
+                    self._applied.pop(47247, None)   # forcible charge/discharge power and the
+                    self._applied.pop(47249, None)   # period reset with the mode — re-send them
+                    self._applied.pop(47083, None)
         for width, addr, val, desc in regs:
             if self._applied.get(addr) == val:
                 continue
@@ -815,7 +835,7 @@ class AutoController:
             worker.write_u32(47247, charge_w, f'AutoCtrl: forced charge power {charge_w} W')
             self._applied[47247] = charge_w
             self._apply(worker, [
-                (16, 47100, 1, 'AutoCtrl: force CHARGE'),
+                *self._forced(1, 'AutoCtrl: force CHARGE'),
             ])
             return f'charging {charge_w} W from surplus'
         self._apply(worker, [
@@ -1159,7 +1179,7 @@ class AutoController:
                     (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
                     (16, 47086, 1,              'AutoCtrl: mode=forced'),
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
-                    (16, 47100, 1,              'AutoCtrl: force CHARGE'),
+                    *self._forced(1, 'AutoCtrl: force CHARGE'),
                 ])
                 return _Cmd(mode='grid_charge', detail=(
                     f'Optimiser: charging {_GRID_CHARGE_W} W now at {import_dkk:.3f} DKK '
@@ -1232,7 +1252,7 @@ class AutoController:
                     (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
                     (16, 47086, 1,              'AutoCtrl: mode=forced'),
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
-                    (16, 47100, 1,              'AutoCtrl: force CHARGE'),
+                    *self._forced(1, 'AutoCtrl: force CHARGE'),
                 ])
                 detail = (f'Grid charging {_GRID_CHARGE_W} W to {target_soc:.0f}% — '
                           f'{shortfall_kwh:.1f} kWh deficit ahead priced over '
@@ -1334,7 +1354,7 @@ class AutoController:
                 self._apply(worker, [
                     (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
                     (16, 47086, 1, 'AutoCtrl: mode=forced'),
-                    (16, 47100, 2, 'AutoCtrl: force DISCHARGE'),
+                    *self._forced(2, 'AutoCtrl: force DISCHARGE'),
                 ])
                 detail = (f'Arb. discharge: export {export_dkk:.3f} DKK ≥ '
                           f'opportunity cost {opportunity_cost:.3f} DKK ×{1 + min_gain:.2f}, '
