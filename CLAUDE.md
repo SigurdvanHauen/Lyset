@@ -37,6 +37,8 @@ ModbusWorker (daemon thread)
 | `lyset/register_map.py` | Single source of truth for all Modbus registers. Every read references `REGISTERS: list[Register]`. |
 | `lyset/modbus_client.py` | `ModbusWorker(threading.Thread)` — polls the inverter, fires callbacks. Shared by both the GUI and the web server. |
 | `lyset/server.py` | FastAPI app: WebSocket push, REST endpoints, worker lifecycle. |
+| `lyset/auto_controller.py` | Battery/export controller; rule branches plus the optional optimiser (`OPTIMIZER_ENABLED`). |
+| `lyset/optimizer.py` | DP planner: cheapest SC/HOLD/CHARGE mode sequence over the forecast horizon, with a per-switch penalty. Used by the controller and the plan simulation. |
 | `lyset/static/index.html` | Single-file SPA (no build step). Chart.js 4.x from CDN. Four tabs: Dashboard, Charts, Control, Log. |
 
 ### ModbusWorker design

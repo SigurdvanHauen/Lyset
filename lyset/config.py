@@ -169,6 +169,18 @@ SCHEMA: list[dict] = [
              'Aug–Oct 2026 it cost about 29 DKK more per 55 days than leaving it off (in every month), '
              'and made ~5× more mode changes — each one a burst of commands to the SDongle. '
              'Takes effect immediately.'},
+            {'key': 'OPTIMIZER_ENABLED', 'label': 'Use the battery optimiser', 'type': 'bool',
+             'default': '0', 'help': 'Plan the cheapest charge / hold / self-consumption schedule '
+             'over the next 36 h from the solar, load and price forecasts, re-planned every 15 min, '
+             'instead of the fixed grid-charge and hold rules. It may charge from the grid even when '
+             '"Allow grid charging" is off. Replayed over Aug–Oct 2026 it saved about 30 DKK per 40 '
+             'days vs the rules. Negative-price handling and the EV lock still take precedence. '
+             'Takes effect immediately.'},
+            {'key': 'OPTIMIZER_SWITCH_PENALTY_DKK', 'label': 'Optimiser mode-change penalty (DKK)',
+             'type': 'number', 'default': '0.5', 'min': 0, 'max': 5,
+             'help': 'Cost the optimiser counts per mode change. Higher = fewer commands to the '
+             'SDongle, slightly smaller savings (replay: 0.2 → 3.1 changes/day, 0.5 → 1.7, '
+             '1.0 → 0.8). Takes effect from the next 15-min slot.'},
             {'key': 'ARBITRAGE_ENABLED', 'label': 'Allow discharge arbitrage', 'type': 'bool',
              'default': '1', 'help': 'Let the planner force-discharge the battery to the grid when '
              'the export price beats the cheapest upcoming import. Turn off to keep stored energy '

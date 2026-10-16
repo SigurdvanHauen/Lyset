@@ -84,6 +84,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Optional
 
+from . import optimizer
+
 try:
     from zoneinfo import ZoneInfo
     _TZ_LOCAL = ZoneInfo('Europe/Copenhagen')
@@ -91,6 +93,39 @@ except Exception:  # pragma: no cover — fallback if tz database is unavailable
     _TZ_LOCAL = None
 
 log = logging.getLogger(__name__)
+
+
+def optimizer_enabled() -> bool:
+    """Whether the DP optimiser (optimizer.py) decides charge/hold/self-consumption
+    instead of the grid-charge and hold rules. Default OFF. When on it may charge
+    from the grid regardless of GRID_CHARGE_ENABLED. Read live."""
+    return os.getenv('OPTIMIZER_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def optimizer_switch_penalty() -> float:
+    """DKK charged per mode change in the optimiser's objective — higher = fewer
+    commands to the SDongle, slightly less saving."""
+    try:
+        return max(0.0, float(os.getenv('OPTIMIZER_SWITCH_PENALTY_DKK', '0.5')))
+    except ValueError:
+        return 0.5
+
+
+OPTIMIZER_HORIZON_H = 36
+
+
+def optimizer_slots(start_ms: int, end_ms: int, solar_at: Callable, load_at: Callable,
+                    price_at: Callable) -> list[dict]:
+    """15-min planning slots [start_ms, end_ms) for optimizer.plan(), stopping at the
+    first slot without a price. Shared by the controller and the plan simulation."""
+    slots = []
+    for t in range(start_ms, end_ms, 900_000):
+        p = price_at(t)
+        if p is None:
+            break
+        slots.append({'ts': t, 'pv_w': solar_at(t), 'load_w': load_at(t), 'ev_w': 0.0,
+                      'import': p[0], 'export': p[1]})
+    return slots
 
 
 def grid_charge_enabled() -> bool:
@@ -398,6 +433,9 @@ class AutoController:
                                                        # episode; blocks re-charging at a
                                                        # dearer slot (reset by a PV surplus)
         self._export_curtailed: bool          = False  # zero-export hysteresis state
+        self._opt_slot: Optional[int]         = None   # slot start the optimiser last planned
+        self._opt_mode: int                   = optimizer.SC
+        self._opt_plan: list[int]             = []
         self._last_soc:       Optional[float] = None   # last real SoC read (37760
                                                        # drops out on ~10% of polls)
         self._last_soc_ts:    Optional[float] = None   # time.time() of that reading —
@@ -529,6 +567,29 @@ class AutoController:
             if best_d is None or d < best_d:
                 best_d, best = d, w
         return best
+
+    def _optimizer_mode(self, now_ms: int, batt_soc: float, prices: list, data: dict) -> int:
+        """Mode for the current 15-min slot from optimizer.plan(), re-planned once per
+        slot (prev mode = what we're doing now, so switches are penalised)."""
+        slot = now_ms // 900_000 * 900_000
+        if slot == self._opt_slot:
+            return self._opt_mode
+        def price_at(t):
+            best = None
+            for p in prices:
+                if p.get('ts') is not None and p['ts'] <= t and (best is None or p['ts'] > best['ts']):
+                    best = p
+            return (best['import'], best.get('export') or 0.0) if best else None
+        slots = optimizer_slots(slot, slot + OPTIMIZER_HORIZON_H * 3_600_000,
+                                lambda t: self._solar_at((t // 1_800_000 + 1) * 1_800_000),
+                                self._load_at, price_at)
+        cap = data.get('batt_rated_capacity') or 5.0
+        modes = optimizer.plan(batt_soc, self._opt_mode, slots, cap, optimizer_switch_penalty(),
+                               _PLAN_MIN_SOC, min(_GRID_CHARGE_W / 1000.0, cap * 0.5),
+                               _CHARGE_EFF, _DISCHARGE_EFF) if self._load_fc else []
+        self._opt_slot, self._opt_plan = slot, modes
+        self._opt_mode = modes[0] if modes else optimizer.SC
+        return self._opt_mode
 
     def _reserve_energy_kwh(self, from_ms: int, to_ms: int, export_now: float,
                             prices: list) -> float:
@@ -1048,6 +1109,37 @@ class AutoController:
                       f'(SoC {batt_soc:.0f}%, PV {pv_w:.0f} W, load {house_load:.0f} W)')
             return _Cmd(mode='export_limited', detail=detail)
 
+        # ── 2a. Optimiser (Settings → Auto controller) ────────────────────────
+        # Replaces the grid-charge and hold rules below with a DP plan over the
+        # forecast horizon (optimizer.py). Planned once per 15-min slot so the mode
+        # is stable within a slot; negative export (above) and the EV lock still win.
+        use_rules = not optimizer_enabled()
+        if not use_rules:
+            mode = self._optimizer_mode(now_ms, batt_soc, prices, data)
+            if mode == optimizer.CHARGE and not ev_lock_active and batt_soc < 100.0:
+                self._grid_charging = True
+                self._set_export_limit(worker, False, data)
+                self._apply(worker, [
+                    (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
+                    (16, 47086, 1,              'AutoCtrl: mode=forced'),
+                    (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
+                    (16, 47100, 1,              'AutoCtrl: force CHARGE'),
+                ])
+                return _Cmd(mode='grid_charge', detail=(
+                    f'Optimiser: charging {_GRID_CHARGE_W} W now at {import_dkk:.3f} DKK '
+                    f'(SoC {batt_soc:.0f}%) — cheapest plan over the forecast horizon'))
+            self._grid_charging = False
+            if mode == optimizer.HOLD:
+                self._set_export_limit(worker, False, data)
+                self._apply(worker, [
+                    (16, 47087, 0, 'AutoCtrl: grid charge OFF'),
+                    (16, 47086, 1, 'AutoCtrl: mode=forced'),
+                    (16, 47100, 0, 'AutoCtrl: force IDLE'),
+                ])
+                return _Cmd(mode='hold_battery', detail=(
+                    f'Optimiser: holding battery at {batt_soc:.0f}% (now {import_dkk:.3f} DKK) — '
+                    f'stored energy is worth more later'))
+
         # ── 2. Grid charge: bank cheap energy to cover a coming expensive deficit ──
         # Forward-simulate the pack over the charge horizon under self-consumption
         # (plan_grid_charge_shortfall). If the house would run the battery dry during
@@ -1059,7 +1151,9 @@ class AutoController:
         # self-consumption can't discharge it back out before the peak.
         charge_window = _window(_CHARGE_HORIZON_H)
         cap_kwh = data.get('batt_rated_capacity') or 5.0
-        if not grid_charge_enabled():
+        if not use_rules:
+            pass
+        elif not grid_charge_enabled():
             self._grid_charging = False
         elif charge_window and batt_soc < _GRID_CHARGE_TARGET_MAX and cap_kwh > 0:
             step   = 15 * 60 * 1000
@@ -1122,7 +1216,8 @@ class AutoController:
         # grid import and the battery is saved for the peak. Gated on a deficit —
         # during a surplus the battery should keep charging via self-consumption instead.
         hold_window = _window(_HOLD_HORIZON_H)
-        if (surplus_w < 0
+        if (use_rules
+                and surplus_w < 0
                 and hold_window
                 and import_dkk < _MAX_HOLD_IMPORT_DKK
                 and batt_soc > _MIN_SOC_HOLD):

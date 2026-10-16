@@ -41,11 +41,13 @@ from .modbus_client import ModbusWorker
 from .prices import PriceWorker, worker_from_env as prices_from_env
 from .solcast import SolcastWorker, worker_from_env as solcast_from_env
 from .consumption_model import ConsumptionModel, slot_average
+from . import optimizer
 from .solar_calibration import SolarCalibration
 from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .nas_backup import NasBackupWorker, worker_from_env as nas_backup_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain, battery_load_w, grid_charge_enabled,
+    optimizer_enabled, optimizer_switch_penalty, optimizer_slots,
     NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_W, GRID_CHARGE_TARGET_MAX, GRID_CHARGE_RESTART_GAP,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
@@ -196,6 +198,25 @@ def _price_at(prices_sorted: list[dict], ts_ms: int) -> float | None:
     return best.get('import') if best else None
 
 
+def _optimizer_plan_modes(start_soc, capacity_kwh, solar_fc, load_fc, prices_sorted, gc_state,
+                          min_soc, charge_eff, discharge_eff, cutoff_ms) -> dict:
+    """One optimiser plan over the simulation window → {slot ts_ms: mode}."""
+    solar_by_ts = {r['ts_ms']: r.get('pv_w') or 0.0 for r in solar_fc}
+    load_by_ts  = {r['ts_ms']: battery_load_w(r) for r in load_fc if r.get('w') is not None}
+    p_ts = [p['ts'] for p in prices_sorted]
+    def _price_pair(t):
+        i = bisect.bisect_right(p_ts, t) - 1
+        return (prices_sorted[i]['import'], prices_sorted[i].get('export') or 0.0) if i >= 0 else None
+    first = int((cutoff_ms // 900_000 + 1) * 900_000)
+    end   = max(r['ts_ms'] for r in solar_fc) + 1
+    slots = optimizer_slots(first, end, lambda t: solar_by_ts.get((t // 1_800_000 + 1) * 1_800_000, 0.0),
+                            lambda t: load_by_ts.get(t, 0.0), _price_pair)
+    modes = optimizer.plan(start_soc, optimizer.CHARGE if gc_state else optimizer.SC, slots,
+                           capacity_kwh, optimizer_switch_penalty(), min_soc,
+                           min(GRID_CHARGE_W / 1000.0, capacity_kwh * 0.5), charge_eff, discharge_eff)
+    return {sl['ts']: m for sl, m in zip(slots, modes)}
+
+
 def _simulate_soc(
     start_soc: float,
     capacity_kwh: float,
@@ -208,9 +229,13 @@ def _simulate_soc(
     charge_eff: float = 0.97,
     discharge_eff: float = 0.97,
     start_ms: int = None,
+    opt_modes: dict | None = None,
 ) -> list[dict]:
     """
     Simulate battery SoC, battery power, and grid power forward from start_ms.
+
+    opt_modes: {slot ts_ms: optimizer mode} to follow when the optimiser is on;
+               computed here when not given (see _optimizer_plan_modes).
 
     start_ms:  anchor timestamp (default: now). Pass a past timestamp to backfill.
     solar_fc:  [{ts_ms, pv_w}, ...]  — 30-min period_end UTC ms
@@ -260,6 +285,12 @@ def _simulate_soc(
 
     end_ms        = max(r['ts_ms'] for r in solar_fc)
     first_slot_ms = int((cutoff_ms // SLOT_MS + 1) * SLOT_MS)
+
+    # Optimiser on: plot ITS plan in place of the grid-charge/hold rules, so the chart
+    # shows what the controller will actually do.
+    if opt_modes is None and prices_sorted and optimizer_enabled():
+        opt_modes = _optimizer_plan_modes(start_soc, capacity_kwh, solar_fc, load_fc, prices_sorted,
+                                          gc_state, min_soc, charge_eff, discharge_eff, cutoff_ms)
 
     soc        = start_soc
     gc_active  = gc_state   # grid-charge commitment state across steps
@@ -327,7 +358,7 @@ def _simulate_soc(
                     gc_slots, soc, capacity_kwh, min_soc, import_dkk, CHARGE_MARGIN_DKK,
                     charge_eff, discharge_eff,
                 )
-                if (gc_enabled and shortfall_kwh > GRID_CHARGE_MIN_KWH
+                if (opt_modes is None and gc_enabled and shortfall_kwh > GRID_CHARGE_MIN_KWH
                         and soc < GRID_CHARGE_TARGET_MAX):
                     gc_target = min(GRID_CHARGE_TARGET_MAX,
                                     soc + shortfall_kwh / capacity_kwh * 100.0)
@@ -345,8 +376,14 @@ def _simulate_soc(
                     if do_gc:
                         gc_floor = import_dkk if gc_floor is None else min(gc_floor, import_dkk)
 
+                if opt_modes is not None:
+                    om = opt_modes.get(ts_ms, optimizer.SC)
+                    do_gc     = om == optimizer.CHARGE and soc < 100.0
+                    do_hold   = om == optimizer.HOLD
+                    gc_target = 100.0
+
                 # Hold: deficit now AND a significantly more expensive slot is coming soon
-                if not do_gc and net_kw < 0:
+                if opt_modes is None and not do_gc and net_kw < 0:
                     hold_end = ts_ms + HOLD_HORIZON_H * 3_600_000
                     h_win = [p for p in future_from_here if p['ts'] <= hold_end]
                     if (h_win
@@ -499,6 +536,16 @@ def _simulate_soc_with_bands(
     so that field simply contributes no width — the band still reflects whatever
     uncertainty the other input carries (solar dominates the daytime spread).
     """
+    # With the optimiser on, every run follows ONE plan (made on the mean forecast):
+    # the band then shows what solar/load uncertainty does to that schedule, instead of
+    # each envelope re-optimising and flipping modes slot by slot.
+    prices = kwargs.get('prices')
+    if prices and solar_fc and capacity_kwh > 0 and optimizer_enabled():
+        kwargs['opt_modes'] = _optimizer_plan_modes(
+            start_soc, capacity_kwh, solar_fc, load_fc, sorted(prices, key=lambda p: p['ts']),
+            kwargs.get('gc_state', False), kwargs.get('min_soc', 10.0),
+            kwargs.get('charge_eff', 0.97), kwargs.get('discharge_eff', 0.97),
+            kwargs.get('start_ms') or int(time.time() * 1000))
     base = _simulate_soc(start_soc, capacity_kwh, solar_fc, load_fc, **kwargs)
     if not base:
         return base
