@@ -113,6 +113,9 @@ def optimizer_switch_penalty() -> float:
 
 OPTIMIZER_HORIZON_H = 36
 
+# Control registers the poll reads back, for _apply's re-send-on-mismatch check.
+_READBACK_KEYS = {47086: 'batt_working_mode', 47087: 'grid_charge_enable', 47100: 'batt_forced_mode'}
+
 
 def optimizer_slots(start_ms: int, end_ms: int, solar_at: Callable, load_at: Callable,
                     price_at: Callable) -> list[dict]:
@@ -308,6 +311,11 @@ _EV_LOCK_SUSTAIN_TICKS  = 3     # ticks (45 s @ _EVAL_INTERVAL_S) the house-load
                                 # heuristic must hold before engaging/releasing the EV
                                 # lock — filters out short spikes (kettle, toaster) and
                                 # read glitches.
+_EV_LOCK_MIN_HOLD_S     = 300.0 # a lock state change sticks this long (= the cloud poll interval).
+                                # Without it the cloud signal (counter rose in the last ~5 min,
+                                # so it lags the car stopping) and the load check (low load →
+                                # release) disagreed and flipped the lock every 15 s — 289 times
+                                # in the log, each flip rewriting 47086/47100/47415.
 _EV_LOCK_RELEASE_FACTOR = 0.6   # release threshold = load threshold × this (hysteresis
                                 # so the lock doesn't chatter right at the edge).
 
@@ -450,6 +458,9 @@ class AutoController:
         self.ev_lock_reason:  str             = ''      # human-readable reason for the UI
         self._ev_load_streak_on:  int             = 0   # consecutive ticks load > threshold
         self._ev_load_streak_off: int             = 0   # consecutive ticks load < release threshold
+        self._ev_lock_changed_ts: float           = 0.0  # time.time() of the last lock state change
+        self._readback: dict                      = {}   # this tick's poll, for _apply's read-back check
+        self._applied_ts: dict[int, float]        = {}   # addr → time.time() it was last written
         self._ev_cloud_charging:  Optional[bool]  = None  # latest FusionSolar cross-check signal
 
     def set_command_callback(self, cb: Callable[[str, str, bool], None]):
@@ -500,6 +511,9 @@ class AutoController:
             self._ev_load_streak_off = 0
 
         cloud_charging = self._ev_cloud_charging
+        was_locked = self.ev_locked
+        if time.time() - self._ev_lock_changed_ts < _EV_LOCK_MIN_HOLD_S:
+            return self.ev_locked
 
         if not self.ev_locked:
             if self._ev_load_streak_on >= _EV_LOCK_SUSTAIN_TICKS:
@@ -516,6 +530,8 @@ class AutoController:
                 self.ev_locked = False
                 self.ev_lock_reason = ''
 
+        if self.ev_locked != was_locked:
+            self._ev_lock_changed_ts = time.time()
         return self.ev_locked
 
     def set_solar_forecast(self, fc: list[dict]):
@@ -664,6 +680,24 @@ class AutoController:
         command, clear the command before leaving forced mode) still hold.
         """
         for width, addr, val, desc in regs:
+            # Read-back check: the inverter can drop a forced command (reconnect,
+            # firmware restart) while our cache says it was sent — observed
+            # 2026-10-16: mode "charging", 47100 read back 0, battery idle. A
+            # mismatch forces a re-send (the worker's write guard caps it at once per
+            # 5 min). Only a poll taken after our last write can show a drop (polls
+            # ~46 s apart, ticks 15 s). Checked for every register before any write,
+            # so a mode mismatch can't clear a power setpoint sent earlier in this call.
+            rb_key = _READBACK_KEYS.get(addr)
+            rb = self._readback.get(rb_key) if rb_key else None
+            # +30 s: a poll already running when the write was queued ends after it
+            # but read the registers before the write went out.
+            fresh = (self._readback.get('_timestamp') or 0) > self._applied_ts.get(addr, 0.0) + 30.0
+            if rb is not None and fresh and int(round(rb)) != val:
+                self._applied.pop(addr, None)
+                if addr in (47086, 47100):
+                    self._applied.pop(47247, None)   # forcible charge/discharge power resets
+                    self._applied.pop(47249, None)   # with the mode — re-send it too
+        for width, addr, val, desc in regs:
             if self._applied.get(addr) == val:
                 continue
             if width == 32:
@@ -671,6 +705,7 @@ class AutoController:
             else:
                 worker.write_u16(addr, val, desc)
             self._applied[addr] = val
+            self._applied_ts[addr] = time.time()
 
     def _set_export_limit(self, worker, zero_export: bool, data: dict):
         """
@@ -969,6 +1004,7 @@ class AutoController:
             self._on_command(cmd.mode, cmd.detail, changed)
 
     def _decide(self, worker, prices: list, data: dict) -> Optional[_Cmd]:
+        self._readback = data
         now_ms = int(time.time() * 1000)
 
         cur_price = None
