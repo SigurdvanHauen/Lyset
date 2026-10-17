@@ -1411,7 +1411,8 @@ class AutoController:
             return _Cmd(mode='ev_locked', detail=detail)
         self._set_export_limit(worker, True, data)        # mode 5: zero export limitation
         self._set_self_consumption(worker, data)
-        detail = (f'Self-consumption: zero-export, battery covers load (mode 2 + APC 5) '
+        who = 'battery covers load' if batt_soc > 6.0 else 'battery empty, grid covers load'
+        detail = (f'Self-consumption: zero-export, {who} (mode 2 + APC 5) '
                   f'(PV {pv_w:.0f} W, load {house_load:.0f} W, '
                   f'deficit {surplus_w:+.0f} W, SoC {batt_soc:.1f}%)')
         return _Cmd(mode='sc_discharge', detail=detail)

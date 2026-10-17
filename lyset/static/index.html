@@ -3916,23 +3916,48 @@ function updateYieldBar() {
 
 const _MODE_TEXT = {
   grid_charge:      'Charging the battery from the grid while power is cheap',
-  sc_discharge:     'Battery is powering the house',
-  export_unlimited: 'Running on solar — surplus is sold to the grid',
   export_limited:   'Export paused (price below zero) — solar goes to the battery',
   hold_battery:     'Saving the battery for a pricier hour — house runs on the grid',
   arbit_discharge:  'Selling stored energy while the price is high',
   ev_locked:        'EV is charging — the grid feeds the car, battery is protected',
 };
 
+// What the battery is actually doing, from the live readings. Self-consumption is one
+// controller mode whether the battery is discharging, charging from solar or empty, so
+// the status line has to look at the battery, not just the mode.
+function _battState() {
+  const f = _flowData || {};
+  const b = f.batt_power, soc = f.batt_soc;
+  if (b == null) return null;
+  if (b > 50) return 'charging';
+  if (b < -50) return 'discharging';
+  if (soc != null && soc <= 6) return 'empty';
+  if (soc != null && soc >= 99) return 'full';
+  return 'idle';
+}
+
+const _SC_TEXT = {
+  discharging: 'Battery is powering the house',
+  charging:    'Charging the battery from solar',
+  empty:       'Battery is empty — the house runs on the grid',
+  full:        'Battery is full',
+  idle:        'Battery is idle — the house runs on the grid',
+};
+
 function renderStatus() {
   const title = document.getElementById('d-status-title');
   const dot   = document.getElementById('d-status-dot');
   if (!title) return;
+  const st = _battState();
   if (!_autoEnabled) {
-    const b = _flowData ? _flowData.batt_power : null;
     title.textContent = 'Auto mode is off — ' +
-      (b == null ? 'the inverter runs on its own settings'
-       : b > 30 ? 'battery is charging' : b < -30 ? 'battery is powering the house' : 'battery is idle');
+      (st ? _SC_TEXT[st].charAt(0).toLowerCase() + _SC_TEXT[st].slice(1) : 'the inverter runs on its own settings');
+  } else if (_lastAutoMode === 'sc_discharge' || _lastAutoMode === 'export_unlimited') {
+    const exporting = _flowData && _flowData.meter_active_power < -100;
+    title.textContent = (st ? _SC_TEXT[st] : 'Self-consumption') +
+      (exporting ? ' — solar surplus is sold to the grid' : '');
+  } else if (_lastAutoMode === 'grid_charge' && st && st !== 'charging') {
+    title.textContent = 'Grid charging commanded — the battery is not charging yet';
   } else {
     title.textContent = _MODE_TEXT[_lastAutoMode] || 'Auto mode is on';
   }
