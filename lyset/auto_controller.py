@@ -1029,7 +1029,7 @@ class AutoController:
 
         export_dkk = cur_price.get('export') or 0.0
         import_dkk = cur_price.get('import') or 0.0
-        pv_w       = (data.get('pv1_power') or 0) + (data.get('pv2_power') or 0)
+        pv_w       = data.get('pv_power') or 0.0
         # house_load is validated and hold-filled at the read layer (sanitize.py):
         # negative skew samples are dropped and a fresh last-good value is
         # substituted. If it is STILL absent (no good reading for 90 s), skip the

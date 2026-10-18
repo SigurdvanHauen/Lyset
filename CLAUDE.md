@@ -60,4 +60,4 @@ Registers are batched by contiguous address range (MAX_GAP=10, MAX_BATCH=100). B
 
 `Register` fields: `address`, `count` (number of 16-bit words), `data_type` (`U16`/`I16`/`U32`/`I32`/`STR`), `gain` (divide raw by gain for engineering value), `unit`, `description`, `group`, `key` (snake_case, used as the dict key in data payloads).
 
-Computed keys added by `_poll()` (not in the register map): `pv1_power`, `pv2_power`, `house_load`, `inverter_state_label`, `batt_status_label`.
+Computed keys added by `_poll()` (not in the register map): `pv1_power`, `pv2_power`, `pv_power` (total PV, from 32064 — the per-string registers often time out over Wi-Fi), `house_load`, `inverter_state_label`, `batt_status_label`.

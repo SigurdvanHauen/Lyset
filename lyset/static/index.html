@@ -1154,7 +1154,7 @@ const COMPUTED_STATES = [
 ];
 
 function computeState(d) {
-  const pv   = (d.pv1_power  ?? 0) + (d.pv2_power ?? 0);
+  const pv   = d.pv_power ?? ((d.pv1_power ?? 0) + (d.pv2_power ?? 0));
   const inv  = d.active_power       ?? 0;
   const grid = d.meter_active_power ?? 0;  // + = importing, - = exporting
   const batt = d.batt_power         ?? 0;  // + = charging, - = discharging
@@ -3887,10 +3887,10 @@ function _setFlow(id, watts, towardsPos) {
 function renderFlow(d) {
   if (d) _flowData = d;
   const f = _flowData || {};
-  // Solar = DC panel output. active_power is the inverter's AC output, which also
-  // carries battery discharge — at night it would show "solar" with no sun.
-  const pv = (f.pv1_power != null || f.pv2_power != null)
-    ? (f.pv1_power || 0) + (f.pv2_power || 0) : f.active_power;
+  // Solar = total PV input (pv_power, computed by the worker from 32064, which
+  // answers reliably; the per-string registers often time out over Wi-Fi).
+  const pv = f.pv_power ?? ((f.pv1_power != null || f.pv2_power != null)
+    ? (f.pv1_power || 0) + (f.pv2_power || 0) : null);
   setCard('d-pv', pv, 0);
   _setFlow('fl-pv', pv, true);                                   // sun → house
   const g = f.meter_active_power;

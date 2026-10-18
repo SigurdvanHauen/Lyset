@@ -46,7 +46,9 @@ REGISTERS: list[Register] = [
     Register(32019,  1, 'I16',  100,  'A',   'PV2 current',              'PV',      'pv2_current'),
 
     # ── Grid / output ────────────────────────────────────────────────────────
-    Register(32064,  2, 'I32',  1,    'W',   'Active power',             'Output',  'active_power'),
+    # 32064 is the inverter's DC INPUT power (total PV) — ~0 W at night even while the
+    # battery discharges. The key name 'active_power' is historical; it's used everywhere.
+    Register(32064,  2, 'I32',  1,    'W',   'Input power (total PV)',   'Output',  'active_power'),
     Register(32066,  2, 'I32',  1,    'var', 'Reactive power',           'Output',  'reactive_power'),
     Register(32068,  1, 'I16',  1000, 'PF',  'Power factor',             'Output',  'power_factor'),
     Register(32069,  1, 'U16',  10,   'V',   'Grid A-phase voltage',     'Grid',    'grid_voltage_a'),

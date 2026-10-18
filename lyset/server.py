@@ -2284,7 +2284,7 @@ async def api_ha_snapshot():
 
     pv_w = None
     if _last_data:
-        pv_w = (_last_data.get('pv1_power') or 0) + (_last_data.get('pv2_power') or 0)
+        pv_w = _last_data.get('pv_power')
 
     # Full-day arrays for ApexCharts data_generator (local calendar day)
     today_start = datetime.now(_TZ_LOCAL).replace(hour=0, minute=0, second=0, microsecond=0)

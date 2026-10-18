@@ -299,10 +299,11 @@ class ModbusWorker(threading.Thread):
             if 'meter_active_power' in data:
                 data['meter_active_power'] = -data['meter_active_power']
 
-            # In sleep mode (37000 = 4, battery at its SoC floor) the battery stops
-            # answering 37001 entirely. It is genuinely idle, so 0 W is the true value
-            # — leaving it absent blanked house_load and froze the controller overnight.
-            if 'batt_power' not in data and data.get('batt_status') == 4:
+            # In sleep mode (37000 = 4, battery at its SoC floor) the battery is
+            # genuinely idle, so 0 W is the true value. 37001 then either doesn't
+            # answer or (since the Wi-Fi dongle, 2026-10-17) returns an out-of-range
+            # value the sanitizer drops — either way house_load went blank all night.
+            if data.get('batt_status') == 4:
                 data['batt_power'] = 0.0
 
             # house_load = solar_out + grid_import - battery_charge. All three
@@ -322,6 +323,17 @@ class ModbusWorker(threading.Thread):
             # garbage status code can't be presented as a real state. See
             # sanitize.py for the policy and the incidents behind it.
             data = self._sanitizer.apply(data)
+
+            # Total PV for the controller and dashboard. 32064 ('active_power') is the
+            # inverter's DC input power — ~0 W at night even while the battery
+            # discharges, which the house_load balance above relies on — and its batch
+            # answers reliably. The per-string registers (32016-32019) time out on
+            # about every other poll over Wi-Fi, which made PV read 0 W and flapped the
+            # controller between surplus and deficit 100+ times a day.
+            if 'active_power' in data:
+                data['pv_power'] = max(0.0, data['active_power'])
+            elif 'pv1_power' in data or 'pv2_power' in data:
+                data['pv_power'] = round(data.get('pv1_power', 0.0) + data.get('pv2_power', 0.0), 1)
 
             if 'inverter_state' in data:
                 code = int(data['inverter_state'])
