@@ -114,6 +114,13 @@ def optimizer_switch_penalty() -> float:
 OPTIMIZER_HORIZON_H = 36
 
 # Control registers the poll reads back, for _apply's re-send-on-mismatch check.
+# 47087 'charge from grid' is switched ON for a forced GRID charge: since the
+# 2026-10-16 firmware a sleeping battery ignores a forced charge at night (5.5 h at
+# 0 W on 2026-10-21) while the same command charged at 2500 W in daylight, when PV
+# keeps the battery awake. Grid-charge cut-off SoC (47088) reads 100 %, so this
+# doesn't cap the charge; every non-charging branch writes it back to 0.
+_GRID_CHARGE_ON = 'AutoCtrl: charge from grid ON (wakes a sleeping battery)'
+
 _READBACK_KEYS = {47086: 'batt_working_mode', 47087: 'grid_charge_enable', 47100: 'batt_forced_mode'}
 
 
@@ -316,6 +323,11 @@ _FORCED_PERIOD_MIN      = 30    # duration sent with every forced charge/dischar
                                 # update had 47083=0, so each 'force CHARGE' was accepted and ended
                                 # at once. Renewed every 15-min slot while forcing; if Lyset stops,
                                 # the inverter falls back by itself within 30 min.
+FULL_SOC                = 99.0  # at/above this an optimiser CHARGE is executed as HOLD: its
+                                # physics can't add energy to a full pack, so CHARGE there
+                                # means "keep it full". Run as a real charge it alternated
+                                # charge / self-consumption every slot (2026-10-21: 6 flips in
+                                # 20 min at 99-100 %) — and drew the same zig-zag in the plan.
 _EV_LOCK_MIN_HOLD_S     = 300.0 # a lock state change sticks this long (= the cloud poll interval).
                                 # Without it the cloud signal (counter rose in the last ~5 min,
                                 # so it lags the car stopping) and the load check (low load →
@@ -529,7 +541,10 @@ class AutoController:
                 self.ev_locked = True
                 self.ev_lock_reason = 'FusionSolar reports EV charger active'
         else:
-            if cloud_charging is False:
+            # The cloud's "not charging" lags a session start by up to 5 min, so it
+            # must not release the lock while the load is still EV-sized (2026-10-21:
+            # released at 11 kW and the battery discharged 2.4 kW into the car).
+            if cloud_charging is False and house_load <= threshold:
                 self.ev_locked = False
                 self.ev_lock_reason = ''
             elif self._ev_load_streak_off >= _EV_LOCK_SUSTAIN_TICKS:
@@ -1166,11 +1181,13 @@ class AutoController:
         use_rules = not optimizer_enabled()
         if not use_rules:
             mode = self._optimizer_mode(now_ms, batt_soc, prices, data)
-            if mode == optimizer.CHARGE and not ev_lock_active and batt_soc < 100.0:
+            if mode == optimizer.CHARGE and batt_soc >= FULL_SOC:
+                mode = optimizer.HOLD
+            if mode == optimizer.CHARGE and not ev_lock_active:
                 self._grid_charging = True
                 self._set_export_limit(worker, False, data)
                 self._apply(worker, [
-                    (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
+                    (16, 47087, 1,              _GRID_CHARGE_ON),
                     (16, 47086, 1,              'AutoCtrl: mode=forced'),
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
                     *self._forced(1, 'AutoCtrl: force CHARGE'),
@@ -1243,7 +1260,7 @@ class AutoController:
                                         else min(self._gc_floor_price, import_dkk))
                 self._set_export_limit(worker, False, data)   # grid used freely
                 self._apply(worker, [
-                    (16, 47087, 0,              'AutoCtrl: grid charge feature OFF'),
+                    (16, 47087, 1,              _GRID_CHARGE_ON),
                     (16, 47086, 1,              'AutoCtrl: mode=forced'),
                     (32, 47247, _GRID_CHARGE_W, f'AutoCtrl: forced charge power {_GRID_CHARGE_W} W'),
                     *self._forced(1, 'AutoCtrl: force CHARGE'),
@@ -1378,7 +1395,10 @@ class AutoController:
         # switch sides after the new side has won _SC_DEBOUNCE_TICKS consecutive
         # ticks; a held surplus branch is safe during a real deficit because the
         # meter-fed charge sizing goes negative and idles the battery.
-        want_surplus = surplus_w > 100 and pv_w > _MIN_PV_W
+        # ±100 W hysteresis band: with PV ≈ load the sign flipped every few minutes
+        # (12 times in an hour on 2026-10-21), each flip rewriting the export limit.
+        band = -100 if self._sc_surplus else 100
+        want_surplus = surplus_w > band and pv_w > _MIN_PV_W
         if want_surplus != self._sc_surplus:
             self._sc_streak += 1
             if self._sc_streak >= _SC_DEBOUNCE_TICKS:

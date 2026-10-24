@@ -47,7 +47,7 @@ from .ev_charger import EVChargerWorker, worker_from_env as ev_charger_from_env
 from .nas_backup import NasBackupWorker, worker_from_env as nas_backup_from_env
 from .auto_controller import (
     AutoController, arbitrage_enabled, arbitrage_min_gain, battery_load_w, grid_charge_enabled,
-    optimizer_enabled, optimizer_switch_penalty, optimizer_slots,
+    optimizer_enabled, optimizer_switch_penalty, optimizer_slots, FULL_SOC,
     NEGATIVE_EXPORT_DKK, EXPORT_RESUME_DKK, CHEAP_IMPORT_DKK,
     GRID_CHARGE_W, GRID_CHARGE_TARGET_MAX, GRID_CHARGE_RESTART_GAP,
     FORCE_CHARGE_SOC_MAX, MAX_FORCE_CHARGE_W,
@@ -378,8 +378,9 @@ def _simulate_soc(
 
                 if opt_modes is not None:
                     om = opt_modes.get(ts_ms, optimizer.SC)
-                    do_gc     = om == optimizer.CHARGE and soc < 100.0
-                    do_hold   = om == optimizer.HOLD
+                    # Mirrors the controller: CHARGE at a full pack is executed as HOLD.
+                    do_gc     = om == optimizer.CHARGE and soc < FULL_SOC
+                    do_hold   = om == optimizer.HOLD or (om == optimizer.CHARGE and soc >= FULL_SOC)
                     gc_target = 100.0
 
                 # Hold: deficit now AND a significantly more expensive slot is coming soon
